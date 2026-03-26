@@ -12,6 +12,7 @@ describe("buildNotionProperties", () => {
     datePosted: "2025-03-01",
     dateScraped: "2025-03-26",
     description: "Full job description here...",
+    location: "Remote (Global)",
   };
 
   test("maps all fields correctly", () => {
@@ -30,6 +31,9 @@ describe("buildNotionProperties", () => {
     });
     expect(props["Date Scraped"]).toEqual({ date: { start: "2025-03-26" } });
     expect(props["Date Posted"]).toEqual({ date: { start: "2025-03-01" } });
+    expect(props.Location).toEqual({
+      rich_text: [{ text: { content: "Remote (Global)" } }],
+    });
     expect(props.Status).toEqual({ select: { name: "To Review" } });
   });
 

@@ -108,5 +108,6 @@ describe("parseJobDetails", () => {
     expect(job.datePosted).toBe("2025-03-01");
     expect(job.dateScraped).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(job.description).toBe(md);
+    expect(job.location).toBe("");
   });
 });

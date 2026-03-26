@@ -84,6 +84,13 @@ export function buildNotionProperties(job: JobListing) {
           },
         }
       : {}),
+    ...(job.location
+      ? {
+          Location: {
+            rich_text: [{ text: { content: job.location } }],
+          },
+        }
+      : {}),
     Status: {
       select: { name: "To Review" },
     },

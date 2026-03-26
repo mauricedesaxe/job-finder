@@ -7,6 +7,7 @@ export interface JobListing {
   datePosted: string | null;
   dateScraped: string;
   description: string;
+  location: string;
 }
 
 export interface ScrapioConfig {

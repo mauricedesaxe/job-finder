@@ -7,7 +7,7 @@ import {
   checkRecentApplication,
   insertJob,
 } from "./notion";
-import { evaluateJob } from "./evaluate";
+import { evaluateJob, enrichJob } from "./evaluate";
 
 function validateConfig() {
   const missing: string[] = [];
@@ -79,6 +79,13 @@ async function main() {
             stats.rejected++;
             continue;
           }
+
+          // Enrich job data with LLM normalization
+          const enriched = await enrichJob(job, config.anthropicApiKey);
+          job.title = enriched.title;
+          job.company = enriched.company;
+          job.description = enriched.description;
+          job.location = enriched.location;
 
           // Check for recent application from same company
           const recency = await checkRecentApplication(
