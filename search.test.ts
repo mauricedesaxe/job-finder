@@ -1,46 +1,26 @@
 import { test, expect, describe } from "bun:test";
-import { buildSearchQuery, buildJinaUrl, extractJobUrls } from "./search";
+import { buildSearchQuery, filterJobUrls } from "./search";
 
 describe("buildSearchQuery", () => {
-  test("builds basic query for page 0", () => {
-    const url = buildSearchQuery("defi", "jobs.ashbyhq.com", 0);
-    expect(url).toContain("q=site%3Ajobs.ashbyhq.com+defi");
-    expect(url).toContain("num=10");
-    expect(url).not.toContain("start=");
-  });
-
-  test("includes start param for page > 0", () => {
-    const url = buildSearchQuery("solana", "jobs.lever.co", 2);
-    expect(url).toContain("start=20");
+  test("builds site-scoped query", () => {
+    const query = buildSearchQuery("defi", "jobs.ashbyhq.com");
+    expect(query).toBe("site:jobs.ashbyhq.com defi");
   });
 
   test("handles multi-word keywords", () => {
-    const url = buildSearchQuery("typescript backend", "boards.greenhouse.io");
-    expect(url).toContain("q=site%3Aboards.greenhouse.io+typescript+backend");
+    const query = buildSearchQuery("typescript backend", "boards.greenhouse.io");
+    expect(query).toBe("site:boards.greenhouse.io typescript backend");
   });
 });
 
-describe("buildJinaUrl", () => {
-  test("wraps target URL with Jina prefix", () => {
-    const result = buildJinaUrl(
-      "https://www.google.com/search?q=test",
-      "https://r.jina.ai",
-    );
-    expect(result).toBe(
-      "https://r.jina.ai/https://www.google.com/search?q=test",
-    );
-  });
-});
-
-describe("extractJobUrls", () => {
-  test("extracts matching URLs from markdown", () => {
-    const markdown = `
-# Search Results
-- [Software Engineer](https://jobs.ashbyhq.com/acme/12345)
-- [Product Manager](https://jobs.ashbyhq.com/acme/67890)
-- [Other link](https://example.com/not-a-job)
-    `;
-    const urls = extractJobUrls(markdown, "jobs.ashbyhq.com");
+describe("filterJobUrls", () => {
+  test("extracts matching URLs from results", () => {
+    const results = [
+      { title: "Job 1", url: "https://jobs.ashbyhq.com/acme/12345", description: "" },
+      { title: "Job 2", url: "https://jobs.ashbyhq.com/acme/67890", description: "" },
+      { title: "Other", url: "https://example.com/not-a-job", description: "" },
+    ];
+    const urls = filterJobUrls(results, "jobs.ashbyhq.com");
     expect(urls).toEqual([
       "https://jobs.ashbyhq.com/acme/12345",
       "https://jobs.ashbyhq.com/acme/67890",
@@ -48,24 +28,27 @@ describe("extractJobUrls", () => {
   });
 
   test("deduplicates URLs", () => {
-    const markdown = `
-[Job 1](https://jobs.lever.co/company/abc)
-[Job 1 again](https://jobs.lever.co/company/abc)
-    `;
-    const urls = extractJobUrls(markdown, "jobs.lever.co");
+    const results = [
+      { title: "Job 1", url: "https://jobs.lever.co/company/abc", description: "" },
+      { title: "Job 1 again", url: "https://jobs.lever.co/company/abc", description: "" },
+    ];
+    const urls = filterJobUrls(results, "jobs.lever.co");
     expect(urls).toHaveLength(1);
   });
 
   test("strips trailing punctuation", () => {
-    const markdown =
-      "Check out https://boards.greenhouse.io/company/jobs/123.";
-    const urls = extractJobUrls(markdown, "boards.greenhouse.io");
+    const results = [
+      { title: "Job", url: "https://boards.greenhouse.io/company/jobs/123.", description: "" },
+    ];
+    const urls = filterJobUrls(results, "boards.greenhouse.io");
     expect(urls).toEqual(["https://boards.greenhouse.io/company/jobs/123"]);
   });
 
   test("returns empty array when no matches", () => {
-    const markdown = "No job listings found for this query.";
-    const urls = extractJobUrls(markdown, "jobs.ashbyhq.com");
+    const results = [
+      { title: "Unrelated", url: "https://example.com/other", description: "" },
+    ];
+    const urls = filterJobUrls(results, "jobs.ashbyhq.com");
     expect(urls).toEqual([]);
   });
 });
