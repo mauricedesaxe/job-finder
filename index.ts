@@ -122,4 +122,7 @@ async function main() {
   console.log(`Errored:  ${stats.errored}`);
 }
 
-main();
+main().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
