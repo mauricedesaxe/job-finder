@@ -51,16 +51,16 @@ describe("buildNotionProperties", () => {
 });
 
 describe("descriptionToBlocks", () => {
-  test("returns single block for short description", () => {
-    const blocks = descriptionToBlocks("Short description");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("paragraph");
-    expect(blocks[0].paragraph.rich_text[0].text.content).toBe(
-      "Short description",
-    );
+  test("splits paragraphs into separate blocks", () => {
+    const desc = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
+    const blocks = descriptionToBlocks(desc);
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].paragraph.rich_text[0].text.content).toBe("First paragraph.");
+    expect(blocks[1].paragraph.rich_text[0].text.content).toBe("Second paragraph.");
+    expect(blocks[2].paragraph.rich_text[0].text.content).toBe("Third paragraph.");
   });
 
-  test("chunks long descriptions into 2000-char blocks", () => {
+  test("chunks oversized paragraphs at 2000 chars", () => {
     const longText = "x".repeat(4500);
     const blocks = descriptionToBlocks(longText);
     expect(blocks).toHaveLength(3);
@@ -72,5 +72,11 @@ describe("descriptionToBlocks", () => {
   test("returns empty array for empty description", () => {
     const blocks = descriptionToBlocks("");
     expect(blocks).toHaveLength(0);
+  });
+
+  test("strips blank paragraphs", () => {
+    const desc = "First.\n\n\n\n\nSecond.";
+    const blocks = descriptionToBlocks(desc);
+    expect(blocks).toHaveLength(2);
   });
 });

@@ -32,7 +32,7 @@ const ENRICH_PROMPT = `You normalize and clean up job listing data for a persona
 Given raw scraped job data, return cleaned and normalized versions of each field:
 - **title**: Just the job title, no company name, location, or other suffixes
 - **company**: Proper company name with correct capitalization and spacing (e.g. "Monad Foundation" not "monad.foundation", "Paxos Labs" not "PaxosLabs")
-- **description**: A clean, concise summary of the role. Include: what the role does, key responsibilities, required skills/experience, tech stack, and notable perks or compensation if mentioned. Strip navigation elements, boilerplate, legal disclaimers, and repeated company marketing. Should be readable in 30 seconds.
+- **description**: A clean, well-formatted summary of the role using markdown. Structure it with sections like "## Overview", "## Responsibilities", "## Requirements", "## Tech Stack", "## Compensation" (only include sections that have content). Use bullet points for lists. Strip navigation elements, boilerplate, legal disclaimers, and repeated company marketing. Should be readable in 30 seconds.
 - **location**: Normalized location (e.g. "Remote (Global)", "Remote (US/EU)", "Remote (Europe)", "New York, NY", "London, UK"). If unclear, say "Not specified".`;
 
 const ENRICH_TOOL: Anthropic.Messages.Tool = {
