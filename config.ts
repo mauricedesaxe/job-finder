@@ -24,4 +24,5 @@ export const config: ScrapioConfig = {
   delayBetweenRequests: 500,
   maxResultsPerQuery: 10,
   maxPages: 3,
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
 };

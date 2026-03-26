@@ -7,12 +7,14 @@ import {
   checkRecentApplication,
   insertJob,
 } from "./notion";
+import { evaluateJob } from "./evaluate";
 
 function validateConfig() {
   const missing: string[] = [];
   if (!config.notionToken) missing.push("NOTION_TOKEN");
   if (!config.notionDatabaseId) missing.push("NOTION_DATABASE_ID");
   if (!config.jinaApiKey) missing.push("JINA_API_KEY");
+  if (!config.anthropicApiKey) missing.push("ANTHROPIC_API_KEY");
 
   if (missing.length > 0) {
     console.error(`Missing env vars: ${missing.join(", ")}`);
@@ -25,7 +27,7 @@ async function main() {
   validateConfig();
 
   const notion = createNotionClient(config.notionToken);
-  const stats = { inserted: 0, skipped: 0, flagged: 0, errored: 0 };
+  const stats = { inserted: 0, skipped: 0, flagged: 0, rejected: 0, errored: 0 };
   const seenUrls = new Set<string>();
 
   console.log(
@@ -70,6 +72,14 @@ async function main() {
           const markdown = await scrapeJobPage(url, config);
           const job = parseJobDetails(markdown, url, keyword);
 
+          // LLM evaluation — reject jobs that don't match requirements
+          const evaluation = await evaluateJob(job, config.anthropicApiKey);
+          if (!evaluation.pass) {
+            console.log(`  ✗ Rejected: ${job.title} @ ${job.company} — ${evaluation.reason}`);
+            stats.rejected++;
+            continue;
+          }
+
           // Check for recent application from same company
           const recency = await checkRecentApplication(
             notion,
@@ -99,6 +109,7 @@ async function main() {
   console.log("\n--- Summary ---");
   console.log(`Inserted: ${stats.inserted}`);
   console.log(`Flagged:  ${stats.flagged}`);
+  console.log(`Rejected: ${stats.rejected}`);
   console.log(`Skipped:  ${stats.skipped}`);
   console.log(`Errored:  ${stats.errored}`);
 }

@@ -19,4 +19,5 @@ export interface ScrapioConfig {
   delayBetweenRequests: number;
   maxResultsPerQuery: number;
   maxPages: number;
+  anthropicApiKey: string;
 }
