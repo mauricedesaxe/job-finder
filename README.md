@@ -2,6 +2,11 @@
 
 Automated job search and enrichment pipeline for crypto/web3 engineering positions. Searches job boards (Ashby, Lever, Greenhouse), evaluates listings with Claude, and stores qualified jobs in Notion.
 
+After scraping, a reconciliation pass runs automatically to keep flag status consistent across the Notion database:
+
+1. **Unflag stale**: Jobs marked "Flagged" are set back to "To Review" if the company's most recent application is older than 6 months.
+2. **Propagate flags**: If any job from a company is "Flagged", all other "To Review" jobs from that company are flagged too — catches cases where an Application Date was added manually but only one job was updated.
+
 ## Local Setup
 
 ```bash
