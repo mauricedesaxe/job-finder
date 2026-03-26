@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { JobListing } from "./types";
+import { getClient } from "./anthropic";
 
 export interface JobEvaluation {
   pass: boolean;
@@ -80,15 +81,6 @@ const EVALUATE_TOOL: Anthropic.Messages.Tool = {
     required: ["pass", "reason"],
   },
 };
-
-let client: Anthropic | null = null;
-
-function getClient(apiKey: string): Anthropic {
-  if (!client) {
-    client = new Anthropic({ apiKey });
-  }
-  return client;
-}
 
 export async function evaluateJob(
   job: JobListing,
