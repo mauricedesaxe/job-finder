@@ -10,7 +10,7 @@ import {
   queryJobsByStatus,
   queryJobsByStatusAndCompany,
   updateJobStatus,
-} from "./notion";
+} from "./src/services/notion";
 import { evaluateJob } from "./evaluate";
 import { enrichJob } from "./enrich";
 

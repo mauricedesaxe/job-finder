@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { JobListing } from "./types";
-import { getClient } from "./anthropic";
+import { getClient } from "./src/services/anthropic";
 
 export interface JobEnrichment {
   title: string;
