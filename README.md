@@ -6,6 +6,7 @@ After scraping, a reconciliation pass runs automatically to keep flag status con
 
 1. **Unflag stale**: Jobs marked "Flagged" are set back to "To Review" if the company's most recent application is older than 6 months.
 2. **Propagate flags**: If any job from a company is "Flagged", all other "To Review" jobs from that company are flagged too — catches cases where an Application Date was added manually but only one job was updated.
+3. **Flag applied companies**: If any job from a company has a recent Application Date (within 6 months), all "To Review" jobs from that company are flagged.
 
 ## Local Setup
 

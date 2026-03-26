@@ -6,6 +6,7 @@ import {
   checkDuplicateUrl,
   checkRecentApplication,
   insertJob,
+  queryAppliedCompanies,
   queryJobsByStatus,
   queryJobsByStatusAndCompany,
   updateJobStatus,
@@ -154,6 +155,25 @@ async function main() {
     );
     if (unflaggedJobs.length > 0) {
       console.log(`  Flagging ${unflaggedJobs.length} job(s) from "${company}"`);
+      for (const job of unflaggedJobs) {
+        await updateJobStatus(notion, job.id, "Flagged");
+        stats.propagated++;
+      }
+    }
+  }
+
+  // Pass 3: Flag jobs from companies with recent applications
+  const appliedCompanies = await queryAppliedCompanies(notion, config.notionDatabaseId);
+
+  for (const company of appliedCompanies) {
+    const unflaggedJobs = await queryJobsByStatusAndCompany(
+      notion,
+      config.notionDatabaseId,
+      "To Review",
+      company,
+    );
+    if (unflaggedJobs.length > 0) {
+      console.log(`  Flagging ${unflaggedJobs.length} job(s) from "${company}" (recent application)`);
       for (const job of unflaggedJobs) {
         await updateJobStatus(notion, job.id, "Flagged");
         stats.propagated++;

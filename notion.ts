@@ -141,6 +141,42 @@ export function descriptionToBlocks(description: string) {
   return blocks;
 }
 
+export async function queryAppliedCompanies(
+  client: Client,
+  databaseId: string,
+): Promise<Set<string>> {
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+  const companies = new Set<string>();
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: "Application Date",
+        date: { on_or_after: sixMonthsAgo.toISOString().split("T")[0] },
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const companyProp = page.properties.Company;
+      const company =
+        companyProp?.type === "rich_text"
+          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          : "";
+      if (company) companies.add(company);
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return companies;
+}
+
 export async function queryJobsByStatus(
   client: Client,
   databaseId: string,
