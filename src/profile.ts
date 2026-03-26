@@ -20,7 +20,15 @@ export const SEARCH_DOMAINS = [
   "boards.greenhouse.io",
 ];
 
-export const EVALUATION_PROMPT = `You evaluate job listings for a senior/lead fullstack TypeScript developer focused on crypto/web3, based in Europe.
+export interface EvaluationProfile {
+  name: string;
+  prompt: string;
+}
+
+export const EVALUATION_PROFILES: EvaluationProfile[] = [
+  {
+    name: "crypto-web3",
+    prompt: `You evaluate job listings for a senior/lead fullstack TypeScript developer focused on crypto/web3, based in Europe.
 
 A job PASSES if ALL of these are true:
 1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
@@ -32,4 +40,6 @@ A job FAILS if ANY of these are true:
 - Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
-- Completely unrelated tech stack with no TypeScript/JavaScript involvement`;
+- Completely unrelated tech stack with no TypeScript/JavaScript involvement`,
+  },
+];

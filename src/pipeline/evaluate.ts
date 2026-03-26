@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { JobListing } from "../types";
 import { getClient } from "../services/anthropic";
-import { EVALUATION_PROMPT } from "../profile";
+import { EVALUATION_PROFILES } from "../profile";
 
 export interface JobEvaluation {
   pass: boolean;
@@ -41,20 +41,30 @@ URL: ${job.url}
 Description:
 ${job.description}`;
 
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 256,
-    system: EVALUATION_PROMPT,
-    messages: [{ role: "user", content: userMessage }],
-    tools: [EVALUATE_TOOL],
-    tool_choice: { type: "tool", name: "evaluate_job" },
-  });
+  let lastRejection: JobEvaluation = { pass: false, reason: "No profiles configured" };
 
-  const toolBlock = response.content.find((block) => block.type === "tool_use");
-  if (!toolBlock || toolBlock.type !== "tool_use") {
-    throw new Error(`Evaluation failed: no tool_use block in response`);
+  for (const profile of EVALUATION_PROFILES) {
+    const response = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 256,
+      system: profile.prompt,
+      messages: [{ role: "user", content: userMessage }],
+      tools: [EVALUATE_TOOL],
+      tool_choice: { type: "tool", name: "evaluate_job" },
+    });
+
+    const toolBlock = response.content.find((block) => block.type === "tool_use");
+    if (!toolBlock || toolBlock.type !== "tool_use") {
+      throw new Error(`Evaluation failed: no tool_use block in response`);
+    }
+    const input = toolBlock.input as JobEvaluation;
+
+    if (input.pass) {
+      return { pass: true, reason: input.reason };
+    }
+
+    lastRejection = { pass: false, reason: input.reason };
   }
-  const input = toolBlock.input as JobEvaluation;
 
-  return { pass: input.pass, reason: input.reason };
+  return lastRejection;
 }
