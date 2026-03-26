@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "scrape": "bun index.ts",
+    "reconcile": "bun reconcile.ts",
     "test": "bun test"
   },
   "devDependencies": {

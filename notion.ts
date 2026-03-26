@@ -141,6 +141,84 @@ export function descriptionToBlocks(description: string) {
   return blocks;
 }
 
+export async function queryJobsByStatus(
+  client: Client,
+  databaseId: string,
+  status: string,
+): Promise<Array<{ id: string; company: string }>> {
+  const results: Array<{ id: string; company: string }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: "Status",
+        select: { equals: status },
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const companyProp = page.properties.Company;
+      const company =
+        companyProp?.type === "rich_text"
+          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          : "";
+      results.push({ id: page.id, company });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
+export async function queryJobsByStatusAndCompany(
+  client: Client,
+  databaseId: string,
+  status: string,
+  company: string,
+): Promise<Array<{ id: string }>> {
+  const results: Array<{ id: string }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        and: [
+          { property: "Status", select: { equals: status } },
+          { property: "Company", rich_text: { equals: company } },
+        ],
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      results.push({ id: page.id });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
+export async function updateJobStatus(
+  client: Client,
+  pageId: string,
+  status: string,
+): Promise<void> {
+  await client.pages.update({
+    page_id: pageId,
+    properties: {
+      Status: { select: { name: status } },
+    },
+  });
+}
+
 export async function insertJob(
   client: Client,
   databaseId: string,
