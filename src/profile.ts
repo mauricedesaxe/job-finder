@@ -55,7 +55,9 @@ A job FAILS if ANY of these are true:
 - Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
-- Completely unrelated tech stack with no TypeScript/JavaScript involvement`,
+- Completely unrelated tech stack with no TypeScript/JavaScript involvement
+- MEV extraction or arbitrage bot development
+- HFT or ultra-low-latency systems requiring C++/C`,
   },
   {
     name: "engineering-lead-manager",
@@ -69,7 +71,9 @@ A job FAILS if ANY of these are true:
 - Explicitly restricted to US/Asia timezones only with no European overlap
 - Pure IC role with no leadership component
 - Pure people management with no technical involvement
-- Non-engineering role`,
+- Non-engineering role
+- HFT, MEV extraction, or arbitrage bot development
+- Primarily C++/C/low-level systems with no TypeScript/Node.js involvement`,
   },
   {
     name: "fintech-trading-infra",
@@ -77,12 +81,15 @@ A job FAILS if ANY of these are true:
 A job PASSES if ALL of these are true:
 1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
 2. The role is senior level or doesn't specify level.
-3. The role involves real-time data pipelines, market data systems, trading platforms, or financial backend infrastructure. TypeScript, Node.js, Go, or Rust stack preferred.
+3. The role involves application-layer trading infrastructure: real-time data pipelines, market data systems, trading platforms, or financial backend services. TypeScript, Node.js, Go, or Rust stack preferred. NOT raw latency optimization or hardware-level performance work.
 A job FAILS if ANY of these are true:
 - Explicitly requires on-site presence
 - Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role
-- Generic CRUD/SaaS backend with no real-time or financial data component`,
+- Generic CRUD/SaaS backend with no real-time or financial data component
+- HFT (high-frequency trading) or ultra-low-latency systems requiring C++/C
+- MEV extraction or arbitrage bot development
+- Primarily C++, C, or low-level systems programming — must involve TypeScript, Node.js, Go, or Rust`,
   },
 ];
