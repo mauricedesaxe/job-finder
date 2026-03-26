@@ -114,7 +114,10 @@ ${job.description}`;
   });
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
-  const input = toolBlock!.input as JobEvaluation;
+  if (!toolBlock || toolBlock.type !== "tool_use") {
+    throw new Error(`Evaluation failed: no tool_use block in response`);
+  }
+  const input = toolBlock.input as JobEvaluation;
 
   return { pass: input.pass, reason: input.reason };
 }
@@ -143,7 +146,10 @@ ${job.description}`;
   });
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
-  const input = toolBlock!.input as JobEnrichment;
+  if (!toolBlock || toolBlock.type !== "tool_use") {
+    throw new Error(`Enrichment failed: no tool_use block in response`);
+  }
+  const input = toolBlock.input as JobEnrichment;
 
   return input;
 }
