@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { buildNotionProperties, descriptionToBlocks } from "../notion";
-import type { JobListing } from "../../../types";
+import type { JobListing } from "../../types";
 
 describe("buildNotionProperties", () => {
   const job: JobListing = {

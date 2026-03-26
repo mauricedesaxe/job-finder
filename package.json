@@ -3,7 +3,7 @@
   "module": "index.ts",
   "type": "module",
   "scripts": {
-    "scrape": "bun index.ts",
+    "scrape": "bun src/index.ts",
     "test": "bun test"
   },
   "devDependencies": {
