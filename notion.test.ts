@@ -11,6 +11,7 @@ describe("buildNotionProperties", () => {
     keywordsMatched: ["defi", "solana"],
     datePosted: "2025-03-01",
     dateScraped: "2025-03-26",
+    description: "Full job description here...",
   };
 
   test("maps all fields correctly", () => {

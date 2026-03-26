@@ -90,6 +90,21 @@ export function buildNotionProperties(job: JobListing) {
   };
 }
 
+function descriptionToBlocks(description: string) {
+  // Notion limits rich_text content to 2000 chars per block
+  const chunks: string[] = [];
+  for (let i = 0; i < description.length; i += 2000) {
+    chunks.push(description.slice(i, i + 2000));
+  }
+  return chunks.map((chunk) => ({
+    object: "block" as const,
+    type: "paragraph" as const,
+    paragraph: {
+      rich_text: [{ type: "text" as const, text: { content: chunk } }],
+    },
+  }));
+}
+
 export async function insertJob(
   client: Client,
   databaseId: string,
@@ -101,9 +116,14 @@ export async function insertJob(
     properties.Status = { select: { name: "Flagged" } };
   }
 
+  const children = job.description
+    ? descriptionToBlocks(job.description)
+    : [];
+
   const response = await client.pages.create({
     parent: { database_id: databaseId },
     properties: properties as any,
+    children: children as any,
   });
 
   return response.id;

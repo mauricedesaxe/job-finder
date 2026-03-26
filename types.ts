@@ -6,6 +6,7 @@ export interface JobListing {
   keywordsMatched: string[];
   datePosted: string | null;
   dateScraped: string;
+  description: string;
 }
 
 export interface ScrapioConfig {
