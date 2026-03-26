@@ -2,10 +2,18 @@
   "name": "scrapio",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "scrape": "bun src/index.ts",
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@notionhq/client": "2"
   }
 }

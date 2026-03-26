@@ -1,0 +1,8 @@
+node_modules
+.git
+.env
+.env.*
+*.test.ts
+coverage
+.DS_Store
+.idea
