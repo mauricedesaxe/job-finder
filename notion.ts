@@ -97,7 +97,7 @@ export function buildNotionProperties(job: JobListing) {
   };
 }
 
-function descriptionToBlocks(description: string) {
+export function descriptionToBlocks(description: string) {
   // Notion limits rich_text content to 2000 chars per block
   const chunks: string[] = [];
   for (let i = 0; i < description.length; i += 2000) {

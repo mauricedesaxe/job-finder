@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildNotionProperties } from "./notion";
+import { buildNotionProperties, descriptionToBlocks } from "./notion";
 import type { JobListing } from "./types";
 
 describe("buildNotionProperties", () => {
@@ -41,5 +41,36 @@ describe("buildNotionProperties", () => {
     const jobNoDate = { ...job, datePosted: null };
     const props = buildNotionProperties(jobNoDate);
     expect(props["Date Posted"]).toBeUndefined();
+  });
+
+  test("omits Location when empty", () => {
+    const jobNoLocation = { ...job, location: "" };
+    const props = buildNotionProperties(jobNoLocation);
+    expect(props.Location).toBeUndefined();
+  });
+});
+
+describe("descriptionToBlocks", () => {
+  test("returns single block for short description", () => {
+    const blocks = descriptionToBlocks("Short description");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("paragraph");
+    expect(blocks[0].paragraph.rich_text[0].text.content).toBe(
+      "Short description",
+    );
+  });
+
+  test("chunks long descriptions into 2000-char blocks", () => {
+    const longText = "x".repeat(4500);
+    const blocks = descriptionToBlocks(longText);
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].paragraph.rich_text[0].text.content).toHaveLength(2000);
+    expect(blocks[1].paragraph.rich_text[0].text.content).toHaveLength(2000);
+    expect(blocks[2].paragraph.rich_text[0].text.content).toHaveLength(500);
+  });
+
+  test("returns empty array for empty description", () => {
+    const blocks = descriptionToBlocks("");
+    expect(blocks).toHaveLength(0);
   });
 });
