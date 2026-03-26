@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 
-const mod = await import("./enrich");
+const mod = await import("../enrich");
 
 describe("enrich module exports", () => {
   test("exports enrichJob function", () => {

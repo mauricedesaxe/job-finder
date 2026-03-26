@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildSearchQuery, filterJobUrls } from "./search";
+import { buildSearchQuery, filterJobUrls } from "../search";
 
 describe("buildSearchQuery", () => {
   test("builds site-scoped query", () => {

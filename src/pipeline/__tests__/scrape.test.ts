@@ -5,7 +5,7 @@ import {
   extractTitle,
   extractDatePosted,
   parseJobDetails,
-} from "./scrape";
+} from "../scrape";
 
 describe("extractCompanyFromUrl", () => {
   test("extracts from Ashby URL", () => {

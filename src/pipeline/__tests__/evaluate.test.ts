@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 
-const mod = await import("./evaluate");
+const mod = await import("../evaluate");
 
 describe("evaluate module exports", () => {
   test("exports evaluateJob function", () => {

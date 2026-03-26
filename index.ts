@@ -1,6 +1,6 @@
 import { config } from "./config";
-import { searchJobs } from "./search";
-import { scrapeJobPage, parseJobDetails } from "./scrape";
+import { searchJobs } from "./src/pipeline/search";
+import { scrapeJobPage, parseJobDetails } from "./src/pipeline/scrape";
 import {
   createNotionClient,
   checkDuplicateUrl,
@@ -11,8 +11,8 @@ import {
   queryJobsByStatusAndCompany,
   updateJobStatus,
 } from "./src/services/notion";
-import { evaluateJob } from "./evaluate";
-import { enrichJob } from "./enrich";
+import { evaluateJob } from "./src/pipeline/evaluate";
+import { enrichJob } from "./src/pipeline/enrich";
 
 function validateConfig() {
   const missing: string[] = [];
