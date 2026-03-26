@@ -7,7 +7,8 @@ import {
   checkRecentApplication,
   insertJob,
 } from "./notion";
-import { evaluateJob, enrichJob } from "./evaluate";
+import { evaluateJob } from "./evaluate";
+import { enrichJob } from "./enrich";
 
 function validateConfig() {
   const missing: string[] = [];
