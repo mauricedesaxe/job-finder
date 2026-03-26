@@ -18,10 +18,26 @@ A job FAILS if ANY of these are true:
 - Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
-- Completely unrelated tech stack with no TypeScript/JavaScript involvement
+- Completely unrelated tech stack with no TypeScript/JavaScript involvement`;
 
-Respond with ONLY valid JSON, no markdown:
-{"pass": true/false, "reason": "brief explanation"}`;
+const EVALUATE_TOOL: Anthropic.Messages.Tool = {
+  name: "evaluate_job",
+  description: "Submit the evaluation result for a job listing",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      pass: {
+        type: "boolean",
+        description: "Whether the job passes all criteria",
+      },
+      reason: {
+        type: "string",
+        description: "Brief explanation for the decision",
+      },
+    },
+    required: ["pass", "reason"],
+  },
+};
 
 let client: Anthropic | null = null;
 
@@ -51,15 +67,12 @@ ${job.description}`;
     max_tokens: 256,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],
+    tools: [EVALUATE_TOOL],
+    tool_choice: { type: "tool", name: "evaluate_job" },
   });
 
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "";
+  const toolBlock = response.content.find((block) => block.type === "tool_use");
+  const input = toolBlock!.input as JobEvaluation;
 
-  try {
-    return JSON.parse(text) as JobEvaluation;
-  } catch {
-    // If parsing fails, assume pass to avoid losing valid jobs
-    return { pass: true, reason: "Could not parse LLM response, defaulting to pass" };
-  }
+  return { pass: input.pass, reason: input.reason };
 }
