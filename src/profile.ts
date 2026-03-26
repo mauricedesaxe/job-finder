@@ -1,0 +1,35 @@
+export const SEARCH_KEYWORDS = [
+  "senior backend engineer crypto",
+  "senior fullstack engineer web3",
+  "senior typescript engineer blockchain",
+  "lead backend engineer defi",
+  "senior software engineer defi",
+  "senior software engineer web3",
+  "typescript engineer crypto",
+  "node.js engineer blockchain",
+  "protocol engineer",
+  "senior engineer solana",
+  "senior engineer ethereum",
+  "fullstack engineer defi",
+  "backend engineer blockchain infrastructure",
+];
+
+export const SEARCH_DOMAINS = [
+  "jobs.ashbyhq.com",
+  "jobs.lever.co",
+  "boards.greenhouse.io",
+];
+
+export const EVALUATION_PROMPT = `You evaluate job listings for a senior/lead fullstack TypeScript developer focused on crypto/web3, based in Europe.
+
+A job PASSES if ALL of these are true:
+1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
+2. The role is senior or lead level (or doesn't specify level, which is acceptable).
+3. The role is relevant: software engineering involving TypeScript, Node.js, fullstack, or backend. Crypto/web3/blockchain context preferred but general senior TS roles at crypto companies also pass.
+
+A job FAILS if ANY of these are true:
+- Explicitly requires on-site presence
+- Explicitly restricted to US/Asia timezones only with no European overlap
+- Junior or internship level
+- Non-engineering role (marketing, design, sales, HR, etc.)
+- Completely unrelated tech stack with no TypeScript/JavaScript involvement`;
