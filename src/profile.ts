@@ -12,6 +12,21 @@ export const SEARCH_KEYWORDS = [
   "senior engineer ethereum",
   "fullstack engineer defi",
   "backend engineer blockchain infrastructure",
+
+  // Engineering lead/manager
+  "engineering manager crypto",
+  "engineering manager web3",
+  "engineering manager fintech",
+  "tech lead fintech",
+  "staff engineer crypto",
+  "staff engineer web3",
+
+  // Fintech trading infra
+  "backend engineer trading platform",
+  "backend engineer market data",
+  "senior engineer fintech",
+  "real-time systems engineer fintech",
+  "backend engineer quantitative finance",
 ];
 
 export const SEARCH_DOMAINS = [
@@ -41,5 +56,33 @@ A job FAILS if ANY of these are true:
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
 - Completely unrelated tech stack with no TypeScript/JavaScript involvement`,
+  },
+  {
+    name: "engineering-lead-manager",
+    prompt: `You evaluate job listings for an engineering lead or manager with a strong technical background in TypeScript/Node.js and crypto/fintech, based in Europe.
+A job PASSES if ALL of these are true:
+1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
+2. The role is lead, staff, principal, or engineering manager level.
+3. The role involves leading/managing engineers - roadmap ownership, hiring, or technical direction. Hands-on coding still expected.
+A job FAILS if ANY of these are true:
+- Explicitly requires on-site presence
+- Explicitly restricted to US/Asia timezones only with no European overlap
+- Pure IC role with no leadership component
+- Pure people management with no technical involvement
+- Non-engineering role`,
+  },
+  {
+    name: "fintech-trading-infra",
+    prompt: `You evaluate job listings for a senior backend engineer specializing in real-time trading systems and financial data infrastructure, based in Europe.
+A job PASSES if ALL of these are true:
+1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
+2. The role is senior level or doesn't specify level.
+3. The role involves real-time data pipelines, market data systems, trading platforms, or financial backend infrastructure. TypeScript, Node.js, Go, or Rust stack preferred.
+A job FAILS if ANY of these are true:
+- Explicitly requires on-site presence
+- Explicitly restricted to US/Asia timezones only with no European overlap
+- Junior or internship level
+- Non-engineering role
+- Generic CRUD/SaaS backend with no real-time or financial data component`,
   },
 ];
