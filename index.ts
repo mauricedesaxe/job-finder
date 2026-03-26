@@ -6,6 +6,9 @@ import {
   checkDuplicateUrl,
   checkRecentApplication,
   insertJob,
+  queryJobsByStatus,
+  queryJobsByStatusAndCompany,
+  updateJobStatus,
 } from "./notion";
 import { evaluateJob } from "./evaluate";
 import { enrichJob } from "./enrich";
@@ -28,7 +31,7 @@ async function main() {
   validateConfig();
 
   const notion = createNotionClient(config.notionToken);
-  const stats = { inserted: 0, skipped: 0, flagged: 0, rejected: 0, errored: 0 };
+  const stats = { inserted: 0, skipped: 0, flagged: 0, rejected: 0, errored: 0, unflagged: 0, propagated: 0 };
   const seenUrls = new Set<string>();
 
   console.log(
@@ -114,12 +117,58 @@ async function main() {
     }
   }
 
+  // Reconcile flags across existing jobs
+  console.log("\n--- Reconciling flags ---\n");
+
+  // Pass 1: Unflag stale flags
+  const flaggedJobs = await queryJobsByStatus(notion, config.notionDatabaseId, "Flagged");
+  const flaggedCompanies = new Map<string, string[]>();
+
+  for (const job of flaggedJobs) {
+    const ids = flaggedCompanies.get(job.company) ?? [];
+    ids.push(job.id);
+    flaggedCompanies.set(job.company, ids);
+  }
+
+  for (const [company, pageIds] of flaggedCompanies) {
+    const recency = await checkRecentApplication(notion, config.notionDatabaseId, company);
+    if (!recency.exists) {
+      console.log(`  Unflagging ${pageIds.length} job(s) from "${company}" (no recent application)`);
+      for (const id of pageIds) {
+        await updateJobStatus(notion, id, "To Review");
+        stats.unflagged++;
+      }
+    }
+  }
+
+  // Pass 2: Propagate missing flags
+  const stillFlagged = await queryJobsByStatus(notion, config.notionDatabaseId, "Flagged");
+  const stillFlaggedCompanies = new Set(stillFlagged.map((j) => j.company));
+
+  for (const company of stillFlaggedCompanies) {
+    const unflaggedJobs = await queryJobsByStatusAndCompany(
+      notion,
+      config.notionDatabaseId,
+      "To Review",
+      company,
+    );
+    if (unflaggedJobs.length > 0) {
+      console.log(`  Flagging ${unflaggedJobs.length} job(s) from "${company}"`);
+      for (const job of unflaggedJobs) {
+        await updateJobStatus(notion, job.id, "Flagged");
+        stats.propagated++;
+      }
+    }
+  }
+
   console.log("\n--- Summary ---");
-  console.log(`Inserted: ${stats.inserted}`);
-  console.log(`Flagged:  ${stats.flagged}`);
-  console.log(`Rejected: ${stats.rejected}`);
-  console.log(`Skipped:  ${stats.skipped}`);
-  console.log(`Errored:  ${stats.errored}`);
+  console.log(`Inserted:   ${stats.inserted}`);
+  console.log(`Flagged:    ${stats.flagged}`);
+  console.log(`Rejected:   ${stats.rejected}`);
+  console.log(`Skipped:    ${stats.skipped}`);
+  console.log(`Errored:    ${stats.errored}`);
+  console.log(`Unflagged:  ${stats.unflagged}`);
+  console.log(`Propagated: ${stats.propagated}`);
 }
 
 main().catch((err) => {
