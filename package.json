@@ -2,10 +2,17 @@
   "name": "scrapio",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "scrape": "bun index.ts",
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@notionhq/client": "^5.15.0"
   }
 }
