@@ -44,6 +44,10 @@ describe("detectSource", () => {
     expect(detectSource("https://boards.greenhouse.io/co/jobs/1")).toBe("greenhouse");
   });
 
+  test("detects workable", () => {
+    expect(detectSource("https://apply.workable.com/mlabs/j/C07B32BD46")).toBe("workable");
+  });
+
   test("returns other for unknown domain", () => {
     expect(detectSource("https://example.com/jobs/1")).toBe("other");
   });
