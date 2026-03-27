@@ -21,7 +21,12 @@ export const SEARCH_KEYWORDS = [
   "backend engineer quantitative finance",
 ];
 
-export const SEARCH_DOMAINS = ["jobs.ashbyhq.com", "jobs.lever.co", "boards.greenhouse.io"];
+export const SEARCH_DOMAINS = [
+  "jobs.ashbyhq.com",
+  "jobs.lever.co",
+  "boards.greenhouse.io",
+  "apply.workable.com",
+];
 
 export interface EvaluationProfile {
   name: string;
