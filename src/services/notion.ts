@@ -259,12 +259,10 @@ export async function insertJob(
   client: Client,
   databaseId: string,
   job: JobListing,
-  flagged: boolean = false,
+  status: JobStatus = "To Review",
 ): Promise<string> {
   const properties = buildNotionProperties(job);
-  if (flagged) {
-    properties.Status = { select: { name: "Flagged" } };
-  }
+  properties.Status = { select: { name: status } };
 
   const children = job.description
     ? descriptionToBlocks(job.description)

@@ -98,12 +98,12 @@ async function main() {
 
           if (recency.exists) {
             console.log(
-              `  ⚠ Flagged (recent application): ${job.title} @ ${job.company}`,
+              `  ⚠ Company Applied: ${job.title} @ ${job.company}`,
             );
-            await insertJob(notion, config.notionDatabaseId, job, true);
+            await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
             stats.flagged++;
           } else {
-            await insertJob(notion, config.notionDatabaseId, job, false);
+            await insertJob(notion, config.notionDatabaseId, job);
             console.log(`  ✓ Inserted: ${job.title} @ ${job.company}`);
             stats.inserted++;
           }
