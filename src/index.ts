@@ -1,19 +1,16 @@
 import { config } from "./config";
 import { searchJobs } from "./pipeline/search";
-import { scrapeJobPage, parseJobDetails } from "./pipeline/scrape";
-import {
-  createNotionClient,
-  checkDuplicateUrl,
-  checkRecentApplication,
-  queryCompanyBlocked,
-  queryJobsByCompany,
-  insertJob,
-} from "./services/notion";
-import { checkFuzzyDuplicate } from "./pipeline/dedup";
+import { createNotionClient } from "./services/notion";
+import { buildNotionCache } from "./services/notionCache";
+import { processUrl, type ProcessResult } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
-import { evaluateJob } from "./pipeline/evaluate";
-import { enrichJob } from "./pipeline/enrich";
 import { runPreflight } from "./preflight";
+import {
+  jinaSearchSemaphore,
+  jinaBreaker,
+  withRetry,
+  isRetryableJina,
+} from "./concurrency";
 
 function validateConfig() {
   const missing: string[] = [];
@@ -35,122 +32,90 @@ async function main() {
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
-  const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, duplicated: 0, errored: 0 };
-  const seenUrls = new Set<string>();
-
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
 
+  // Pre-cache Notion data to avoid per-URL queries
+  console.log("\nBuilding Notion cache...");
+  const cache = await buildNotionCache(notion, config.notionDatabaseId);
   console.log(
-    `Starting scrape: ${config.keywords.length} keywords × ${config.domains.length} domains (up to ${config.maxPages} pages each)\n`,
+    `  Cached: ${cache.existingUrls.size} URLs, ${cache.blockedCompanies.size} blocked companies, ` +
+    `${cache.recentAppCompanies.size} recent app companies, ${cache.jobsByCompany.size} companies with jobs`,
   );
 
-  for (const keyword of config.keywords) {
-    for (const domain of config.domains) {
-      console.log(`\n🔍 Searching: site:${domain} ${keyword}`);
+  // Phase 1: Parallel search — collect all URLs
+  const searchPairs = config.keywords.flatMap((keyword) =>
+    config.domains.map((domain) => ({ keyword, domain })),
+  );
 
-      let jobUrls: string[];
-      try {
-        jobUrls = await searchJobs(keyword, domain, config);
-      } catch (err) {
-        console.error(`  ✗ Search failed: ${err}`);
-        stats.errored++;
-        continue;
-      }
+  console.log(
+    `\nPhase 1: Searching ${searchPairs.length} keyword×domain pairs (concurrency: 5)...\n`,
+  );
 
-      console.log(`  Found ${jobUrls.length} URLs`);
+  const urlMap = new Map<string, string>(); // url → keyword
 
-      for (const url of jobUrls) {
-        // Skip URLs already processed in this run
-        if (seenUrls.has(url)) continue;
-        seenUrls.add(url);
+  const searchResults = await Promise.allSettled(
+    searchPairs.map(({ keyword, domain }) =>
+      jinaSearchSemaphore.run(async () => {
+        const urls = await jinaBreaker.run(() =>
+          withRetry(() => searchJobs(keyword, domain, config), {
+            shouldRetry: isRetryableJina,
+            onRetry: (a) => console.log(`  ⏳ Search retry ${a}: site:${domain} ${keyword}`),
+          }),
+        );
+        console.log(`  🔍 site:${domain} ${keyword} → ${urls.length} URLs`);
+        return { keyword, urls };
+      }),
+    ),
+  );
 
-        try {
-          // Check Notion for duplicate URL
-          const isDuplicate = await checkDuplicateUrl(
-            notion,
-            config.notionDatabaseId,
-            url,
-          );
-          if (isDuplicate) {
-            console.log(`  ⏭ Skipped (exists): ${url}`);
-            stats.skipped++;
-            continue;
-          }
-
-          // Scrape and parse the job page
-          await Bun.sleep(config.delayBetweenRequests);
-          const markdown = await scrapeJobPage(url, config);
-          const job = parseJobDetails(markdown, url, keyword);
-
-          // LLM evaluation
-          const evaluation = await evaluateJob(job, config.anthropicApiKey);
-          if (!evaluation.pass) {
-            console.log(`  ✗ Rejected: ${job.title} @ ${job.company} — ${evaluation.reason}`);
-            await insertJob(notion, config.notionDatabaseId, job, "Rejected");
-            stats.rejected++;
-            continue;
-          }
-
-          // Enrich job data with LLM normalization
-          const enriched = await enrichJob(job, config.anthropicApiKey);
-          job.title = enriched.title;
-          job.company = enriched.company;
-          job.description = enriched.description;
-          job.location = enriched.location;
-
-          // Fuzzy dedup: check for same role at same company
-          const existingJobs = await queryJobsByCompany(
-            notion,
-            config.notionDatabaseId,
-            job.company,
-          );
-          if (existingJobs.length > 0) {
-            const dedup = await checkFuzzyDuplicate(
-              job.title,
-              existingJobs.map((j) => j.title),
-              config.anthropicApiKey,
-            );
-            if (dedup.isDuplicate) {
-              console.log(`  ⏭ Duplicate: ${job.title} @ ${job.company} — matches "${dedup.matchedTitle}"`);
-              stats.duplicated++;
-              continue;
-            }
-          }
-
-          // Determine status based on company state
-          const isBlocked = await queryCompanyBlocked(
-            notion,
-            config.notionDatabaseId,
-            job.company,
-          );
-
-          if (isBlocked) {
-            console.log(`  ✗ Archived (company blocked): ${job.title} @ ${job.company}`);
-            await insertJob(notion, config.notionDatabaseId, job, "Archived");
-            stats.archived++;
-            continue;
-          }
-
-          const recency = await checkRecentApplication(
-            notion,
-            config.notionDatabaseId,
-            job.company,
-          );
-
-          if (recency.exists) {
-            console.log(`  ⚠ Company Applied: ${job.title} @ ${job.company}`);
-            await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
-            stats.companyApplied++;
-          } else {
-            await insertJob(notion, config.notionDatabaseId, job);
-            console.log(`  ✓ Inserted: ${job.title} @ ${job.company}`);
-            stats.inserted++;
-          }
-        } catch (err) {
-          console.error(`  ✗ Failed: ${url} — ${err}`);
-          stats.errored++;
+  let searchErrors = 0;
+  for (const result of searchResults) {
+    if (result.status === "fulfilled") {
+      for (const url of result.value.urls) {
+        if (!urlMap.has(url)) {
+          urlMap.set(url, result.value.keyword);
         }
       }
+    } else {
+      console.error(`  ✗ Search failed: ${result.reason}`);
+      searchErrors++;
+    }
+  }
+
+  console.log(`\nSearch complete: ${urlMap.size} unique URLs found (${searchErrors} search errors)`);
+
+  // Phase 2: Parallel URL processing
+  const seenUrls = new Set<string>();
+
+  console.log(
+    `\nPhase 2: Processing ${urlMap.size} URLs (Jina: 8, Anthropic: 10, Notion: 3 req/s)...\n`,
+  );
+
+  const processResults = await Promise.allSettled(
+    Array.from(urlMap.entries()).map(([url, keyword]) =>
+      processUrl(url, keyword, { notion, config, cache, seenUrls }),
+    ),
+  );
+
+  // Aggregate stats
+  const stats = {
+    inserted: 0,
+    skipped: 0,
+    companyApplied: 0,
+    rejected: 0,
+    archived: 0,
+    duplicated: 0,
+    errored: 0,
+  };
+
+  for (const result of processResults) {
+    if (result.status === "fulfilled") {
+      const key = result.value as ProcessResult;
+      if (key === "companyApplied") stats.companyApplied++;
+      else if (key in stats) stats[key as keyof typeof stats]++;
+    } else {
+      console.error(`  ✗ Process failed: ${result.reason}`);
+      stats.errored++;
     }
   }
 
