@@ -27,8 +27,9 @@ const EVALUATE_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export async function evaluateJob(
+export async function evaluateSingleProfile(
   job: JobListing,
+  profile: EvaluationProfile,
   apiKey: string,
 ): Promise<JobEvaluation> {
   const anthropic = getClient(apiKey);
@@ -41,29 +42,41 @@ URL: ${job.url}
 Description:
 ${job.description}`;
 
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 256,
+    system: profile.prompt,
+    messages: [{ role: "user", content: userMessage }],
+    tools: [EVALUATE_TOOL],
+    tool_choice: { type: "tool", name: "evaluate_job" },
+  });
+
+  const toolBlock = response.content.find((block) => block.type === "tool_use");
+  if (!toolBlock || toolBlock.type !== "tool_use") {
+    throw new Error(`Evaluation failed: no tool_use block in response`);
+  }
+  return toolBlock.input as JobEvaluation;
+}
+
+export async function evaluateJob(
+  job: JobListing,
+  apiKey: string,
+): Promise<JobEvaluation> {
+  const results = await Promise.allSettled(
+    EVALUATION_PROFILES.map((profile) =>
+      evaluateSingleProfile(job, profile, apiKey),
+    ),
+  );
+
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles configured" };
 
-  for (const profile of EVALUATION_PROFILES) {
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 256,
-      system: profile.prompt,
-      messages: [{ role: "user", content: userMessage }],
-      tools: [EVALUATE_TOOL],
-      tool_choice: { type: "tool", name: "evaluate_job" },
-    });
-
-    const toolBlock = response.content.find((block) => block.type === "tool_use");
-    if (!toolBlock || toolBlock.type !== "tool_use") {
-      throw new Error(`Evaluation failed: no tool_use block in response`);
+  for (const result of results) {
+    if (result.status === "fulfilled" && result.value.pass) {
+      return { pass: true, reason: result.value.reason };
     }
-    const input = toolBlock.input as JobEvaluation;
-
-    if (input.pass) {
-      return { pass: true, reason: input.reason };
+    if (result.status === "fulfilled") {
+      lastRejection = { pass: false, reason: result.value.reason };
     }
-
-    lastRejection = { pass: false, reason: input.reason };
   }
 
   return lastRejection;
