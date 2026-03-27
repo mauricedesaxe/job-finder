@@ -7,9 +7,14 @@ export interface NotionCache {
   jobsByCompany: Map<string, string[]>;
 }
 
+export interface BuildCacheOptions {
+  onProgress?: (itemsFetched: number) => void;
+}
+
 export async function buildNotionCache(
   client: Client,
   databaseId: string,
+  options: BuildCacheOptions = {},
 ): Promise<NotionCache> {
   const existingUrls = new Set<string>();
   const blockedCompanies = new Set<string>();
@@ -19,7 +24,7 @@ export async function buildNotionCache(
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
-  // Fetch all pages in one paginated pass, extract everything we need
+  let itemsFetched = 0;
   let cursor: string | undefined;
 
   do {
@@ -29,6 +34,8 @@ export async function buildNotionCache(
     });
 
     for (const page of response.results) {
+      itemsFetched++;
+      options.onProgress?.(itemsFetched);
       if (!("properties" in page)) continue;
 
       // Extract URL
@@ -115,8 +122,10 @@ export class CacheSyncer {
   start(client: Client, databaseId: string, intervalMs = 60_000): void {
     this.interval = setInterval(async () => {
       try {
-        console.log("  🔄 Syncing Notion cache...");
-        const fresh = await buildNotionCache(client, databaseId);
+        const fresh = await buildNotionCache(client, databaseId, {
+          onProgress: (n) => process.stdout.write(`\r  🔄 Syncing Notion cache... ${n} items`),
+        });
+        process.stdout.write("\n");
 
         // Merge local additions into the fresh cache
         for (const url of this.localUrls) {
