@@ -48,6 +48,7 @@ A job FAILS if ANY of these are true:
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
 - Completely unrelated tech stack with no TypeScript/JavaScript involvement
+- Strictly frontend role (e.g. UI engineer, frontend engineer, design systems) with no backend or fullstack component
 - MEV extraction or arbitrage bot development
 - HFT or ultra-low-latency systems requiring C++/C`,
   },
@@ -66,6 +67,7 @@ A job FAILS if ANY of these are true:
 - Generic CRUD/SaaS backend with no real-time or financial data component
 - HFT (high-frequency trading) or ultra-low-latency systems requiring C++/C
 - MEV extraction or arbitrage bot development
+- Strictly frontend role with no backend or infrastructure component
 - Primarily C++, C, or low-level systems programming — must involve TypeScript, Node.js, Go, or Rust`,
   },
 ];
