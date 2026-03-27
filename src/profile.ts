@@ -13,14 +13,6 @@ export const SEARCH_KEYWORDS = [
   "fullstack engineer defi",
   "backend engineer blockchain infrastructure",
 
-  // Engineering lead/manager
-  "engineering manager crypto",
-  "engineering manager web3",
-  "engineering manager fintech",
-  "tech lead fintech",
-  "staff engineer crypto",
-  "staff engineer web3",
-
   // Fintech trading infra
   "backend engineer trading platform",
   "backend engineer market data",
