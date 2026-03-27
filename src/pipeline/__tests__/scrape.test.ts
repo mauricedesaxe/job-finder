@@ -22,6 +22,10 @@ describe("extractCompanyFromUrl", () => {
     );
   });
 
+  test("extracts from Workable URL", () => {
+    expect(extractCompanyFromUrl("https://apply.workable.com/mlabs/j/C07B32BD46")).toBe("mlabs");
+  });
+
   test("returns Unknown for invalid URL", () => {
     expect(extractCompanyFromUrl("not-a-url")).toBe("Unknown");
   });
