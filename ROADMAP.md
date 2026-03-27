@@ -221,11 +221,6 @@ Too many hardcoded values scattered across files. Centralize everything.
 
 ## 9. Data Quality (P2)
 
-### Notion schema validation
-- [ ] Document the expected Notion database schema as TypeScript types
-- [ ] Validate on startup that the target database has the expected properties
-- [ ] Fail fast with a clear error if schema doesn't match
-
 ### Job data validation
 - [ ] Validate JobListing fields before insertion (URL is valid, company is non-empty, etc.)
 - [ ] Reject malformed jobs with a clear log instead of inserting garbage
@@ -266,10 +261,31 @@ Send a summary to Slack after every run so you don't have to check Railway logs 
 
 ---
 
+## 11. Preflight Check (P0)
+
+Validate that the Notion database is correctly configured before scraping or reconciliation. Fail fast with clear errors instead of cryptic API failures mid-run.
+
+### What it validates
+- [ ] Notion database exists and is accessible (test query)
+- [ ] All expected properties exist with correct types:
+  - `Job Title` (title), `Company` (rich_text), `URL` (url), `Source` (select), `Keywords` (multi_select), `Date Scraped` (date), `Date Posted` (date), `Location` (rich_text), `Status` (select), `Application Date` (date)
+- [ ] Status select options include all `JobStatus` values: To Review, Applied, Skipped, Rejected, Company Applied, Company Blocked, Archived
+- [ ] Auto-create missing status options if they don't exist (Notion API supports adding select options via a dummy page insert — or use `databases.update`)
+- [ ] API keys are valid — not just present, but actually authenticated (make a lightweight test call)
+
+### Where it lives
+- [ ] Create `src/preflight.ts` — `runPreflight(notion, databaseId)` function
+- [ ] Call from `main()` after `validateConfig()` but before the scrape loop
+- [ ] Reuse `JobStatus` type from `src/types.ts` to stay in sync automatically
+- [ ] On failure: log exactly which property is missing/wrong and exit with code 1
+
+---
+
 ## Implementation order
 
 ```
 Phase 1 (foundation):
+  11. Preflight check
   5. Configuration cleanup
   1. LLM-as-a-judge tests
 
