@@ -36,6 +36,8 @@ async function main() {
   const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, errored: 0 };
   const seenUrls = new Set<string>();
 
+  const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
+
   console.log(
     `Starting scrape: ${config.keywords.length} keywords × ${config.domains.length} domains (up to ${config.maxPages} pages each)\n`,
   );
@@ -131,7 +133,7 @@ async function main() {
     }
   }
 
-  const reconcileStats = await reconcile(notion, config.notionDatabaseId);
+  const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
   console.log("\n--- Scrape Summary ---");
   console.log(`Inserted:        ${stats.inserted}`);
@@ -141,11 +143,17 @@ async function main() {
   console.log(`Skipped:         ${stats.skipped}`);
   console.log(`Errored:         ${stats.errored}`);
 
-  console.log("\n--- Reconcile Summary ---");
-  console.log(`Auto-Applied:    ${reconcileStats.applied}`);
-  console.log(`Unstaled:        ${reconcileStats.unstaled}`);
-  console.log(`Company Applied: ${reconcileStats.companyApplied}`);
-  console.log(`Archived:        ${reconcileStats.archived}`);
+  console.log("\n--- Pre-scrape Reconcile Summary ---");
+  console.log(`Auto-Applied:    ${preReconcileStats.applied}`);
+  console.log(`Unstaled:        ${preReconcileStats.unstaled}`);
+  console.log(`Company Applied: ${preReconcileStats.companyApplied}`);
+  console.log(`Archived:        ${preReconcileStats.archived}`);
+
+  console.log("\n--- Post-scrape Reconcile Summary ---");
+  console.log(`Auto-Applied:    ${postReconcileStats.applied}`);
+  console.log(`Unstaled:        ${postReconcileStats.unstaled}`);
+  console.log(`Company Applied: ${postReconcileStats.companyApplied}`);
+  console.log(`Archived:        ${postReconcileStats.archived}`);
 }
 
 main().catch((err) => {
