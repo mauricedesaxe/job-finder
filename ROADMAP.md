@@ -237,6 +237,35 @@ Too many hardcoded values scattered across files. Centralize everything.
 
 ---
 
+## 10. Slack Run Reports (P1)
+
+Send a summary to Slack after every run so you don't have to check Railway logs or Notion manually.
+
+### Approach
+- Use a Slack Incoming Webhook — just a `fetch` POST, no bot token or extra deps needed
+- `SLACK_WEBHOOK_URL` env var — if not set, skip alerting silently (local runs won't alert)
+
+### Message content
+- [ ] Run stats: inserted, flagged, rejected, skipped, errored, unflagged, propagated
+- [ ] Run duration
+- [ ] Link to Notion database for quick review
+- [ ] Timestamp
+
+### Formatting
+- [ ] Clean run (0 errors): simple summary, green sidebar
+- [ ] Run with errors: highlight error count, orange/red sidebar
+- [ ] Run with 0 new jobs: warn that scraping might be broken (all results were duplicates or rejected)
+- [ ] Fatal failure (process crashed): separate error alert with stack trace
+
+### Tasks
+- [ ] Create `src/services/slack.ts` — `sendRunReport(stats, duration)` function
+- [ ] Use Slack Block Kit for structured message formatting
+- [ ] Call after reconciliation completes in `src/index.ts` (or after BullMQ run completes, post-migration)
+- [ ] Add `SLACK_WEBHOOK_URL` to `.env.example` and Railway variables
+- [ ] Also send on fatal errors (in the top-level `.catch()`)
+
+---
+
 ## Implementation order
 
 ```
@@ -252,6 +281,7 @@ Phase 2 (architecture):
 Phase 3 (hardening):
   6. Resilience & error handling
   7. Observability
+  10. Slack run reports
   8. Testing expansion
   9. Data quality
 ```
