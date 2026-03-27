@@ -11,6 +11,7 @@ import {
 import { reconcile } from "./pipeline/reconcile";
 import { evaluateJob } from "./pipeline/evaluate";
 import { enrichJob } from "./pipeline/enrich";
+import { runPreflight } from "./preflight";
 
 function validateConfig() {
   const missing: string[] = [];
@@ -30,6 +31,8 @@ async function main() {
   validateConfig();
 
   const notion = createNotionClient(config.notionToken);
+  await runPreflight(notion, config.notionDatabaseId);
+
   const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, errored: 0 };
   const seenUrls = new Set<string>();
 

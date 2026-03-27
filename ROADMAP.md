@@ -261,23 +261,23 @@ Send a summary to Slack after every run so you don't have to check Railway logs 
 
 ---
 
-## 11. Preflight Check (P0)
+## 11. ~~Preflight Check~~ (P0) ✅
 
 Validate that the Notion database is correctly configured before scraping or reconciliation. Fail fast with clear errors instead of cryptic API failures mid-run.
 
 ### What it validates
-- [ ] Notion database exists and is accessible (test query)
-- [ ] All expected properties exist with correct types:
+- [x] Notion database exists and is accessible (test query)
+- [x] All expected properties exist with correct types:
   - `Job Title` (title), `Company` (rich_text), `URL` (url), `Source` (select), `Keywords` (multi_select), `Date Scraped` (date), `Date Posted` (date), `Location` (rich_text), `Status` (select), `Application Date` (date)
-- [ ] Status select options include all `JobStatus` values: To Review, Applied, Skipped, Rejected, Company Applied, Company Blocked, Archived
-- [ ] Auto-create missing status options if they don't exist (Notion API supports adding select options via a dummy page insert — or use `databases.update`)
-- [ ] API keys are valid — not just present, but actually authenticated (make a lightweight test call)
+- [x] Status select options include all `JobStatus` values: To Review, Applied, Skipped, Rejected, Company Applied, Company Blocked, Archived
+- [x] Auto-create missing status options if they don't exist (Notion API supports adding select options via a dummy page insert — or use `databases.update`)
+- [x] API keys are valid — not just present, but actually authenticated (make a lightweight test call)
 
 ### Where it lives
-- [ ] Create `src/preflight.ts` — `runPreflight(notion, databaseId)` function
-- [ ] Call from `main()` after `validateConfig()` but before the scrape loop
-- [ ] Reuse `JobStatus` type from `src/types.ts` to stay in sync automatically
-- [ ] On failure: log exactly which property is missing/wrong and exit with code 1
+- [x] Create `src/preflight.ts` — `runPreflight(notion, databaseId)` function
+- [x] Call from `main()` after `validateConfig()` but before the scrape loop
+- [x] Reuse `JobStatus` type from `src/types.ts` to stay in sync automatically
+- [x] On failure: log exactly which property is missing/wrong and exit with code 1
 
 ---
 
