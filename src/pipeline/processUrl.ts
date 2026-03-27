@@ -1,6 +1,6 @@
 import type { Client } from "@notionhq/client";
 import type { ScrapioConfig } from "../types";
-import type { NotionCache } from "../services/notionCache";
+import type { CacheSyncer } from "../services/notionCache";
 import { scrapeJobPage, parseJobDetails } from "./scrape";
 import { evaluateJob } from "./evaluate";
 import { enrichJob } from "./enrich";
@@ -31,7 +31,7 @@ export type ProcessResult =
 export interface ProcessContext {
   notion: Client;
   config: ScrapioConfig;
-  cache: NotionCache;
+  syncer: CacheSyncer;
   seenUrls: Set<string>;
 }
 
@@ -40,7 +40,8 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { notion, config, cache, seenUrls } = ctx;
+  const { notion, config, syncer, seenUrls } = ctx;
+  const cache = syncer.cache;
 
   // In-run dedup
   if (seenUrls.has(url)) return "skipped";
@@ -136,11 +137,8 @@ export async function processUrl(
         }),
       ),
     );
-    // Update cache so subsequent jobs at this company see the new title
-    const titles = cache.jobsByCompany.get(job.company) ?? [];
-    titles.push(job.title);
-    cache.jobsByCompany.set(job.company, titles);
-    cache.existingUrls.add(url);
+    syncer.addTitle(job.company, job.title);
+    syncer.addUrl(url);
     return "companyApplied";
   }
 
@@ -155,10 +153,8 @@ export async function processUrl(
   console.log(`  ✓ Inserted: ${job.title} @ ${job.company}`);
 
   // Update cache for within-run dedup
-  const titles = cache.jobsByCompany.get(job.company) ?? [];
-  titles.push(job.title);
-  cache.jobsByCompany.set(job.company, titles);
-  cache.existingUrls.add(url);
+  syncer.addTitle(job.company, job.title);
+  syncer.addUrl(url);
 
   return "inserted";
 }
