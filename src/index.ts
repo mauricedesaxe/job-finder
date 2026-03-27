@@ -1,7 +1,7 @@
 import { config } from "./config";
 import { searchJobs } from "./pipeline/search";
 import { createNotionClient } from "./services/notion";
-import { buildNotionCache } from "./services/notionCache";
+import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 import { processUrl, type ProcessResult } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
 import { runPreflight } from "./preflight";
@@ -41,6 +41,8 @@ async function main() {
     `  Cached: ${cache.existingUrls.size} URLs, ${cache.blockedCompanies.size} blocked companies, ` +
     `${cache.recentAppCompanies.size} recent app companies, ${cache.jobsByCompany.size} companies with jobs`,
   );
+
+  const syncer = new CacheSyncer(cache);
 
   // Phase 1: Parallel search — collect all URLs
   const searchPairs = config.keywords.flatMap((keyword) =>
@@ -91,11 +93,15 @@ async function main() {
     `\nPhase 2: Processing ${urlMap.size} URLs (Jina: 8, Anthropic: 10, Notion: 3 req/s)...\n`,
   );
 
+  syncer.start(notion, config.notionDatabaseId);
+
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, cache, seenUrls }),
+      processUrl(url, keyword, { notion, config, syncer, seenUrls }),
     ),
   );
+
+  syncer.stop();
 
   // Aggregate stats
   const stats = {
