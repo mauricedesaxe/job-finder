@@ -1,11 +1,14 @@
-export type JobStatus =
-  | "To Review"
-  | "Applied"
-  | "Skipped"
-  | "Rejected"
-  | "Company Applied"
-  | "Company Blocked"
-  | "Archived";
+export const JOB_STATUSES = [
+  "To Review",
+  "Applied",
+  "Skipped",
+  "Rejected",
+  "Company Applied",
+  "Company Blocked",
+  "Archived",
+] as const;
+
+export type JobStatus = (typeof JOB_STATUSES)[number];
 
 export interface JobListing {
   title: string;
