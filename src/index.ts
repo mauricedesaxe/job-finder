@@ -7,23 +7,7 @@ import { runPreflight } from "./preflight";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 
-function validateConfig() {
-  const missing: string[] = [];
-  if (!config.notionToken) missing.push("NOTION_TOKEN");
-  if (!config.notionDatabaseId) missing.push("NOTION_DATABASE_ID");
-  if (!config.jinaApiKey) missing.push("JINA_API_KEY");
-  if (!config.anthropicApiKey) missing.push("ANTHROPIC_API_KEY");
-
-  if (missing.length > 0) {
-    console.error(`Missing env vars: ${missing.join(", ")}`);
-    console.error("Copy .env.example to .env and fill in your credentials.");
-    process.exit(1);
-  }
-}
-
 async function main() {
-  validateConfig();
-
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 

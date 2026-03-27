@@ -1,4 +1,5 @@
-import type { JobListing, ScrapioConfig } from "../types";
+import type { ScrapioConfig } from "../config";
+import type { JobListing } from "../types";
 import { fetchViaJina } from "./search";
 
 export function extractCompanyFromUrl(url: string): string {

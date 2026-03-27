@@ -1,5 +1,5 @@
+import type { ScrapioConfig } from "../config";
 import { fetchWithRetry } from "../services/http";
-import type { ScrapioConfig } from "../types";
 
 interface JinaSearchResult {
   title: string;

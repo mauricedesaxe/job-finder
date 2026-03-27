@@ -21,13 +21,3 @@ export interface JobListing {
   description: string;
   location: string;
 }
-
-export interface ScrapioConfig {
-  keywords: string[];
-  domains: string[];
-  notionDatabaseId: string;
-  notionToken: string;
-  jinaApiKey: string;
-  jinaBaseUrl: string;
-  anthropicApiKey: string;
-}

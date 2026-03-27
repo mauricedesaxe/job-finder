@@ -11,9 +11,9 @@ import {
   notionRateLimiter,
   withRetry,
 } from "../concurrency";
+import type { ScrapioConfig } from "../config";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
-import type { ScrapioConfig } from "../types";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
