@@ -4,78 +4,90 @@ import {
   queryAppliedCompanies,
   queryJobsByStatus,
   queryJobsByStatusAndCompany,
+  queryJobsWithApplicationDateNotStatus,
+  queryRecentJobsByStatus,
   updateJobStatus,
 } from "../services/notion";
 
 export interface ReconcileStats {
-  unflagged: number;
-  propagated: number;
+  applied: number;
+  unstaled: number;
+  companyApplied: number;
+  archived: number;
 }
 
 export async function reconcile(
   client: Client,
   databaseId: string,
 ): Promise<ReconcileStats> {
-  const stats: ReconcileStats = { unflagged: 0, propagated: 0 };
+  const stats: ReconcileStats = { applied: 0, unstaled: 0, companyApplied: 0, archived: 0 };
 
-  console.log("\n--- Reconciling flags ---\n");
+  console.log("\n--- Reconciling statuses ---\n");
 
-  // Pass 1: Unflag stale flags
-  const flaggedJobs = await queryJobsByStatus(client, databaseId, "Flagged");
-  const flaggedCompanies = new Map<string, string[]>();
-
-  for (const job of flaggedJobs) {
-    const ids = flaggedCompanies.get(job.company) ?? [];
-    ids.push(job.id);
-    flaggedCompanies.set(job.company, ids);
+  // Pass 0: Auto-mark "Applied" from Application Date
+  const jobsWithAppDate = await queryJobsWithApplicationDateNotStatus(client, databaseId, "Applied");
+  for (const job of jobsWithAppDate) {
+    console.log(`  Marking as Applied: ${job.id} (has Application Date)`);
+    await updateJobStatus(client, job.id, "Applied");
+    stats.applied++;
   }
 
-  for (const [company, pageIds] of flaggedCompanies) {
+  // Pass 1: Unstale "Company Applied" (only recent jobs, within 30 days)
+  const companyAppliedJobs = await queryRecentJobsByStatus(client, databaseId, "Company Applied", 30);
+  const companyAppliedCompanies = new Map<string, string[]>();
+
+  for (const job of companyAppliedJobs) {
+    const ids = companyAppliedCompanies.get(job.company) ?? [];
+    ids.push(job.id);
+    companyAppliedCompanies.set(job.company, ids);
+  }
+
+  for (const [company, pageIds] of companyAppliedCompanies) {
     const recency = await checkRecentApplication(client, databaseId, company);
     if (!recency.exists) {
-      console.log(`  Unflagging ${pageIds.length} job(s) from "${company}" (no recent application)`);
+      console.log(`  Unstaling ${pageIds.length} job(s) from "${company}" (no recent application)`);
       for (const id of pageIds) {
         await updateJobStatus(client, id, "To Review");
-        stats.unflagged++;
+        stats.unstaled++;
       }
     }
   }
 
-  // Pass 2: Propagate missing flags
-  const stillFlagged = await queryJobsByStatus(client, databaseId, "Flagged");
-  const stillFlaggedCompanies = new Set(stillFlagged.map((j) => j.company));
-
-  for (const company of stillFlaggedCompanies) {
-    const unflaggedJobs = await queryJobsByStatusAndCompany(
-      client,
-      databaseId,
-      "To Review",
-      company,
-    );
-    if (unflaggedJobs.length > 0) {
-      console.log(`  Flagging ${unflaggedJobs.length} job(s) from "${company}"`);
-      for (const job of unflaggedJobs) {
-        await updateJobStatus(client, job.id, "Flagged");
-        stats.propagated++;
-      }
-    }
-  }
-
-  // Pass 3: Flag jobs from companies with recent applications
+  // Pass 2: Propagate "Company Applied"
   const appliedCompanies = await queryAppliedCompanies(client, databaseId);
 
   for (const company of appliedCompanies) {
-    const unflaggedJobs = await queryJobsByStatusAndCompany(
+    const toReviewJobs = await queryJobsByStatusAndCompany(
       client,
       databaseId,
       "To Review",
       company,
     );
-    if (unflaggedJobs.length > 0) {
-      console.log(`  Flagging ${unflaggedJobs.length} job(s) from "${company}" (recent application)`);
-      for (const job of unflaggedJobs) {
-        await updateJobStatus(client, job.id, "Flagged");
-        stats.propagated++;
+    if (toReviewJobs.length > 0) {
+      console.log(`  Company Applied: ${toReviewJobs.length} job(s) from "${company}"`);
+      for (const job of toReviewJobs) {
+        await updateJobStatus(client, job.id, "Company Applied");
+        stats.companyApplied++;
+      }
+    }
+  }
+
+  // Pass 3: Propagate "Company Blocked" → archive
+  const blockedJobs = await queryJobsByStatus(client, databaseId, "Company Blocked");
+  const blockedCompanies = new Set(blockedJobs.map((j) => j.company));
+
+  for (const company of blockedCompanies) {
+    const toReviewJobs = await queryJobsByStatusAndCompany(
+      client,
+      databaseId,
+      "To Review",
+      company,
+    );
+    if (toReviewJobs.length > 0) {
+      console.log(`  Archiving ${toReviewJobs.length} job(s) from "${company}" (company blocked)`);
+      for (const job of toReviewJobs) {
+        await updateJobStatus(client, job.id, "Archived");
+        stats.archived++;
       }
     }
   }

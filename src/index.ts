@@ -117,14 +117,18 @@ async function main() {
 
   const reconcileStats = await reconcile(notion, config.notionDatabaseId);
 
-  console.log("\n--- Summary ---");
-  console.log(`Inserted:   ${stats.inserted}`);
-  console.log(`Flagged:    ${stats.flagged}`);
-  console.log(`Rejected:   ${stats.rejected}`);
-  console.log(`Skipped:    ${stats.skipped}`);
-  console.log(`Errored:    ${stats.errored}`);
-  console.log(`Unflagged:  ${reconcileStats.unflagged}`);
-  console.log(`Propagated: ${reconcileStats.propagated}`);
+  console.log("\n--- Scrape Summary ---");
+  console.log(`Inserted:        ${stats.inserted}`);
+  console.log(`Company Applied: ${stats.flagged}`);
+  console.log(`Rejected:        ${stats.rejected}`);
+  console.log(`Skipped:         ${stats.skipped}`);
+  console.log(`Errored:         ${stats.errored}`);
+
+  console.log("\n--- Reconcile Summary ---");
+  console.log(`Auto-Applied:    ${reconcileStats.applied}`);
+  console.log(`Unstaled:        ${reconcileStats.unstaled}`);
+  console.log(`Company Applied: ${reconcileStats.companyApplied}`);
+  console.log(`Archived:        ${reconcileStats.archived}`);
 }
 
 main().catch((err) => {
