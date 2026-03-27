@@ -1,22 +1,6 @@
-import { Client } from "@notionhq/client";
-import type { CreatePageParameters } from "@notionhq/client/build/src/api-endpoints";
-import type { JobListing, JobStatus } from "../types";
-
-interface RichTextItem {
-  plain_text: string;
-}
-
-function extractRichText(items: RichTextItem[]): string {
-  return items.map((t) => t.plain_text).join("");
-}
-
-function toDateString(date: Date): string {
-  return date.toISOString().split("T")[0] ?? "";
-}
-
-export function createNotionClient(token: string): Client {
-  return new Client({ auth: token });
-}
+import type { Client } from "@notionhq/client";
+import type { JobStatus } from "../../types";
+import { extractRichText, type RichTextItem, toDateString } from "./helpers";
 
 export async function checkDuplicateUrl(
   client: Client,
@@ -68,88 +52,6 @@ export async function checkRecentApplication(
   }
 
   return { exists: false };
-}
-
-export function buildNotionProperties(job: JobListing) {
-  return {
-    "Job Title": {
-      title: [{ text: { content: job.title } }],
-    },
-    Company: {
-      rich_text: [{ text: { content: job.company } }],
-    },
-    URL: {
-      url: job.url,
-    },
-    Source: {
-      select: { name: job.source },
-    },
-    Keywords: {
-      multi_select: job.keywordsMatched.map((k) => ({ name: k })),
-    },
-    "Date Scraped": {
-      date: { start: job.dateScraped },
-    },
-    ...(job.datePosted
-      ? {
-          "Date Posted": {
-            date: { start: job.datePosted },
-          },
-        }
-      : {}),
-    ...(job.location
-      ? {
-          Location: {
-            rich_text: [{ text: { content: job.location } }],
-          },
-        }
-      : {}),
-    Status: {
-      select: { name: "To Review" },
-    },
-  };
-}
-
-export function descriptionToBlocks(description: string) {
-  if (!description) return [];
-
-  // Split on double newlines to preserve paragraph structure
-  const paragraphs = description
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const blocks: Array<{
-    object: "block";
-    type: "paragraph";
-    paragraph: { rich_text: Array<{ type: "text"; text: { content: string } }> };
-  }> = [];
-
-  for (const paragraph of paragraphs) {
-    // Notion limits rich_text content to 2000 chars per block
-    if (paragraph.length <= 2000) {
-      blocks.push({
-        object: "block",
-        type: "paragraph",
-        paragraph: {
-          rich_text: [{ type: "text", text: { content: paragraph } }],
-        },
-      });
-    } else {
-      // Chunk oversized paragraphs
-      for (let i = 0; i < paragraph.length; i += 2000) {
-        blocks.push({
-          object: "block",
-          type: "paragraph",
-          paragraph: {
-            rich_text: [{ type: "text", text: { content: paragraph.slice(i, i + 2000) } }],
-          },
-        });
-      }
-    }
-  }
-
-  return blocks;
 }
 
 export async function queryAppliedCompanies(
@@ -251,19 +153,6 @@ export async function queryJobsByStatusAndCompany(
   } while (cursor);
 
   return results;
-}
-
-export async function updateJobStatus(
-  client: Client,
-  pageId: string,
-  status: JobStatus,
-): Promise<void> {
-  await client.pages.update({
-    page_id: pageId,
-    properties: {
-      Status: { select: { name: status } },
-    },
-  });
 }
 
 export async function queryJobsWithApplicationDateNotStatus(
@@ -373,7 +262,10 @@ export async function queryRecentJobsByStatus(
       filter: {
         and: [
           { property: "Status", select: { equals: status } },
-          { property: "Date Scraped", date: { on_or_after: toDateString(cutoff) } },
+          {
+            property: "Date Scraped",
+            date: { on_or_after: toDateString(cutoff) },
+          },
         ],
       },
       start_cursor: cursor,
@@ -393,24 +285,4 @@ export async function queryRecentJobsByStatus(
   } while (cursor);
 
   return results;
-}
-
-export async function insertJob(
-  client: Client,
-  databaseId: string,
-  job: JobListing,
-  status: JobStatus = "To Review",
-): Promise<string> {
-  const properties = buildNotionProperties(job);
-  properties.Status = { select: { name: status } };
-
-  const children = job.description ? descriptionToBlocks(job.description) : [];
-
-  const response = await client.pages.create({
-    parent: { database_id: databaseId },
-    properties: properties as CreatePageParameters["properties"],
-    children: children as CreatePageParameters["children"],
-  });
-
-  return response.id;
 }
