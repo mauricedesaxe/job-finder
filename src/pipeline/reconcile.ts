@@ -19,10 +19,12 @@ export interface ReconcileStats {
 export async function reconcile(
   client: Client,
   databaseId: string,
+  label?: string,
 ): Promise<ReconcileStats> {
   const stats: ReconcileStats = { applied: 0, unstaled: 0, companyApplied: 0, archived: 0 };
+  const header = label ? `--- ${label}: Reconciling statuses ---` : "--- Reconciling statuses ---";
 
-  console.log("\n--- Reconciling statuses ---\n");
+  console.log(`\n${header}\n`);
 
   // Pass 0: Auto-mark "Applied" from Application Date
   const jobsWithAppDate = await queryJobsWithApplicationDateNotStatus(client, databaseId, "Applied");
