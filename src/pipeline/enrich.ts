@@ -1,6 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type { JobListing } from "../types";
+import type Anthropic from "@anthropic-ai/sdk";
 import { getClient } from "../services/anthropic";
+import type { JobListing } from "../types";
 
 export interface JobEnrichment {
   title: string;
@@ -44,10 +44,7 @@ const ENRICH_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export async function enrichJob(
-  job: JobListing,
-  apiKey: string,
-): Promise<JobEnrichment> {
+export async function enrichJob(job: JobListing, apiKey: string): Promise<JobEnrichment> {
   const anthropic = getClient(apiKey);
 
   const userMessage = `Job Title: ${job.title}

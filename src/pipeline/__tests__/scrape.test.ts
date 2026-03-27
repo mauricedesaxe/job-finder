@@ -1,31 +1,25 @@
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
-  extractCompanyFromUrl,
   detectSource,
-  extractTitle,
+  extractCompanyFromUrl,
   extractDatePosted,
+  extractTitle,
   parseJobDetails,
 } from "../scrape";
 
 describe("extractCompanyFromUrl", () => {
   test("extracts from Ashby URL", () => {
-    expect(
-      extractCompanyFromUrl("https://jobs.ashbyhq.com/acme/12345"),
-    ).toBe("acme");
+    expect(extractCompanyFromUrl("https://jobs.ashbyhq.com/acme/12345")).toBe("acme");
   });
 
   test("extracts from Lever URL", () => {
-    expect(
-      extractCompanyFromUrl("https://jobs.lever.co/mycompany/abc-def"),
-    ).toBe("mycompany");
+    expect(extractCompanyFromUrl("https://jobs.lever.co/mycompany/abc-def")).toBe("mycompany");
   });
 
   test("extracts from Greenhouse URL", () => {
-    expect(
-      extractCompanyFromUrl(
-        "https://boards.greenhouse.io/coolstartup/jobs/123",
-      ),
-    ).toBe("coolstartup");
+    expect(extractCompanyFromUrl("https://boards.greenhouse.io/coolstartup/jobs/123")).toBe(
+      "coolstartup",
+    );
   });
 
   test("returns Unknown for invalid URL", () => {
@@ -47,9 +41,7 @@ describe("detectSource", () => {
   });
 
   test("detects greenhouse", () => {
-    expect(detectSource("https://boards.greenhouse.io/co/jobs/1")).toBe(
-      "greenhouse",
-    );
+    expect(detectSource("https://boards.greenhouse.io/co/jobs/1")).toBe("greenhouse");
   });
 
   test("returns other for unknown domain", () => {
@@ -94,11 +86,7 @@ describe("extractDatePosted", () => {
 describe("parseJobDetails", () => {
   test("parses complete job listing", () => {
     const md = "# DeFi Protocol Engineer\n\nPosted on March 1, 2025\n\nBuild stuff.";
-    const job = parseJobDetails(
-      md,
-      "https://jobs.ashbyhq.com/acme/12345",
-      "defi",
-    );
+    const job = parseJobDetails(md, "https://jobs.ashbyhq.com/acme/12345", "defi");
 
     expect(job.title).toBe("DeFi Protocol Engineer");
     expect(job.company).toBe("acme");

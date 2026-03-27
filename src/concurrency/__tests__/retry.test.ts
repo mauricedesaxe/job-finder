@@ -1,10 +1,5 @@
-import { test, expect, describe } from "bun:test";
-import {
-  withRetry,
-  isRetryableJina,
-  isRetryableAnthropic,
-  isRetryableNotion,
-} from "../retry";
+import { describe, expect, test } from "bun:test";
+import { isRetryableAnthropic, isRetryableJina, isRetryableNotion, withRetry } from "../retry";
 
 describe("withRetry", () => {
   test("returns on first success", async () => {
@@ -29,7 +24,12 @@ describe("withRetry", () => {
         maxRetries: 3,
         baseDelayMs: 1,
         shouldRetry: (err) =>
-          !!(err && typeof err === "object" && "status" in err && (err as any).status === 429),
+          !!(
+            err &&
+            typeof err === "object" &&
+            "status" in err &&
+            (err as { status: number }).status === 429
+          ),
       },
     );
     expect(result).toBe("ok");

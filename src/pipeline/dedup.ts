@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { getClient } from "../services/anthropic";
 
 export interface DedupResult {
@@ -15,13 +15,11 @@ const DEDUP_TOOL: Anthropic.Messages.Tool = {
     properties: {
       isDuplicate: {
         type: "boolean",
-        description:
-          "True if the new title is the same role as an existing title",
+        description: "True if the new title is the same role as an existing title",
       },
       matchedTitle: {
         type: "string",
-        description:
-          "The existing title that matches, or null if no match",
+        description: "The existing title that matches, or null if no match",
       },
     },
     required: ["isDuplicate"],

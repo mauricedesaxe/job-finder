@@ -4,9 +4,13 @@
   "type": "module",
   "scripts": {
     "scrape": "bun src/index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
     "@types/bun": "latest"
   },
   "peerDependencies": {

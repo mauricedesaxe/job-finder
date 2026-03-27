@@ -1,14 +1,13 @@
-import { test, expect, describe } from "bun:test";
-
-const mod = await import("../enrich");
+import { describe, expect, test } from "bun:test";
+import { enrichJob, type JobEnrichment } from "../enrich";
 
 describe("enrich module exports", () => {
   test("exports enrichJob function", () => {
-    expect(typeof mod.enrichJob).toBe("function");
+    expect(typeof enrichJob).toBe("function");
   });
 
   test("JobEnrichment interface shape is correct", () => {
-    const enrichment: mod.JobEnrichment = {
+    const enrichment: JobEnrichment = {
       title: "Engineer",
       company: "Acme",
       description: "Build things",

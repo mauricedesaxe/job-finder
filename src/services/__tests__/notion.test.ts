@@ -1,6 +1,6 @@
-import { test, expect, describe } from "bun:test";
-import { buildNotionProperties, descriptionToBlocks } from "../notion";
+import { describe, expect, test } from "bun:test";
 import type { JobListing } from "../../types";
+import { buildNotionProperties, descriptionToBlocks } from "../notion";
 
 describe("buildNotionProperties", () => {
   const job: JobListing = {
@@ -55,18 +55,18 @@ describe("descriptionToBlocks", () => {
     const desc = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
     const blocks = descriptionToBlocks(desc);
     expect(blocks).toHaveLength(3);
-    expect(blocks[0].paragraph.rich_text[0].text.content).toBe("First paragraph.");
-    expect(blocks[1].paragraph.rich_text[0].text.content).toBe("Second paragraph.");
-    expect(blocks[2].paragraph.rich_text[0].text.content).toBe("Third paragraph.");
+    expect(blocks[0]!.paragraph.rich_text[0]!.text.content).toBe("First paragraph.");
+    expect(blocks[1]!.paragraph.rich_text[0]!.text.content).toBe("Second paragraph.");
+    expect(blocks[2]!.paragraph.rich_text[0]!.text.content).toBe("Third paragraph.");
   });
 
   test("chunks oversized paragraphs at 2000 chars", () => {
     const longText = "x".repeat(4500);
     const blocks = descriptionToBlocks(longText);
     expect(blocks).toHaveLength(3);
-    expect(blocks[0].paragraph.rich_text[0].text.content).toHaveLength(2000);
-    expect(blocks[1].paragraph.rich_text[0].text.content).toHaveLength(2000);
-    expect(blocks[2].paragraph.rich_text[0].text.content).toHaveLength(500);
+    expect(blocks[0]!.paragraph.rich_text[0]!.text.content).toHaveLength(2000);
+    expect(blocks[1]!.paragraph.rich_text[0]!.text.content).toHaveLength(2000);
+    expect(blocks[2]!.paragraph.rich_text[0]!.text.content).toHaveLength(500);
   });
 
   test("returns empty array for empty description", () => {

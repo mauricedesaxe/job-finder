@@ -1,16 +1,11 @@
+import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import { config } from "./config";
+import { type ProcessResult, processUrl } from "./pipeline/processUrl";
+import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
+import { runPreflight } from "./preflight";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
-import { processUrl, type ProcessResult } from "./pipeline/processUrl";
-import { reconcile } from "./pipeline/reconcile";
-import { runPreflight } from "./preflight";
-import {
-  jinaSearchSemaphore,
-  jinaBreaker,
-  withRetry,
-  isRetryableJina,
-} from "./concurrency";
 
 function validateConfig() {
   const missing: string[] = [];
@@ -42,7 +37,7 @@ async function main() {
   process.stdout.write("\n");
   console.log(
     `  Cached: ${cache.existingUrls.size} URLs, ${cache.blockedCompanies.size} blocked companies, ` +
-    `${cache.recentAppCompanies.size} recent app companies, ${cache.jobsByCompany.size} companies with jobs`,
+      `${cache.recentAppCompanies.size} recent app companies, ${cache.jobsByCompany.size} companies with jobs`,
   );
 
   const syncer = new CacheSyncer(cache);
@@ -87,7 +82,9 @@ async function main() {
     }
   }
 
-  console.log(`\nSearch complete: ${urlMap.size} unique URLs found (${searchErrors} search errors)`);
+  console.log(
+    `\nSearch complete: ${urlMap.size} unique URLs found (${searchErrors} search errors)`,
+  );
 
   // Phase 2: Parallel URL processing
   const seenUrls = new Set<string>();

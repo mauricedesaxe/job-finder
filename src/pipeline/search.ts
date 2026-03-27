@@ -1,5 +1,5 @@
-import type { ScrapioConfig } from "../types";
 import { fetchWithRetry } from "../services/http";
+import type { ScrapioConfig } from "../types";
 
 interface JinaSearchResult {
   title: string;
@@ -12,17 +12,11 @@ interface JinaSearchResponse {
   data: JinaSearchResult[];
 }
 
-export function buildSearchQuery(
-  keyword: string,
-  domain: string,
-): string {
+export function buildSearchQuery(keyword: string, domain: string): string {
   return `site:${domain} ${keyword}`;
 }
 
-export function filterJobUrls(
-  results: JinaSearchResult[],
-  domain: string,
-): string[] {
+export function filterJobUrls(results: JinaSearchResult[], domain: string): string[] {
   const seen = new Set<string>();
   const urls: string[] = [];
 
@@ -46,7 +40,7 @@ export async function fetchJinaSearch(
     Accept: "application/json",
   };
   if (config.jinaApiKey) {
-    headers["Authorization"] = `Bearer ${config.jinaApiKey}`;
+    headers.Authorization = `Bearer ${config.jinaApiKey}`;
   }
 
   const res = await fetchWithRetry(url, { headers });
@@ -63,7 +57,7 @@ export async function fetchViaJina(
     Accept: "text/markdown",
   };
   if (config.jinaApiKey) {
-    headers["Authorization"] = `Bearer ${config.jinaApiKey}`;
+    headers.Authorization = `Bearer ${config.jinaApiKey}`;
   }
 
   const res = await fetchWithRetry(jinaUrl, { headers });

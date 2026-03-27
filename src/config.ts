@@ -1,5 +1,5 @@
+import { SEARCH_DOMAINS, SEARCH_KEYWORDS } from "./profile";
 import type { ScrapioConfig } from "./types";
-import { SEARCH_KEYWORDS, SEARCH_DOMAINS } from "./profile";
 
 export const config: ScrapioConfig = {
   keywords: SEARCH_KEYWORDS,
