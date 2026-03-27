@@ -86,3 +86,67 @@ export async function buildNotionCache(
 
   return { existingUrls, blockedCompanies, recentAppCompanies, jobsByCompany };
 }
+
+export class CacheSyncer {
+  cache: NotionCache;
+  private interval: Timer | null = null;
+  private localUrls = new Set<string>();
+  private localTitles = new Map<string, string[]>();
+
+  constructor(initialCache: NotionCache) {
+    this.cache = initialCache;
+  }
+
+  addUrl(url: string): void {
+    this.localUrls.add(url);
+    this.cache.existingUrls.add(url);
+  }
+
+  addTitle(company: string, title: string): void {
+    const localTitles = this.localTitles.get(company) ?? [];
+    localTitles.push(title);
+    this.localTitles.set(company, localTitles);
+
+    const titles = this.cache.jobsByCompany.get(company) ?? [];
+    titles.push(title);
+    this.cache.jobsByCompany.set(company, titles);
+  }
+
+  start(client: Client, databaseId: string, intervalMs = 60_000): void {
+    this.interval = setInterval(async () => {
+      try {
+        console.log("  🔄 Syncing Notion cache...");
+        const fresh = await buildNotionCache(client, databaseId);
+
+        // Merge local additions into the fresh cache
+        for (const url of this.localUrls) {
+          fresh.existingUrls.add(url);
+        }
+        for (const [company, titles] of this.localTitles) {
+          const existing = fresh.jobsByCompany.get(company) ?? [];
+          for (const title of titles) {
+            if (!existing.includes(title)) {
+              existing.push(title);
+            }
+          }
+          fresh.jobsByCompany.set(company, existing);
+        }
+
+        this.cache = fresh;
+        console.log(
+          `  🔄 Cache synced: ${fresh.existingUrls.size} URLs, ${fresh.blockedCompanies.size} blocked, ` +
+            `${fresh.recentAppCompanies.size} recent apps`,
+        );
+      } catch (err) {
+        console.error(`  ✗ Cache sync failed: ${err}`);
+      }
+    }, intervalMs);
+  }
+
+  stop(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
+}
