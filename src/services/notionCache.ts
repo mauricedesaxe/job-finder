@@ -1,12 +1,5 @@
 import type { Client } from "@notionhq/client";
-
-interface RichTextItem {
-  plain_text: string;
-}
-
-function extractRichText(items: RichTextItem[]): string {
-  return items.map((t) => t.plain_text).join("");
-}
+import { extractRichText, type RichTextItem } from "./notion/helpers";
 
 export interface NotionCache {
   existingUrls: Set<string>;
