@@ -8,8 +8,5 @@ export const config: ScrapioConfig = {
   notionToken: process.env.NOTION_TOKEN!,
   jinaApiKey: process.env.JINA_API_KEY!,
   jinaBaseUrl: "https://r.jina.ai",
-  delayBetweenRequests: 500,
-  maxResultsPerQuery: 10,
-  maxPages: 3,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
 };

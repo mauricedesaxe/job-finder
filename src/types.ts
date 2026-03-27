@@ -29,8 +29,5 @@ export interface ScrapioConfig {
   notionToken: string;
   jinaApiKey: string;
   jinaBaseUrl: string;
-  delayBetweenRequests: number;
-  maxResultsPerQuery: number;
-  maxPages: number;
   anthropicApiKey: string;
 }
