@@ -1,0 +1,23 @@
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      run: bun run lint
+    typecheck:
+      run: bun run typecheck
+    test:
+      run: bun test
+
+commit-msg:
+  commands:
+    conventional:
+      run: |
+        msg=$(head -1 {1})
+        if ! echo "$msg" | grep -qE '^(feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert)(\(.+\))?: .+|^(Merge|Revert) '; then
+          echo "Commit message must follow conventional commits format:"
+          echo "  <type>(<optional scope>): <description>"
+          echo "  Types: feat, fix, refactor, chore, docs, test, style, perf, ci, build, revert"
+          echo ""
+          echo "Got: $msg"
+          exit 1
+        fi
