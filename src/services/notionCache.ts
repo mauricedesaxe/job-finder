@@ -1,5 +1,13 @@
 import type { Client } from "@notionhq/client";
 
+interface RichTextItem {
+  plain_text: string;
+}
+
+function extractRichText(items: RichTextItem[]): string {
+  return items.map((t) => t.plain_text).join("");
+}
+
 export interface NotionCache {
   existingUrls: Set<string>;
   blockedCompanies: Set<string>;
@@ -40,32 +48,30 @@ export async function buildNotionCache(
 
       // Extract URL
       const urlProp = page.properties.URL;
-      const url = urlProp?.type === "url" ? (urlProp.url ?? "") : "";
+      const rawUrl = urlProp?.type === "url" ? urlProp.url : null;
+      const url = typeof rawUrl === "string" ? rawUrl : "";
       if (url) existingUrls.add(url);
 
       // Extract company
       const companyProp = page.properties.Company;
       const company =
         companyProp?.type === "rich_text"
-          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          ? extractRichText(companyProp.rich_text as RichTextItem[])
           : "";
 
       // Extract title
       const titleProp = page.properties["Job Title"];
       const title =
-        titleProp?.type === "title"
-          ? titleProp.title.map((t: any) => t.plain_text).join("")
-          : "";
+        titleProp?.type === "title" ? extractRichText(titleProp.title as RichTextItem[]) : "";
 
       // Extract status
       const statusProp = page.properties.Status;
-      const status =
-        statusProp?.type === "select" ? (statusProp.select?.name ?? "") : "";
+      const selectVal = statusProp?.type === "select" ? statusProp.select : null;
+      const status = selectVal && "name" in selectVal ? (selectVal.name ?? "") : "";
 
       // Extract application date
       const appDateProp = page.properties["Application Date"];
-      const appDate =
-        appDateProp?.type === "date" ? (appDateProp.date?.start ?? null) : null;
+      const appDate = appDateProp?.type === "date" ? (appDateProp.date?.start ?? null) : null;
 
       // Build blockedCompanies
       if (company && status === "Company Blocked") {

@@ -1,5 +1,18 @@
 import { Client } from "@notionhq/client";
+import type { CreatePageParameters } from "@notionhq/client/build/src/api-endpoints";
 import type { JobListing, JobStatus } from "../types";
+
+interface RichTextItem {
+  plain_text: string;
+}
+
+function extractRichText(items: RichTextItem[]): string {
+  return items.map((t) => t.plain_text).join("");
+}
+
+function toDateString(date: Date): string {
+  return date.toISOString().split("T")[0] ?? "";
+}
 
 export function createNotionClient(token: string): Client {
   return new Client({ auth: token });
@@ -39,15 +52,15 @@ export async function checkRecentApplication(
         },
         {
           property: "Application Date",
-          date: { on_or_after: sixMonthsAgo.toISOString().split("T")[0] },
+          date: { on_or_after: toDateString(sixMonthsAgo) ?? "" },
         },
       ],
     },
     page_size: 1,
   });
 
-  if (response.results.length > 0) {
-    const page = response.results[0];
+  const page = response.results[0];
+  if (page) {
     return {
       exists: true,
       pageUrl: `https://notion.so/${page.id.replace(/-/g, "")}`,
@@ -129,9 +142,7 @@ export function descriptionToBlocks(description: string) {
           object: "block",
           type: "paragraph",
           paragraph: {
-            rich_text: [
-              { type: "text", text: { content: paragraph.slice(i, i + 2000) } },
-            ],
+            rich_text: [{ type: "text", text: { content: paragraph.slice(i, i + 2000) } }],
           },
         });
       }
@@ -156,7 +167,7 @@ export async function queryAppliedCompanies(
       database_id: databaseId,
       filter: {
         property: "Application Date",
-        date: { on_or_after: sixMonthsAgo.toISOString().split("T")[0] },
+        date: { on_or_after: toDateString(sixMonthsAgo) },
       },
       start_cursor: cursor,
     });
@@ -166,7 +177,7 @@ export async function queryAppliedCompanies(
       const companyProp = page.properties.Company;
       const company =
         companyProp?.type === "rich_text"
-          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          ? extractRichText(companyProp.rich_text as RichTextItem[])
           : "";
       if (company) companies.add(company);
     }
@@ -200,7 +211,7 @@ export async function queryJobsByStatus(
       const companyProp = page.properties.Company;
       const company =
         companyProp?.type === "rich_text"
-          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          ? extractRichText(companyProp.rich_text as RichTextItem[])
           : "";
       results.push({ id: page.id, company });
     }
@@ -280,7 +291,7 @@ export async function queryJobsWithApplicationDateNotStatus(
       const companyProp = page.properties.Company;
       const company =
         companyProp?.type === "rich_text"
-          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          ? extractRichText(companyProp.rich_text as RichTextItem[])
           : "";
       results.push({ id: page.id, company });
     }
@@ -313,11 +324,10 @@ export async function queryJobsByCompany(
       if (!("properties" in page)) continue;
       const titleProp = page.properties["Job Title"];
       const title =
-        titleProp?.type === "title"
-          ? titleProp.title.map((t: any) => t.plain_text).join("")
-          : "";
+        titleProp?.type === "title" ? extractRichText(titleProp.title as RichTextItem[]) : "";
       const urlProp = page.properties.URL;
-      const url = urlProp?.type === "url" ? (urlProp.url ?? "") : "";
+      const rawUrl = urlProp?.type === "url" ? urlProp.url : null;
+      const url = typeof rawUrl === "string" ? rawUrl : "";
       if (title) results.push({ title, url });
     }
 
@@ -363,7 +373,7 @@ export async function queryRecentJobsByStatus(
       filter: {
         and: [
           { property: "Status", select: { equals: status } },
-          { property: "Date Scraped", date: { on_or_after: cutoff.toISOString().split("T")[0] } },
+          { property: "Date Scraped", date: { on_or_after: toDateString(cutoff) } },
         ],
       },
       start_cursor: cursor,
@@ -374,7 +384,7 @@ export async function queryRecentJobsByStatus(
       const companyProp = page.properties.Company;
       const company =
         companyProp?.type === "rich_text"
-          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          ? extractRichText(companyProp.rich_text as RichTextItem[])
           : "";
       results.push({ id: page.id, company });
     }
@@ -394,14 +404,12 @@ export async function insertJob(
   const properties = buildNotionProperties(job);
   properties.Status = { select: { name: status } };
 
-  const children = job.description
-    ? descriptionToBlocks(job.description)
-    : [];
+  const children = job.description ? descriptionToBlocks(job.description) : [];
 
   const response = await client.pages.create({
     parent: { database_id: databaseId },
-    properties: properties as any,
-    children: children as any,
+    properties: properties as CreatePageParameters["properties"],
+    children: children as CreatePageParameters["children"],
   });
 
   return response.id;

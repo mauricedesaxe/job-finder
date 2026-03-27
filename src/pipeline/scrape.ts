@@ -1,4 +1,5 @@
-import type { JobListing, ScrapioConfig } from "../types";
+import type { ScrapioConfig } from "../config";
+import type { JobListing } from "../types";
 import { fetchViaJina } from "./search";
 
 export function extractCompanyFromUrl(url: string): string {
@@ -31,11 +32,11 @@ export function detectSource(url: string): string {
 export function extractTitle(markdown: string): string {
   // Look for first # heading
   const headingMatch = markdown.match(/^#\s+(.+)$/m);
-  if (headingMatch) return headingMatch[1].trim();
+  if (headingMatch?.[1]) return headingMatch[1].trim();
 
   // Fallback: look for **bold** title near the top
   const boldMatch = markdown.match(/\*\*(.+?)\*\*/);
-  if (boldMatch) return boldMatch[1].trim();
+  if (boldMatch?.[1]) return boldMatch[1].trim();
 
   return "Unknown Position";
 }
@@ -50,10 +51,11 @@ export function extractDatePosted(markdown: string): string | null {
 
   for (const pattern of patterns) {
     const match = markdown.match(pattern);
-    if (match) {
-      const date = new Date(match[1]);
-      if (!isNaN(date.getTime())) {
-        return date.toISOString().split("T")[0];
+    const dateStr = match?.[1];
+    if (dateStr) {
+      const date = new Date(dateStr);
+      if (!Number.isNaN(date.getTime())) {
+        return date.toISOString().split("T")[0] ?? null;
       }
     }
   }
@@ -61,11 +63,7 @@ export function extractDatePosted(markdown: string): string | null {
   return null;
 }
 
-export function parseJobDetails(
-  markdown: string,
-  url: string,
-  keyword: string,
-): JobListing {
+export function parseJobDetails(markdown: string, url: string, keyword: string): JobListing {
   return {
     title: extractTitle(markdown),
     company: extractCompanyFromUrl(url),
@@ -73,7 +71,7 @@ export function parseJobDetails(
     source: detectSource(url),
     keywordsMatched: [keyword],
     datePosted: extractDatePosted(markdown),
-    dateScraped: new Date().toISOString().split("T")[0],
+    dateScraped: new Date().toISOString().split("T")[0] ?? "",
     description: markdown.slice(0, 8000),
     location: "",
   };

@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { buildSearchQuery, filterJobUrls } from "../search";
 
 describe("buildSearchQuery", () => {
@@ -45,9 +45,7 @@ describe("filterJobUrls", () => {
   });
 
   test("returns empty array when no matches", () => {
-    const results = [
-      { title: "Unrelated", url: "https://example.com/other", description: "" },
-    ];
+    const results = [{ title: "Unrelated", url: "https://example.com/other", description: "" }];
     const urls = filterJobUrls(results, "jobs.ashbyhq.com");
     expect(urls).toEqual([]);
   });

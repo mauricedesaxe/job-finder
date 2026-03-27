@@ -1,6 +1,6 @@
-import { test, expect, describe } from "bun:test";
-import { buildNotionCache, CacheSyncer } from "../notionCache";
+import { describe, expect, test } from "bun:test";
 import type { NotionCache } from "../notionCache";
+import { buildNotionCache, CacheSyncer } from "../notionCache";
 
 function makePage(opts: {
   url?: string;
@@ -15,9 +15,7 @@ function makePage(opts: {
       URL: { type: "url" as const, url: opts.url ?? null },
       Company: {
         type: "rich_text" as const,
-        rich_text: opts.company
-          ? [{ plain_text: opts.company }]
-          : [],
+        rich_text: opts.company ? [{ plain_text: opts.company }] : [],
       },
       "Job Title": {
         type: "title" as const,
@@ -44,7 +42,7 @@ function mockClient(pages: ReturnType<typeof makePage>[]) {
         next_cursor: null,
       }),
     },
-  } as any;
+  } as unknown as import("@notionhq/client").Client;
 }
 
 describe("buildNotionCache", () => {
@@ -77,11 +75,11 @@ describe("buildNotionCache", () => {
     const client = mockClient([
       makePage({
         company: "RecentCo",
-        appDate: recentDate.toISOString().split("T")[0],
+        appDate: recentDate.toISOString().split("T")[0] ?? "",
       }),
       makePage({
         company: "OldCo",
-        appDate: oldDate.toISOString().split("T")[0],
+        appDate: oldDate.toISOString().split("T")[0] ?? "",
       }),
     ]);
     const cache = await buildNotionCache(client, "db-id");
@@ -96,10 +94,7 @@ describe("buildNotionCache", () => {
       makePage({ company: "Other", title: "Designer" }),
     ]);
     const cache = await buildNotionCache(client, "db-id");
-    expect(cache.jobsByCompany.get("Acme")).toEqual([
-      "Senior Engineer",
-      "Staff Engineer",
-    ]);
+    expect(cache.jobsByCompany.get("Acme")).toEqual(["Senior Engineer", "Staff Engineer"]);
     expect(cache.jobsByCompany.get("Other")).toEqual(["Designer"]);
   });
 
@@ -133,10 +128,7 @@ describe("CacheSyncer", () => {
     const syncer = new CacheSyncer(emptyCache());
     syncer.addTitle("Acme", "Senior Engineer");
     syncer.addTitle("Acme", "Staff Engineer");
-    expect(syncer.cache.jobsByCompany.get("Acme")).toEqual([
-      "Senior Engineer",
-      "Staff Engineer",
-    ]);
+    expect(syncer.cache.jobsByCompany.get("Acme")).toEqual(["Senior Engineer", "Staff Engineer"]);
   });
 
   test("stop clears the interval", () => {

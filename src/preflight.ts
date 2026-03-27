@@ -14,10 +14,7 @@ const EXPECTED_PROPERTIES: Record<string, string> = {
   "Application Date": "date",
 };
 
-export async function runPreflight(
-  notion: Client,
-  databaseId: string,
-): Promise<void> {
+export async function runPreflight(notion: Client, databaseId: string): Promise<void> {
   console.log("Running preflight checks...\n");
 
   // Retrieve database schema (also validates token + database access)
@@ -31,9 +28,7 @@ export async function runPreflight(
     if (!prop) {
       errors.push(`Missing property: "${name}" (expected type: ${expectedType})`);
     } else if (prop.type !== expectedType) {
-      errors.push(
-        `Wrong type for "${name}": got "${prop.type}", expected "${expectedType}"`,
-      );
+      errors.push(`Wrong type for "${name}": got "${prop.type}", expected "${expectedType}"`);
     }
   }
 
@@ -47,27 +42,20 @@ export async function runPreflight(
 
   // Validate status options
   const statusProp = db.properties.Status;
-  if (statusProp.type !== "select") return; // already validated above
+  if (!statusProp || statusProp.type !== "select") return; // already validated above
 
-  const existingOptions = new Set(
-    statusProp.select.options.map((o) => o.name),
-  );
+  const existingOptions = new Set(statusProp.select.options.map((o) => o.name));
   const missingStatuses = JOB_STATUSES.filter((s) => !existingOptions.has(s));
 
   if (missingStatuses.length > 0) {
-    console.log(
-      `Creating missing status options: ${missingStatuses.join(", ")}`,
-    );
+    console.log(`Creating missing status options: ${missingStatuses.join(", ")}`);
 
     await notion.databases.update({
       database_id: databaseId,
       properties: {
         Status: {
           select: {
-            options: [
-              ...statusProp.select.options,
-              ...missingStatuses.map((name) => ({ name })),
-            ],
+            options: [...statusProp.select.options, ...missingStatuses.map((name) => ({ name }))],
           },
         },
       },

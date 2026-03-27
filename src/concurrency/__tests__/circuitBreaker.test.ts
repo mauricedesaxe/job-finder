@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { CircuitBreaker, CircuitBreakerOpenError } from "../circuitBreaker";
 
 describe("CircuitBreaker", () => {
@@ -20,9 +20,7 @@ describe("CircuitBreaker", () => {
     }
 
     // Circuit should now be open
-    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(
-      CircuitBreakerOpenError,
-    );
+    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(CircuitBreakerOpenError);
   });
 
   test("resets on success", async () => {
@@ -66,9 +64,7 @@ describe("CircuitBreaker", () => {
     }
 
     // Should be open
-    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(
-      CircuitBreakerOpenError,
-    );
+    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(CircuitBreakerOpenError);
 
     // Wait for cooldown
     await Bun.sleep(60);
@@ -100,8 +96,6 @@ describe("CircuitBreaker", () => {
     } catch {}
 
     // Should be open again
-    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(
-      CircuitBreakerOpenError,
-    );
+    await expect(cb.run(async () => "ok")).rejects.toBeInstanceOf(CircuitBreakerOpenError);
   });
 });

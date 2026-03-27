@@ -27,7 +27,11 @@ export async function reconcile(
   console.log(`\n${header}\n`);
 
   // Pass 0: Auto-mark "Applied" from Application Date
-  const jobsWithAppDate = await queryJobsWithApplicationDateNotStatus(client, databaseId, "Applied");
+  const jobsWithAppDate = await queryJobsWithApplicationDateNotStatus(
+    client,
+    databaseId,
+    "Applied",
+  );
   for (const job of jobsWithAppDate) {
     console.log(`  Marking as Applied: ${job.id} (has Application Date)`);
     await updateJobStatus(client, job.id, "Applied");
@@ -35,7 +39,12 @@ export async function reconcile(
   }
 
   // Pass 1: Unstale "Company Applied" (only recent jobs, within 30 days)
-  const companyAppliedJobs = await queryRecentJobsByStatus(client, databaseId, "Company Applied", 30);
+  const companyAppliedJobs = await queryRecentJobsByStatus(
+    client,
+    databaseId,
+    "Company Applied",
+    30,
+  );
   const companyAppliedCompanies = new Map<string, string[]>();
 
   for (const job of companyAppliedJobs) {

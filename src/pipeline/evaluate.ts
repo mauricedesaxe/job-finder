@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type { JobListing } from "../types";
+import type Anthropic from "@anthropic-ai/sdk";
+import { EVALUATION_PROFILES, type EvaluationProfile } from "../profile";
 import { getClient } from "../services/anthropic";
-import { EVALUATION_PROFILES } from "../profile";
+import type { JobListing } from "../types";
 
 export interface JobEvaluation {
   pass: boolean;
@@ -58,14 +58,9 @@ ${job.description}`;
   return toolBlock.input as JobEvaluation;
 }
 
-export async function evaluateJob(
-  job: JobListing,
-  apiKey: string,
-): Promise<JobEvaluation> {
+export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobEvaluation> {
   const results = await Promise.allSettled(
-    EVALUATION_PROFILES.map((profile) =>
-      evaluateSingleProfile(job, profile, apiKey),
-    ),
+    EVALUATION_PROFILES.map((profile) => evaluateSingleProfile(job, profile, apiKey)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles configured" };

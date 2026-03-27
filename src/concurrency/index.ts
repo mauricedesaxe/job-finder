@@ -1,17 +1,17 @@
-import { Semaphore } from "./semaphore";
-import { RateLimiter } from "./rateLimiter";
 import { CircuitBreaker } from "./circuitBreaker";
+import { RateLimiter } from "./rateLimiter";
+import { Semaphore } from "./semaphore";
 
-export { Semaphore } from "./semaphore";
-export { RateLimiter } from "./rateLimiter";
 export { CircuitBreaker, CircuitBreakerOpenError } from "./circuitBreaker";
-export {
-  withRetry,
-  isRetryableJina,
-  isRetryableAnthropic,
-  isRetryableNotion,
-} from "./retry";
+export { RateLimiter } from "./rateLimiter";
 export type { RetryOptions } from "./retry";
+export {
+  isRetryableAnthropic,
+  isRetryableJina,
+  isRetryableNotion,
+  withRetry,
+} from "./retry";
+export { Semaphore } from "./semaphore";
 
 // Shared service limiters — all concurrent work goes through these
 

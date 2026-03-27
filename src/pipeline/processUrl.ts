@@ -1,23 +1,23 @@
 import type { Client } from "@notionhq/client";
-import type { ScrapioConfig } from "../types";
-import type { CacheSyncer } from "../services/notionCache";
-import { scrapeJobPage, parseJobDetails } from "./scrape";
-import { evaluateJob } from "./evaluate";
-import { enrichJob } from "./enrich";
-import { checkFuzzyDuplicate } from "./dedup";
-import { insertJob } from "../services/notion";
 import {
-  jinaReaderSemaphore,
-  anthropicSemaphore,
-  notionRateLimiter,
-  jinaBreaker,
   anthropicBreaker,
-  notionBreaker,
-  withRetry,
-  isRetryableJina,
+  anthropicSemaphore,
   isRetryableAnthropic,
+  isRetryableJina,
   isRetryableNotion,
+  jinaBreaker,
+  jinaReaderSemaphore,
+  notionBreaker,
+  notionRateLimiter,
+  withRetry,
 } from "../concurrency";
+import type { ScrapioConfig } from "../config";
+import { insertJob } from "../services/notion";
+import type { CacheSyncer } from "../services/notionCache";
+import { checkFuzzyDuplicate } from "./dedup";
+import { enrichJob } from "./enrich";
+import { evaluateJob } from "./evaluate";
+import { parseJobDetails, scrapeJobPage } from "./scrape";
 
 export type ProcessResult =
   | "inserted"
