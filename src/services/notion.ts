@@ -291,6 +291,42 @@ export async function queryJobsWithApplicationDateNotStatus(
   return results;
 }
 
+export async function queryJobsByCompany(
+  client: Client,
+  databaseId: string,
+  company: string,
+): Promise<Array<{ title: string; url: string }>> {
+  const results: Array<{ title: string; url: string }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        property: "Company",
+        rich_text: { equals: company },
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const titleProp = page.properties["Job Title"];
+      const title =
+        titleProp?.type === "title"
+          ? titleProp.title.map((t: any) => t.plain_text).join("")
+          : "";
+      const urlProp = page.properties.URL;
+      const url = urlProp?.type === "url" ? (urlProp.url ?? "") : "";
+      if (title) results.push({ title, url });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
 export async function queryCompanyBlocked(
   client: Client,
   databaseId: string,

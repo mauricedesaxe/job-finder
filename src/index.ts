@@ -6,8 +6,10 @@ import {
   checkDuplicateUrl,
   checkRecentApplication,
   queryCompanyBlocked,
+  queryJobsByCompany,
   insertJob,
 } from "./services/notion";
+import { checkFuzzyDuplicate } from "./pipeline/dedup";
 import { reconcile } from "./pipeline/reconcile";
 import { evaluateJob } from "./pipeline/evaluate";
 import { enrichJob } from "./pipeline/enrich";
@@ -33,7 +35,7 @@ async function main() {
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
-  const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, errored: 0 };
+  const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, duplicated: 0, errored: 0 };
   const seenUrls = new Set<string>();
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
@@ -96,6 +98,25 @@ async function main() {
           job.description = enriched.description;
           job.location = enriched.location;
 
+          // Fuzzy dedup: check for same role at same company
+          const existingJobs = await queryJobsByCompany(
+            notion,
+            config.notionDatabaseId,
+            job.company,
+          );
+          if (existingJobs.length > 0) {
+            const dedup = await checkFuzzyDuplicate(
+              job.title,
+              existingJobs.map((j) => j.title),
+              config.anthropicApiKey,
+            );
+            if (dedup.isDuplicate) {
+              console.log(`  ⏭ Duplicate: ${job.title} @ ${job.company} — matches "${dedup.matchedTitle}"`);
+              stats.duplicated++;
+              continue;
+            }
+          }
+
           // Determine status based on company state
           const isBlocked = await queryCompanyBlocked(
             notion,
@@ -139,6 +160,7 @@ async function main() {
   console.log(`Inserted:        ${stats.inserted}`);
   console.log(`Company Applied: ${stats.companyApplied}`);
   console.log(`Rejected:        ${stats.rejected}`);
+  console.log(`Duplicated:      ${stats.duplicated}`);
   console.log(`Archived:        ${stats.archived}`);
   console.log(`Skipped:         ${stats.skipped}`);
   console.log(`Errored:         ${stats.errored}`);
