@@ -5,6 +5,7 @@ import {
   createNotionClient,
   checkDuplicateUrl,
   checkRecentApplication,
+  queryCompanyBlocked,
   insertJob,
 } from "./services/notion";
 import { reconcile } from "./pipeline/reconcile";
@@ -29,7 +30,7 @@ async function main() {
   validateConfig();
 
   const notion = createNotionClient(config.notionToken);
-  const stats = { inserted: 0, skipped: 0, flagged: 0, rejected: 0, errored: 0 };
+  const stats = { inserted: 0, skipped: 0, companyApplied: 0, rejected: 0, archived: 0, errored: 0 };
   const seenUrls = new Set<string>();
 
   console.log(
@@ -74,10 +75,11 @@ async function main() {
           const markdown = await scrapeJobPage(url, config);
           const job = parseJobDetails(markdown, url, keyword);
 
-          // LLM evaluation — reject jobs that don't match requirements
+          // LLM evaluation
           const evaluation = await evaluateJob(job, config.anthropicApiKey);
           if (!evaluation.pass) {
             console.log(`  ✗ Rejected: ${job.title} @ ${job.company} — ${evaluation.reason}`);
+            await insertJob(notion, config.notionDatabaseId, job, "Rejected");
             stats.rejected++;
             continue;
           }
@@ -89,7 +91,20 @@ async function main() {
           job.description = enriched.description;
           job.location = enriched.location;
 
-          // Check for recent application from same company
+          // Determine status based on company state
+          const isBlocked = await queryCompanyBlocked(
+            notion,
+            config.notionDatabaseId,
+            job.company,
+          );
+
+          if (isBlocked) {
+            console.log(`  ✗ Archived (company blocked): ${job.title} @ ${job.company}`);
+            await insertJob(notion, config.notionDatabaseId, job, "Archived");
+            stats.archived++;
+            continue;
+          }
+
           const recency = await checkRecentApplication(
             notion,
             config.notionDatabaseId,
@@ -97,11 +112,9 @@ async function main() {
           );
 
           if (recency.exists) {
-            console.log(
-              `  ⚠ Company Applied: ${job.title} @ ${job.company}`,
-            );
+            console.log(`  ⚠ Company Applied: ${job.title} @ ${job.company}`);
             await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
-            stats.flagged++;
+            stats.companyApplied++;
           } else {
             await insertJob(notion, config.notionDatabaseId, job);
             console.log(`  ✓ Inserted: ${job.title} @ ${job.company}`);
@@ -119,8 +132,9 @@ async function main() {
 
   console.log("\n--- Scrape Summary ---");
   console.log(`Inserted:        ${stats.inserted}`);
-  console.log(`Company Applied: ${stats.flagged}`);
+  console.log(`Company Applied: ${stats.companyApplied}`);
   console.log(`Rejected:        ${stats.rejected}`);
+  console.log(`Archived:        ${stats.archived}`);
   console.log(`Skipped:         ${stats.skipped}`);
   console.log(`Errored:         ${stats.errored}`);
 
