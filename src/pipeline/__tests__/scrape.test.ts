@@ -22,6 +22,10 @@ describe("extractCompanyFromUrl", () => {
     );
   });
 
+  test("extracts from Workable URL", () => {
+    expect(extractCompanyFromUrl("https://apply.workable.com/mlabs/j/C07B32BD46")).toBe("mlabs");
+  });
+
   test("returns Unknown for invalid URL", () => {
     expect(extractCompanyFromUrl("not-a-url")).toBe("Unknown");
   });
@@ -42,6 +46,10 @@ describe("detectSource", () => {
 
   test("detects greenhouse", () => {
     expect(detectSource("https://boards.greenhouse.io/co/jobs/1")).toBe("greenhouse");
+  });
+
+  test("detects workable", () => {
+    expect(detectSource("https://apply.workable.com/mlabs/j/C07B32BD46")).toBe("workable");
   });
 
   test("returns other for unknown domain", () => {

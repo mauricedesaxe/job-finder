@@ -26,6 +26,7 @@ export function detectSource(url: string): string {
   if (url.includes("ashbyhq.com")) return "ashbyhq";
   if (url.includes("lever.co")) return "lever";
   if (url.includes("greenhouse.io")) return "greenhouse";
+  if (url.includes("workable.com")) return "workable";
   return "other";
 }
 
