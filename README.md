@@ -2,11 +2,24 @@
 
 Automated job search and enrichment pipeline for crypto/web3 engineering positions. Searches job boards (Ashby, Lever, Greenhouse), evaluates listings with Claude, and stores qualified jobs in Notion.
 
-After scraping, a reconciliation pass runs automatically to keep flag status consistent across the Notion database:
+## Job Statuses
 
-1. **Unflag stale**: Jobs marked "Flagged" are set back to "To Review" if the company's most recent application is older than 6 months.
-2. **Propagate flags**: If any job from a company is "Flagged", all other "To Review" jobs from that company are flagged too — catches cases where an Application Date was added manually but only one job was updated.
-3. **Flag applied companies**: If any job from a company has a recent Application Date (within 6 months), all "To Review" jobs from that company are flagged.
+| Status | Set by | Meaning |
+|--------|--------|---------|
+| `To Review` | System | New job, needs human review |
+| `Applied` | User/System | Applied to this job (auto-set if Application Date is filled) |
+| `Skipped` | User | Job isn't a fit, but company is fine |
+| `Rejected` | System | LLM evaluation rejected this job |
+| `Company Applied` | System | Another job at this company was applied to recently |
+| `Company Blocked` | User | Company is not a fit (e.g., not remote EU) |
+| `Archived` | System/User | Done with this listing |
+
+After scraping, a reconciliation pass runs automatically:
+
+1. **Auto-mark Applied**: Jobs with an Application Date but wrong status get set to "Applied"
+2. **Unstale Company Applied**: Recent (30 days) "Company Applied" jobs are set back to "To Review" if the application is now >6 months old
+3. **Propagate Company Applied**: If you applied to a company recently, all "To Review" jobs from that company get marked "Company Applied"
+4. **Archive blocked companies**: "To Review" jobs from "Company Blocked" companies get archived
 
 ## Local Setup
 
