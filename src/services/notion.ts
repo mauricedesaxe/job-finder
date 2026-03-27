@@ -1,5 +1,5 @@
 import { Client } from "@notionhq/client";
-import type { JobListing } from "../types";
+import type { JobListing, JobStatus } from "../types";
 
 export function createNotionClient(token: string): Client {
   return new Client({ auth: token });
@@ -180,7 +180,7 @@ export async function queryAppliedCompanies(
 export async function queryJobsByStatus(
   client: Client,
   databaseId: string,
-  status: string,
+  status: JobStatus,
 ): Promise<Array<{ id: string; company: string }>> {
   const results: Array<{ id: string; company: string }> = [];
   let cursor: string | undefined;
@@ -214,7 +214,7 @@ export async function queryJobsByStatus(
 export async function queryJobsByStatusAndCompany(
   client: Client,
   databaseId: string,
-  status: string,
+  status: JobStatus,
   company: string,
 ): Promise<Array<{ id: string }>> {
   const results: Array<{ id: string }> = [];
@@ -245,7 +245,7 @@ export async function queryJobsByStatusAndCompany(
 export async function updateJobStatus(
   client: Client,
   pageId: string,
-  status: string,
+  status: JobStatus,
 ): Promise<void> {
   await client.pages.update({
     page_id: pageId,

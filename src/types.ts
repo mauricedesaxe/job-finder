@@ -1,3 +1,12 @@
+export type JobStatus =
+  | "To Review"
+  | "Applied"
+  | "Skipped"
+  | "Rejected"
+  | "Company Applied"
+  | "Company Blocked"
+  | "Archived";
+
 export interface JobListing {
   title: string;
   company: string;
