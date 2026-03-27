@@ -255,6 +255,100 @@ export async function updateJobStatus(
   });
 }
 
+export async function queryJobsWithApplicationDateNotStatus(
+  client: Client,
+  databaseId: string,
+  excludeStatus: JobStatus,
+): Promise<Array<{ id: string; company: string }>> {
+  const results: Array<{ id: string; company: string }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        and: [
+          { property: "Application Date", date: { is_not_empty: true } },
+          { property: "Status", select: { does_not_equal: excludeStatus } },
+        ],
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const companyProp = page.properties.Company;
+      const company =
+        companyProp?.type === "rich_text"
+          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          : "";
+      results.push({ id: page.id, company });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
+export async function queryCompanyBlocked(
+  client: Client,
+  databaseId: string,
+  company: string,
+): Promise<boolean> {
+  const response = await client.databases.query({
+    database_id: databaseId,
+    filter: {
+      and: [
+        { property: "Company", rich_text: { equals: company } },
+        { property: "Status", select: { equals: "Company Blocked" } },
+      ],
+    },
+    page_size: 1,
+  });
+  return response.results.length > 0;
+}
+
+export async function queryRecentJobsByStatus(
+  client: Client,
+  databaseId: string,
+  status: JobStatus,
+  withinDays: number,
+): Promise<Array<{ id: string; company: string }>> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - withinDays);
+
+  const results: Array<{ id: string; company: string }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: {
+        and: [
+          { property: "Status", select: { equals: status } },
+          { property: "Date Scraped", date: { on_or_after: cutoff.toISOString().split("T")[0] } },
+        ],
+      },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const companyProp = page.properties.Company;
+      const company =
+        companyProp?.type === "rich_text"
+          ? companyProp.rich_text.map((t: any) => t.plain_text).join("")
+          : "";
+      results.push({ id: page.id, company });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
 export async function insertJob(
   client: Client,
   databaseId: string,
