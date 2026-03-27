@@ -60,22 +60,6 @@ A job FAILS if ANY of these are true:
 - HFT or ultra-low-latency systems requiring C++/C`,
   },
   {
-    name: "engineering-lead-manager",
-    prompt: `You evaluate job listings for an engineering lead or manager with a strong technical background in TypeScript/Node.js and crypto/fintech, based in Europe.
-A job PASSES if ALL of these are true:
-1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
-2. The role is lead, staff, principal, or engineering manager level.
-3. The role involves leading/managing engineers - roadmap ownership, hiring, or technical direction. Hands-on coding still expected.
-A job FAILS if ANY of these are true:
-- Explicitly requires on-site presence
-- Explicitly restricted to US/Asia timezones only with no European overlap
-- Pure IC role with no leadership component
-- Pure people management with no technical involvement
-- Non-engineering role
-- HFT, MEV extraction, or arbitrage bot development
-- Primarily C++/C/low-level systems with no TypeScript/Node.js involvement`,
-  },
-  {
     name: "fintech-trading-infra",
     prompt: `You evaluate job listings for a senior backend engineer specializing in real-time trading systems and financial data infrastructure, based in Europe.
 A job PASSES if ALL of these are true:
