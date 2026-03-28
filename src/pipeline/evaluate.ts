@@ -6,6 +6,7 @@ import type { JobListing } from "../types";
 export interface JobEvaluation {
   pass: boolean;
   reason: string;
+  profileName?: string;
 }
 
 const EVALUATE_TOOL: Anthropic.Messages.Tool = {
@@ -59,15 +60,16 @@ ${job.description}`;
 }
 
 export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobEvaluation> {
+  const profiles = EVALUATION_PROFILES;
   const results = await Promise.allSettled(
-    EVALUATION_PROFILES.map((profile) => evaluateSingleProfile(job, profile, apiKey)),
+    profiles.map((profile) => evaluateSingleProfile(job, profile, apiKey)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles configured" };
 
-  for (const result of results) {
+  for (const [i, result] of results.entries()) {
     if (result.status === "fulfilled" && result.value.pass) {
-      return { pass: true, reason: result.value.reason };
+      return { pass: true, reason: result.value.reason, profileName: profiles[i]?.name };
     }
     if (result.status === "fulfilled") {
       lastRejection = { pass: false, reason: result.value.reason };
