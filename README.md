@@ -1,6 +1,72 @@
 # jobfinder
 
-Automated job search and enrichment pipeline for crypto/web3 engineering positions. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with Claude, and stores qualified jobs in Notion.
+Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with Claude, and stores qualified jobs in Notion. Fork it and customize the search profile to match your own job search criteria.
+
+## Local Setup
+
+```bash
+bun install
+cp .env.example .env  # fill in your API keys
+bun run scrape
+```
+
+## Deploy to Railway (Cron Job)
+
+1. Create a new project on [railway.app](https://railway.app) and connect your GitHub repo
+2. Railway auto-detects the `Dockerfile` and builds from it
+3. In the service's **Variables** tab, add:
+   - `NOTION_TOKEN`
+   - `NOTION_DATABASE_ID`
+   - `JINA_API_KEY`
+   - `ANTHROPIC_API_KEY`
+4. In **Settings**, change the service type to **Cron Job**
+5. Set the cron schedule to `0 8 */2 * *` (every 2 days at 8 AM UTC)
+6. Increase the job timeout to **45 minutes** (the scraper can take 10-30+ min depending on results)
+
+## Testing
+
+```bash
+bun test
+```
+
+## Customize Your Profile
+
+Fork this repo and edit `src/profile.ts` to match your job search. There are two things to change:
+
+**`SEARCH_KEYWORDS`** — the search terms that get combined with each job board domain. For example, if you're looking for Python backend roles:
+
+```ts
+export const SEARCH_KEYWORDS = [
+  "senior python backend engineer",
+  "senior django developer",
+  "senior fastapi developer",
+  "lead backend engineer python",
+];
+```
+
+**`EVALUATION_PROFILES`** — the LLM pass/fail criteria. The evaluator acts as a binary gatekeeper (not a scorer), so write clear rules for what should pass and what should fail. Specify the target location, seniority level, tech stack, and role type:
+
+```ts
+export const EVALUATION_PROFILES: EvaluationProfile[] = [
+  {
+    name: "python-backend",
+    prompt: `You evaluate job listings for a senior Python backend engineer based in the USA.
+
+A job PASSES if ALL of these are true:
+1. US-based or remote-friendly to US timezones.
+2. Senior or lead level (or unspecified).
+3. Backend engineering involving Python (Django, FastAPI, Flask).
+
+A job FAILS if ANY of these are true:
+- Restricted to non-US locations
+- Junior or internship level
+- Non-engineering role
+- No Python involvement`,
+  },
+];
+```
+
+You can define multiple profiles — a job passes if **any** profile accepts it.
 
 ## Architecture
 
@@ -122,30 +188,3 @@ The goal is to keep the Notion board accurate without manual status management. 
 **Pass 2 — Propagate Company Applied**: Finds all companies where the user has an Application Date within the last 6 months, then marks any "To Review" jobs from those companies as "Company Applied". This prevents reviewing jobs at companies you've already applied to recently.
 
 **Pass 3 — Archive blocked companies**: Finds all companies with at least one "Company Blocked" job, then archives any "To Review" jobs from those companies. Once you block a company, all future scraped jobs from them are automatically archived.
-
-## Local Setup
-
-```bash
-bun install
-cp .env.example .env  # fill in your API keys
-bun run scrape
-```
-
-## Deploy to Railway (Cron Job)
-
-1. Create a new project on [railway.app](https://railway.app) and connect your GitHub repo
-2. Railway auto-detects the `Dockerfile` and builds from it
-3. In the service's **Variables** tab, add:
-   - `NOTION_TOKEN`
-   - `NOTION_DATABASE_ID`
-   - `JINA_API_KEY`
-   - `ANTHROPIC_API_KEY`
-4. In **Settings**, change the service type to **Cron Job**
-5. Set the cron schedule to `0 8 */2 * *` (every 2 days at 8 AM UTC)
-6. Increase the job timeout to **45 minutes** (the scraper can take 10-30+ min depending on results)
-
-## Testing
-
-```bash
-bun test
-```
