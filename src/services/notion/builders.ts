@@ -81,5 +81,5 @@ export function descriptionToBlocks(description: string) {
     }
   }
 
-  return blocks;
+  return blocks.slice(0, 100);
 }
