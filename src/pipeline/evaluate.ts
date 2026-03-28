@@ -74,5 +74,12 @@ export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobE
     }
   }
 
+  // If all profiles errored (none fulfilled), surface the first error
+  // so it can be retried by the circuit breaker/retry stack
+  const firstError = results.find((r) => r.status === "rejected");
+  if (lastRejection.reason === "No profiles configured" && firstError?.status === "rejected") {
+    throw firstError.reason;
+  }
+
   return lastRejection;
 }
