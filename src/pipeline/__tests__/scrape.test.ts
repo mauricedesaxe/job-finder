@@ -105,5 +105,6 @@ describe("parseJobDetails", () => {
     expect(job.dateScraped).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(job.description).toBe(md);
     expect(job.location).toBe("");
+    expect(job.profile).toBe("");
   });
 });

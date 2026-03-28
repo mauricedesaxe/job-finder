@@ -10,6 +10,7 @@ const EXPECTED_PROPERTIES: Record<string, string> = {
   "Date Scraped": "date",
   "Date Posted": "date",
   Location: "rich_text",
+  Profile: "select",
   Status: "select",
   "Application Date": "date",
 };

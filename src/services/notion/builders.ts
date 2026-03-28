@@ -34,6 +34,13 @@ export function buildNotionProperties(job: JobListing) {
           },
         }
       : {}),
+    ...(job.profile
+      ? {
+          Profile: {
+            select: { name: job.profile },
+          },
+        }
+      : {}),
     Status: {
       select: { name: "To Review" },
     },

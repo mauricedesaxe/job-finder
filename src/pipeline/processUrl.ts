@@ -74,6 +74,10 @@ export async function processUrl(
     ),
   );
 
+  if (evaluation.profileName) {
+    job.profile = evaluation.profileName;
+  }
+
   if (!evaluation.pass) {
     console.log(`  ✗ Rejected: ${job.title} @ ${job.company} — ${evaluation.reason}`);
     await notionRateLimiter.run(() =>

@@ -7,8 +7,9 @@ describe("evaluate module exports", () => {
   });
 
   test("JobEvaluation interface shape is correct", () => {
-    const evaluation: JobEvaluation = { pass: true, reason: "test" };
+    const evaluation: JobEvaluation = { pass: true, reason: "test", profileName: "crypto-web3" };
     expect(evaluation.pass).toBe(true);
     expect(evaluation.reason).toBe("test");
+    expect(evaluation.profileName).toBe("crypto-web3");
   });
 });

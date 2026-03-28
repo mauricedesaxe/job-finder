@@ -75,6 +75,7 @@ export function parseJobDetails(markdown: string, url: string, keyword: string):
     dateScraped: new Date().toISOString().split("T")[0] ?? "",
     description: markdown.slice(0, 8000),
     location: "",
+    profile: "",
   };
 }
 

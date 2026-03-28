@@ -20,4 +20,5 @@ export interface JobListing {
   dateScraped: string;
   description: string;
   location: string;
+  profile: string;
 }
