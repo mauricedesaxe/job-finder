@@ -1,5 +1,23 @@
 {
   "name": "jobfinder",
+  "version": "1.0.0",
+  "description": "Automated job search and enrichment pipeline. Searches job boards, evaluates listings with Claude, and stores qualified jobs in Notion.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mauricedesaxe/job-finder.git"
+  },
+  "keywords": [
+    "job-search",
+    "scraping",
+    "notion",
+    "llm",
+    "automation",
+    "claude"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "module": "index.ts",
   "type": "module",
   "scripts": {
