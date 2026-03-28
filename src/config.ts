@@ -11,9 +11,9 @@ const ConfigSchema = z.object({
   anthropicApiKey: z.string().min(1, "ANTHROPIC_API_KEY is required"),
 });
 
-export type ScrapioConfig = z.infer<typeof ConfigSchema>;
+export type JobFinderConfig = z.infer<typeof ConfigSchema>;
 
-export const config: Readonly<ScrapioConfig> = Object.freeze(
+export const config: Readonly<JobFinderConfig> = Object.freeze(
   ConfigSchema.parse({
     keywords: SEARCH_KEYWORDS,
     domains: SEARCH_DOMAINS,

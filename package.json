@@ -1,5 +1,5 @@
 {
-  "name": "scrapio",
+  "name": "jobfinder",
   "module": "index.ts",
   "type": "module",
   "scripts": {

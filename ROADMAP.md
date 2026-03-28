@@ -1,4 +1,4 @@
-# Scrapio Roadmap
+# JobFinder Roadmap
 
 Production evolution plan. Each section is a workstream with concrete tasks.
 Priority: P0 = do first, P1 = do next, P2 = nice to have.
@@ -109,18 +109,18 @@ Use Railway's Redis addon for persistent state between runs.
 - [ ] Store `lastScrapedAt` timestamp in Redis
 - [ ] Before each run, check if enough time has passed (configurable interval)
 - [ ] Prevents double-runs if Railway restarts the service or cron fires twice
-- [ ] Key: `scrapio:lastScrapedAt` → ISO timestamp
+- [ ] Key: `jobfinder:lastScrapedAt` → ISO timestamp
 
 ### URL deduplication
 - [ ] Replace in-memory `seenUrls` Set with Redis Set
-- [ ] Key: `scrapio:seen-urls` → Redis SET of all processed URLs
+- [ ] Key: `jobfinder:seen-urls` → Redis SET of all processed URLs
 - [ ] Check `SISMEMBER` before processing, `SADD` after successful insertion
 - [ ] Optional TTL on the set (e.g., 90 days) to avoid unbounded growth
 - [ ] Faster than querying Notion for every URL (current approach)
 
 ### Run history
 - [ ] Store last N run summaries in Redis list
-- [ ] Key: `scrapio:runs` → list of `{ timestamp, stats, duration }`
+- [ ] Key: `jobfinder:runs` → list of `{ timestamp, stats, duration }`
 - [ ] Useful for debugging without checking Railway logs
 
 ### Tasks

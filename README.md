@@ -1,4 +1,4 @@
-# scrapio
+# jobfinder
 
 Automated job search and enrichment pipeline for crypto/web3 engineering positions. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with Claude, and stores qualified jobs in Notion.
 

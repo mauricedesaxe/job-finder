@@ -11,7 +11,7 @@ import {
   notionRateLimiter,
   withRetry,
 } from "../concurrency";
-import type { ScrapioConfig } from "../config";
+import type { JobFinderConfig } from "../config";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
 import { checkFuzzyDuplicate } from "./dedup";
@@ -30,7 +30,7 @@ export type ProcessResult =
 
 export interface ProcessContext {
   notion: Client;
-  config: ScrapioConfig;
+  config: JobFinderConfig;
   syncer: CacheSyncer;
   seenUrls: Set<string>;
 }
