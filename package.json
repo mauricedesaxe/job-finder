@@ -1,5 +1,23 @@
 {
   "name": "jobfinder",
+  "version": "2026.03.28",
+  "description": "Automated job search and enrichment pipeline. Searches job boards, evaluates listings with Claude, and stores qualified jobs in Notion.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mauricedesaxe/job-finder.git"
+  },
+  "keywords": [
+    "job-search",
+    "scraping",
+    "notion",
+    "llm",
+    "automation",
+    "claude"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "module": "index.ts",
   "type": "module",
   "scripts": {
@@ -11,16 +29,14 @@
     "prepare": "lefthook install"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.9",
-    "@evilmartians/lefthook": "^2.1.4",
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "@biomejs/biome": "2.4.9",
+    "@evilmartians/lefthook": "2.1.4",
+    "@types/bun": "1.3.11",
+    "typescript": "5.9.3"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.80.0",
-    "@notionhq/client": "2",
-    "zod": "^4.3.6"
+    "@anthropic-ai/sdk": "0.80.0",
+    "@notionhq/client": "2.3.0",
+    "zod": "4.3.6"
   }
 }
