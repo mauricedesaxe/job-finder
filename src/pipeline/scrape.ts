@@ -1,4 +1,4 @@
-import type { ScrapioConfig } from "../config";
+import type { JobFinderConfig } from "../config";
 import type { JobListing } from "../types";
 import { fetchViaJina } from "./search";
 
@@ -80,7 +80,7 @@ export function parseJobDetails(markdown: string, url: string, keyword: string):
 
 export async function scrapeJobPage(
   url: string,
-  config: Pick<ScrapioConfig, "jinaBaseUrl" | "jinaApiKey">,
+  config: Pick<JobFinderConfig, "jinaBaseUrl" | "jinaApiKey">,
 ): Promise<string> {
   return fetchViaJina(url, config);
 }

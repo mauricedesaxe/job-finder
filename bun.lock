@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "scrapio",
+      "name": "jobfinder",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.80.0",
         "@notionhq/client": "2",

@@ -1,4 +1,4 @@
-import type { ScrapioConfig } from "../config";
+import type { JobFinderConfig } from "../config";
 import { fetchWithRetry } from "../services/http";
 
 interface JinaSearchResult {
@@ -33,7 +33,7 @@ export function filterJobUrls(results: JinaSearchResult[], domain: string): stri
 
 export async function fetchJinaSearch(
   query: string,
-  config: Pick<ScrapioConfig, "jinaApiKey">,
+  config: Pick<JobFinderConfig, "jinaApiKey">,
 ): Promise<JinaSearchResult[]> {
   const url = `https://s.jina.ai/?q=${encodeURIComponent(query)}`;
   const headers: Record<string, string> = {
@@ -50,7 +50,7 @@ export async function fetchJinaSearch(
 
 export async function fetchViaJina(
   targetUrl: string,
-  config: Pick<ScrapioConfig, "jinaBaseUrl" | "jinaApiKey">,
+  config: Pick<JobFinderConfig, "jinaBaseUrl" | "jinaApiKey">,
 ): Promise<string> {
   const jinaUrl = `${config.jinaBaseUrl}/${targetUrl}`;
   const headers: Record<string, string> = {
@@ -67,7 +67,7 @@ export async function fetchViaJina(
 export async function searchJobs(
   keyword: string,
   domain: string,
-  config: ScrapioConfig,
+  config: JobFinderConfig,
 ): Promise<string[]> {
   const query = buildSearchQuery(keyword, domain);
   const results = await fetchJinaSearch(query, config);
