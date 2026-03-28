@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[release]')"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+
+      - name: Generate CalVer version
+        id: version
+        run: |
+          BASE=$(date -u +%Y.%m.%d)
+          N=0
+          VERSION=$BASE
+          while git tag | grep -q "^v${VERSION}$"; do
+            N=$((N + 1))
+            VERSION="${BASE}.${N}"
+          done
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update package.json version
+        run: |
+          bun install --frozen-lockfile
+          cat package.json | bun -e '
+            const pkg = await Bun.stdin.json();
+            pkg.version = "${{ steps.version.outputs.version }}";
+            console.log(JSON.stringify(pkg, null, 2));
+          ' > package.json.tmp && mv package.json.tmp package.json
+
+      - name: Commit, tag, and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "release: v${{ steps.version.outputs.version }} [release]"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin main --tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
