@@ -13,6 +13,7 @@ describe("buildNotionProperties", () => {
     dateScraped: "2025-03-26",
     description: "Full job description here...",
     location: "Remote (Global)",
+    profile: "",
   };
 
   test("maps all fields correctly", () => {
