@@ -49,6 +49,17 @@ describe("buildNotionProperties", () => {
     const props = buildNotionProperties(jobNoLocation);
     expect(props.Location).toBeUndefined();
   });
+
+  test("includes Profile when set", () => {
+    const jobWithProfile = { ...job, profile: "crypto-web3" };
+    const props = buildNotionProperties(jobWithProfile);
+    expect(props.Profile).toEqual({ select: { name: "crypto-web3" } });
+  });
+
+  test("omits Profile when empty", () => {
+    const props = buildNotionProperties(job);
+    expect(props.Profile).toBeUndefined();
+  });
 });
 
 describe("descriptionToBlocks", () => {
