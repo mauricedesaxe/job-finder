@@ -1,5 +1,6 @@
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import { config } from "./config";
+import { logger } from "./logger";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
@@ -7,6 +8,8 @@ import { runPreflight } from "./preflight";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
+
+const log = logger.child({ component: "main" });
 
 async function main() {
   const startTime = Date.now();
@@ -16,14 +19,16 @@ async function main() {
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
 
   // Pre-cache Notion data to avoid per-URL queries
-  console.log("\nBuilding Notion cache...");
-  const cache = await buildNotionCache(notion, config.notionDatabaseId, {
-    onProgress: (n) => process.stdout.write(`\r  Fetching... ${n} items`),
-  });
-  process.stdout.write("\n");
-  console.log(
-    `  Cached: ${cache.existingUrls.size} URLs, ${cache.blockedCompanies.size} blocked companies, ` +
-      `${cache.recentAppCompanies.size} recent app companies, ${cache.jobsByCompany.size} companies with jobs`,
+  log.info("building notion cache");
+  const cache = await buildNotionCache(notion, config.notionDatabaseId);
+  log.info(
+    {
+      urls: cache.existingUrls.size,
+      blocked: cache.blockedCompanies.size,
+      recentApps: cache.recentAppCompanies.size,
+      companies: cache.jobsByCompany.size,
+    },
+    "notion cache built",
   );
 
   const syncer = new CacheSyncer(cache);
@@ -33,9 +38,7 @@ async function main() {
     config.domains.map((domain) => ({ keyword, domain })),
   );
 
-  console.log(
-    `\nPhase 1: Searching ${searchPairs.length} keyword×domain pairs (concurrency: 5)...\n`,
-  );
+  log.info({ pairs: searchPairs.length }, "phase 1: searching");
 
   const urlMap = new Map<string, string>(); // url → keyword
 
@@ -45,10 +48,10 @@ async function main() {
         const urls = await jinaBreaker.run(() =>
           withRetry(() => searchJobs(keyword, domain, config), {
             shouldRetry: isRetryableJina,
-            onRetry: (a) => console.log(`  ⏳ Search retry ${a}: site:${domain} ${keyword}`),
+            onRetry: (a) => log.warn({ keyword, domain, attempt: a }, "search retry"),
           }),
         );
-        console.log(`  🔍 site:${domain} ${keyword} → ${urls.length} URLs`);
+        log.info({ domain, keyword, urls: urls.length }, "search complete");
         return { keyword, urls };
       }),
     ),
@@ -63,21 +66,17 @@ async function main() {
         }
       }
     } else {
-      console.error(`  ✗ Search failed: ${result.reason}`);
+      log.error({ err: result.reason }, "search failed");
       searchErrors++;
     }
   }
 
-  console.log(
-    `\nSearch complete: ${urlMap.size} unique URLs found (${searchErrors} search errors)`,
-  );
+  log.info({ uniqueUrls: urlMap.size, searchErrors }, "all searches complete");
 
   // Phase 2: Parallel URL processing
   const seenUrls = new Set<string>();
 
-  console.log(
-    `\nPhase 2: Processing ${urlMap.size} URLs (Jina: 8, Anthropic: 10, Notion: 3 req/s)...\n`,
-  );
+  log.info({ urls: urlMap.size }, "phase 2: processing urls");
 
   syncer.start(notion, config.notionDatabaseId);
 
@@ -106,33 +105,16 @@ async function main() {
       if (key === "companyApplied") stats.companyApplied++;
       else if (key in stats) stats[key as keyof typeof stats]++;
     } else {
-      console.error(`  ✗ Process failed: ${result.reason}`);
+      log.error({ err: result.reason }, "url processing failed");
       stats.errored++;
     }
   }
 
   const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
-  console.log("\n--- Scrape Summary ---");
-  console.log(`Inserted:        ${stats.inserted}`);
-  console.log(`Company Applied: ${stats.companyApplied}`);
-  console.log(`Rejected:        ${stats.rejected}`);
-  console.log(`Duplicated:      ${stats.duplicated}`);
-  console.log(`Archived:        ${stats.archived}`);
-  console.log(`Skipped:         ${stats.skipped}`);
-  console.log(`Errored:         ${stats.errored}`);
-
-  console.log("\n--- Pre-scrape Reconcile Summary ---");
-  console.log(`Auto-Applied:    ${preReconcileStats.applied}`);
-  console.log(`Unstaled:        ${preReconcileStats.unstaled}`);
-  console.log(`Company Applied: ${preReconcileStats.companyApplied}`);
-  console.log(`Archived:        ${preReconcileStats.archived}`);
-
-  console.log("\n--- Post-scrape Reconcile Summary ---");
-  console.log(`Auto-Applied:    ${postReconcileStats.applied}`);
-  console.log(`Unstaled:        ${postReconcileStats.unstaled}`);
-  console.log(`Company Applied: ${postReconcileStats.companyApplied}`);
-  console.log(`Archived:        ${postReconcileStats.archived}`);
+  log.info({ stats }, "scrape summary");
+  log.info({ reconcile: preReconcileStats }, "pre-scrape reconcile summary");
+  log.info({ reconcile: postReconcileStats }, "post-scrape reconcile summary");
 
   if (config.slackWebhookUrl) {
     await sendRunReport(
@@ -149,7 +131,7 @@ async function main() {
 }
 
 main().catch(async (err) => {
-  console.error("Fatal error:", err);
+  log.fatal({ err }, "fatal error");
   if (config.slackWebhookUrl) {
     await sendFatalError(config.slackWebhookUrl, err);
   }
