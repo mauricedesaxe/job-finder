@@ -1,6 +1,7 @@
 import { logger } from "../logger";
 import type { ScrapeStats } from "../pipeline/processUrl";
 import type { ReconcileStats } from "../pipeline/reconcile";
+import type { TokenSummary } from "./tokenTracker";
 
 const log = logger.child({ component: "slack" });
 
@@ -17,13 +18,20 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${remainingSeconds}s`;
 }
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 function buildRunReportBlocks(
   stats: ScrapeStats,
   reconcileStats: ReconcileStats,
   search: SearchMeta,
   durationMs: number,
+  tokens?: TokenSummary,
 ): object[] {
-  return [
+  const blocks: object[] = [
     {
       type: "header",
       text: { type: "plain_text", text: "📊 Scrape Complete" },
@@ -67,6 +75,41 @@ function buildRunReportBlocks(
         { type: "mrkdwn", text: `*Archived:* ${reconcileStats.archived}` },
       ],
     },
+  ];
+
+  if (tokens && tokens.total.calls > 0) {
+    const { byStage, total, estimatedCost } = tokens;
+    blocks.push(
+      { type: "divider" },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "*Token Usage*" },
+      },
+      {
+        type: "section",
+        fields: [
+          {
+            type: "mrkdwn",
+            text: `*Evaluation:* ${formatTokens(byStage.evaluation.input)} in / ${formatTokens(byStage.evaluation.output)} out (${byStage.evaluation.calls} calls)`,
+          },
+          {
+            type: "mrkdwn",
+            text: `*Enrichment:* ${formatTokens(byStage.enrichment.input)} in / ${formatTokens(byStage.enrichment.output)} out (${byStage.enrichment.calls} calls)`,
+          },
+          {
+            type: "mrkdwn",
+            text: `*Dedup:* ${formatTokens(byStage.dedup.input)} in / ${formatTokens(byStage.dedup.output)} out (${byStage.dedup.calls} calls)`,
+          },
+          {
+            type: "mrkdwn",
+            text: `*Total:* ${formatTokens(total.input)} in / ${formatTokens(total.output)} out · *$${estimatedCost.toFixed(4)}*`,
+          },
+        ],
+      },
+    );
+  }
+
+  blocks.push(
     { type: "divider" },
     {
       type: "context",
@@ -77,7 +120,9 @@ function buildRunReportBlocks(
         },
       ],
     },
-  ];
+  );
+
+  return blocks;
 }
 
 function getColor(stats: ScrapeStats): string {
@@ -103,13 +148,14 @@ export async function sendRunReport(
   reconcileStats: ReconcileStats,
   search: SearchMeta,
   durationMs: number,
+  tokens?: TokenSummary,
 ): Promise<void> {
   try {
     await postToSlack(webhookUrl, {
       attachments: [
         {
           color: getColor(stats),
-          blocks: buildRunReportBlocks(stats, reconcileStats, search, durationMs),
+          blocks: buildRunReportBlocks(stats, reconcileStats, search, durationMs, tokens),
         },
       ],
     });

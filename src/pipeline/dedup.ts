@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getClient } from "../services/anthropic";
+import type { TokenTracker } from "../services/tokenTracker";
 
 export interface DedupResult {
   isDuplicate: boolean;
@@ -30,6 +31,7 @@ export async function checkFuzzyDuplicate(
   newTitle: string,
   existingTitles: string[],
   apiKey: string,
+  tracker?: TokenTracker,
 ): Promise<DedupResult> {
   if (existingTitles.length === 0) {
     return { isDuplicate: false };
@@ -60,6 +62,8 @@ export async function checkFuzzyDuplicate(
     tools: [DEDUP_TOOL],
     tool_choice: { type: "tool", name: "check_duplicate" },
   });
+
+  tracker?.add("dedup", response.usage);
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {

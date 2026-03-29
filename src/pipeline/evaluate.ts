@@ -5,6 +5,7 @@ import {
   type EvaluationCriteria,
 } from "../config/evaluation";
 import { getClient } from "../services/anthropic";
+import type { TokenTracker } from "../services/tokenTracker";
 import type { JobListing } from "../types";
 
 export interface JobEvaluation {
@@ -36,6 +37,7 @@ export async function evaluateSingle(
   job: JobListing,
   criteria: EvaluationCriteria,
   apiKey: string,
+  tracker?: TokenTracker,
 ): Promise<JobEvaluation> {
   const anthropic = getClient(apiKey);
 
@@ -56,6 +58,8 @@ ${job.description}`;
     tool_choice: { type: "tool", name: "evaluate_job" },
   });
 
+  tracker?.add("evaluation", response.usage);
+
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {
     throw new Error(`Evaluation failed: no tool_use block in response`);
@@ -70,16 +74,18 @@ export async function evaluateJob(
     filters?: EvaluationCriteria[];
     profiles?: EvaluationCriteria[];
     evaluate?: typeof evaluateSingle;
+    tracker?: TokenTracker;
   },
 ): Promise<JobEvaluation> {
   const filters = deps?.filters ?? EVALUATION_FILTERS;
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;
+  const tracker = deps?.tracker;
 
   // Phase 1: AND filters — run in parallel, reject on first failure in results
   if (filters.length > 0) {
     const filterResults = await Promise.allSettled(
-      filters.map((filter) => evaluate(job, filter, apiKey)),
+      filters.map((filter) => evaluate(job, filter, apiKey, tracker)),
     );
     for (const [i, result] of filterResults.entries()) {
       if (result.status === "rejected") {
@@ -100,7 +106,7 @@ export async function evaluateJob(
   }
 
   const results = await Promise.allSettled(
-    profiles.map((profile) => evaluate(job, profile, apiKey)),
+    profiles.map((profile) => evaluate(job, profile, apiKey, tracker)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles matched" };
