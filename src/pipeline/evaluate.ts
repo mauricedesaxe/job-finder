@@ -59,18 +59,31 @@ ${job.description}`;
   return toolBlock.input as JobEvaluation;
 }
 
-export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobEvaluation> {
-  const filters = EVALUATION_FILTERS;
-  const profiles = EVALUATION_PROFILES;
+export async function evaluateJob(
+  job: JobListing,
+  apiKey: string,
+  deps?: {
+    filters?: EvaluationCriteria[];
+    profiles?: EvaluationCriteria[];
+    evaluate?: typeof evaluateSingle;
+  },
+): Promise<JobEvaluation> {
+  const filters = deps?.filters ?? EVALUATION_FILTERS;
+  const profiles = deps?.profiles ?? EVALUATION_PROFILES;
+  const evaluate = deps?.evaluate ?? evaluateSingle;
 
   // Phase 1: AND filters — all must pass, short-circuit on first failure
   if (filters.length > 0) {
-    const filterResults = await Promise.all(
-      filters.map((filter) => evaluateSingle(job, filter, apiKey)),
+    const filterResults = await Promise.allSettled(
+      filters.map((filter) => evaluate(job, filter, apiKey)),
     );
-    const failed = filterResults.find((r) => !r.pass);
-    if (failed) {
-      return { pass: false, reason: failed.reason };
+    for (const [i, result] of filterResults.entries()) {
+      if (result.status === "rejected") {
+        return { pass: false, reason: `Filter "${filters[i]?.name}" failed: ${result.reason}` };
+      }
+      if (!result.value.pass) {
+        return { pass: false, reason: result.value.reason };
+      }
     }
   }
 
@@ -83,7 +96,7 @@ export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobE
   }
 
   const results = await Promise.allSettled(
-    profiles.map((profile) => evaluateSingle(job, profile, apiKey)),
+    profiles.map((profile) => evaluate(job, profile, apiKey)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles matched" };
