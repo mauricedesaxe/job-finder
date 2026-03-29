@@ -8,6 +8,7 @@ import { runPreflight } from "./preflight";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
+import { TokenTracker } from "./services/tokenTracker";
 
 const log = logger.child({ component: "main" });
 const reconcileOnly = process.argv.includes("--reconcile-only");
@@ -39,6 +40,7 @@ async function main() {
   );
 
   const syncer = new CacheSyncer(cache);
+  const tracker = new TokenTracker();
 
   // Phase 1: Parallel search — collect all URLs
   const searchPairs = config.keywords.flatMap((keyword) =>
@@ -89,7 +91,7 @@ async function main() {
 
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, syncer, seenUrls }),
+      processUrl(url, keyword, { notion, config, syncer, seenUrls, tracker }),
     ),
   );
 
@@ -119,9 +121,12 @@ async function main() {
 
   const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
+  const tokenSummary = tracker.summary();
+
   log.info({ stats }, "scrape summary");
   log.info({ reconcile: preReconcileStats }, "pre-scrape reconcile summary");
   log.info({ reconcile: postReconcileStats }, "post-scrape reconcile summary");
+  log.info({ tokens: tokenSummary }, "token usage summary");
 
   if (config.slackWebhookUrl) {
     await sendRunReport(
@@ -133,6 +138,7 @@ async function main() {
         searchErrors,
       },
       Date.now() - startTime,
+      tokenSummary,
     );
   }
 }

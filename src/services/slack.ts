@@ -1,6 +1,7 @@
 import { logger } from "../logger";
 import type { ScrapeStats } from "../pipeline/processUrl";
 import type { ReconcileStats } from "../pipeline/reconcile";
+import type { TokenSummary } from "./tokenTracker";
 
 const log = logger.child({ component: "slack" });
 
@@ -17,13 +18,20 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${remainingSeconds}s`;
 }
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 function buildRunReportBlocks(
   stats: ScrapeStats,
   reconcileStats: ReconcileStats,
   search: SearchMeta,
   durationMs: number,
+  tokens?: TokenSummary,
 ): object[] {
-  return [
+  const blocks: object[] = [
     {
       type: "header",
       text: { type: "plain_text", text: "📊 Scrape Complete" },
@@ -67,6 +75,61 @@ function buildRunReportBlocks(
         { type: "mrkdwn", text: `*Archived:* ${reconcileStats.archived}` },
       ],
     },
+  ];
+
+  if (tokens && tokens.total.calls > 0) {
+    blocks.push(
+      { type: "divider" },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "*Token Usage*" },
+      },
+    );
+
+    for (const [model, usage] of Object.entries(tokens.byModel)) {
+      const { byStage, total: modelTotal } = usage;
+      blocks.push({
+        type: "section",
+        fields: [
+          {
+            type: "mrkdwn",
+            text: `*${model}*`,
+          },
+          {
+            type: "mrkdwn",
+            text: `${formatTokens(modelTotal.input)} in / ${formatTokens(modelTotal.output)} out (${modelTotal.calls} calls)`,
+          },
+          {
+            type: "mrkdwn",
+            text: `Eval: ${formatTokens(byStage.evaluation.input)}/${formatTokens(byStage.evaluation.output)}`,
+          },
+          {
+            type: "mrkdwn",
+            text: `Enrich: ${formatTokens(byStage.enrichment.input)}/${formatTokens(byStage.enrichment.output)}`,
+          },
+          {
+            type: "mrkdwn",
+            text: `Dedup: ${formatTokens(byStage.dedup.input)}/${formatTokens(byStage.dedup.output)}`,
+          },
+        ],
+      });
+    }
+
+    if (Object.keys(tokens.byModel).length > 1) {
+      const { total } = tokens;
+      blocks.push({
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: `All models: ${formatTokens(total.input)} in / ${formatTokens(total.output)} out (${total.calls} calls)`,
+          },
+        ],
+      });
+    }
+  }
+
+  blocks.push(
     { type: "divider" },
     {
       type: "context",
@@ -77,7 +140,9 @@ function buildRunReportBlocks(
         },
       ],
     },
-  ];
+  );
+
+  return blocks;
 }
 
 function getColor(stats: ScrapeStats): string {
@@ -103,13 +168,14 @@ export async function sendRunReport(
   reconcileStats: ReconcileStats,
   search: SearchMeta,
   durationMs: number,
+  tokens?: TokenSummary,
 ): Promise<void> {
   try {
     await postToSlack(webhookUrl, {
       attachments: [
         {
           color: getColor(stats),
-          blocks: buildRunReportBlocks(stats, reconcileStats, search, durationMs),
+          blocks: buildRunReportBlocks(stats, reconcileStats, search, durationMs, tokens),
         },
       ],
     });

@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getClient } from "../services/anthropic";
+import type { TokenTracker } from "../services/tokenTracker";
 import type { JobListing } from "../types";
 
 export interface JobEnrichment {
@@ -44,7 +45,11 @@ const ENRICH_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export async function enrichJob(job: JobListing, apiKey: string): Promise<JobEnrichment> {
+export async function enrichJob(
+  job: JobListing,
+  apiKey: string,
+  tracker?: TokenTracker,
+): Promise<JobEnrichment> {
   const anthropic = getClient(apiKey);
 
   const userMessage = `Job Title: ${job.title}
@@ -63,6 +68,8 @@ ${job.description}`;
     tools: [ENRICH_TOOL],
     tool_choice: { type: "tool", name: "enrich_job" },
   });
+
+  tracker?.add(response.model, "enrichment", response.usage);
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {

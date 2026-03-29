@@ -15,6 +15,7 @@ import type { JobFinderConfig } from "../config";
 import { logger } from "../logger";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
+import type { TokenTracker } from "../services/tokenTracker";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -46,6 +47,7 @@ export interface ProcessContext {
   config: JobFinderConfig;
   syncer: CacheSyncer;
   seenUrls: Set<string>;
+  tracker?: TokenTracker;
 }
 
 export async function processUrl(
@@ -53,7 +55,7 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { notion, config, syncer, seenUrls } = ctx;
+  const { notion, config, syncer, seenUrls, tracker } = ctx;
   const cache = syncer.cache;
 
   // In-run dedup
@@ -80,7 +82,7 @@ export async function processUrl(
   // Evaluate (profiles run in parallel internally)
   const evaluation = await anthropicSemaphore.run(() =>
     anthropicBreaker.run(() =>
-      withRetry(() => evaluateJob(job, config.anthropicApiKey), {
+      withRetry(() => evaluateJob(job, config.anthropicApiKey, { tracker }), {
         shouldRetry: isRetryableAnthropic,
         onRetry: (a) => log.warn({ url, attempt: a }, "anthropic eval retry"),
       }),
@@ -109,7 +111,7 @@ export async function processUrl(
   // Enrich
   const enriched = await anthropicSemaphore.run(() =>
     anthropicBreaker.run(() =>
-      withRetry(() => enrichJob(job, config.anthropicApiKey), {
+      withRetry(() => enrichJob(job, config.anthropicApiKey, tracker), {
         shouldRetry: isRetryableAnthropic,
         onRetry: (a) => log.warn({ url, attempt: a }, "anthropic enrich retry"),
       }),
@@ -124,9 +126,10 @@ export async function processUrl(
   const existingTitles = cache.jobsByCompany.get(job.company) ?? [];
   if (existingTitles.length > 0) {
     const dedup = await anthropicSemaphore.run(() =>
-      withRetry(() => checkFuzzyDuplicate(job.title, existingTitles, config.anthropicApiKey), {
-        shouldRetry: isRetryableAnthropic,
-      }),
+      withRetry(
+        () => checkFuzzyDuplicate(job.title, existingTitles, config.anthropicApiKey, tracker),
+        { shouldRetry: isRetryableAnthropic },
+      ),
     );
     if (dedup.isDuplicate) {
       log.info(
