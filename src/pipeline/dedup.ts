@@ -63,7 +63,7 @@ export async function checkFuzzyDuplicate(
     tool_choice: { type: "tool", name: "check_duplicate" },
   });
 
-  tracker?.add("dedup", response.usage);
+  tracker?.add(response.model, "dedup", response.usage);
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {

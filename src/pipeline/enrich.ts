@@ -69,7 +69,7 @@ ${job.description}`;
     tool_choice: { type: "tool", name: "enrich_job" },
   });
 
-  tracker?.add("enrichment", response.usage);
+  tracker?.add(response.model, "enrichment", response.usage);
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {

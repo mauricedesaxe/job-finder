@@ -78,35 +78,55 @@ function buildRunReportBlocks(
   ];
 
   if (tokens && tokens.total.calls > 0) {
-    const { byStage, total } = tokens;
     blocks.push(
       { type: "divider" },
       {
         type: "section",
         text: { type: "mrkdwn", text: "*Token Usage*" },
       },
-      {
+    );
+
+    for (const [model, usage] of Object.entries(tokens.byModel)) {
+      const { byStage, total: modelTotal } = usage;
+      blocks.push({
         type: "section",
         fields: [
           {
             type: "mrkdwn",
-            text: `*Evaluation:* ${formatTokens(byStage.evaluation.input)} in / ${formatTokens(byStage.evaluation.output)} out (${byStage.evaluation.calls} calls)`,
+            text: `*${model}*`,
           },
           {
             type: "mrkdwn",
-            text: `*Enrichment:* ${formatTokens(byStage.enrichment.input)} in / ${formatTokens(byStage.enrichment.output)} out (${byStage.enrichment.calls} calls)`,
+            text: `${formatTokens(modelTotal.input)} in / ${formatTokens(modelTotal.output)} out (${modelTotal.calls} calls)`,
           },
           {
             type: "mrkdwn",
-            text: `*Dedup:* ${formatTokens(byStage.dedup.input)} in / ${formatTokens(byStage.dedup.output)} out (${byStage.dedup.calls} calls)`,
+            text: `Eval: ${formatTokens(byStage.evaluation.input)}/${formatTokens(byStage.evaluation.output)}`,
           },
           {
             type: "mrkdwn",
-            text: `*Total:* ${formatTokens(total.input)} in / ${formatTokens(total.output)} out (${total.calls} calls)`,
+            text: `Enrich: ${formatTokens(byStage.enrichment.input)}/${formatTokens(byStage.enrichment.output)}`,
+          },
+          {
+            type: "mrkdwn",
+            text: `Dedup: ${formatTokens(byStage.dedup.input)}/${formatTokens(byStage.dedup.output)}`,
           },
         ],
-      },
-    );
+      });
+    }
+
+    if (Object.keys(tokens.byModel).length > 1) {
+      const { total } = tokens;
+      blocks.push({
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: `All models: ${formatTokens(total.input)} in / ${formatTokens(total.output)} out (${total.calls} calls)`,
+          },
+        ],
+      });
+    }
   }
 
   blocks.push(

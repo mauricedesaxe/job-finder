@@ -58,7 +58,7 @@ ${job.description}`;
     tool_choice: { type: "tool", name: "evaluate_job" },
   });
 
-  tracker?.add("evaluation", response.usage);
+  tracker?.add(response.model, "evaluation", response.usage);
 
   const toolBlock = response.content.find((block) => block.type === "tool_use");
   if (!toolBlock || toolBlock.type !== "tool_use") {
