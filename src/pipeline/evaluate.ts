@@ -1,5 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { EVALUATION_FILTERS, EVALUATION_PROFILES, type EvaluationCriteria } from "../config";
+import {
+  EVALUATION_FILTERS,
+  EVALUATION_PROFILES,
+  type EvaluationCriteria,
+} from "../config/evaluation";
 import { getClient } from "../services/anthropic";
 import type { JobListing } from "../types";
 

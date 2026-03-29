@@ -5,7 +5,7 @@ import {
   type EvaluationCriteria,
   type EvaluationFilter,
   type EvaluationProfile,
-} from "../../config";
+} from "../../config/evaluation";
 import type { JobListing } from "../../types";
 import { evaluateJob, evaluateSingle, type JobEvaluation } from "../evaluate";
 
