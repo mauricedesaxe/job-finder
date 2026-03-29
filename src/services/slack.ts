@@ -1,14 +1,5 @@
+import type { ScrapeStats } from "../pipeline/processUrl";
 import type { ReconcileStats } from "../pipeline/reconcile";
-
-export interface ScrapeStats {
-  inserted: number;
-  skipped: number;
-  companyApplied: number;
-  rejected: number;
-  archived: number;
-  duplicated: number;
-  errored: number;
-}
 
 export interface SearchMeta {
   urlCount: number;

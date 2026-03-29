@@ -1,6 +1,6 @@
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import { config } from "./config";
-import { type ProcessResult, processUrl } from "./pipeline/processUrl";
+import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
@@ -90,7 +90,7 @@ async function main() {
   syncer.stop();
 
   // Aggregate stats
-  const stats = {
+  const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
     companyApplied: 0,
