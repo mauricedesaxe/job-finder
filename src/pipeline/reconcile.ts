@@ -1,4 +1,5 @@
 import type { Client } from "@notionhq/client";
+import { logger } from "../logger";
 import {
   checkRecentApplication,
   queryAppliedCompanies,
@@ -8,6 +9,8 @@ import {
   queryRecentJobsByStatus,
   updateJobStatus,
 } from "../services/notion";
+
+const log = logger.child({ component: "reconcile" });
 
 export interface ReconcileStats {
   applied: number;
@@ -22,9 +25,8 @@ export async function reconcile(
   label?: string,
 ): Promise<ReconcileStats> {
   const stats: ReconcileStats = { applied: 0, unstaled: 0, companyApplied: 0, archived: 0 };
-  const header = label ? `--- ${label}: Reconciling statuses ---` : "--- Reconciling statuses ---";
 
-  console.log(`\n${header}\n`);
+  log.info({ label }, "reconciling statuses");
 
   // Pass 0: Auto-mark "Applied" from Application Date
   const jobsWithAppDate = await queryJobsWithApplicationDateNotStatus(
@@ -33,7 +35,7 @@ export async function reconcile(
     "Applied",
   );
   for (const job of jobsWithAppDate) {
-    console.log(`  Marking as Applied: ${job.id} (has Application Date)`);
+    log.info({ jobId: job.id }, "marking as applied (has application date)");
     await updateJobStatus(client, job.id, "Applied");
     stats.applied++;
   }
@@ -56,7 +58,7 @@ export async function reconcile(
   for (const [company, pageIds] of companyAppliedCompanies) {
     const recency = await checkRecentApplication(client, databaseId, company);
     if (!recency.exists) {
-      console.log(`  Unstaling ${pageIds.length} job(s) from "${company}" (no recent application)`);
+      log.info({ company, count: pageIds.length }, "unstaling jobs (no recent application)");
       for (const id of pageIds) {
         await updateJobStatus(client, id, "To Review");
         stats.unstaled++;
@@ -75,7 +77,7 @@ export async function reconcile(
       company,
     );
     if (toReviewJobs.length > 0) {
-      console.log(`  Company Applied: ${toReviewJobs.length} job(s) from "${company}"`);
+      log.info({ company, count: toReviewJobs.length }, "propagating company applied status");
       for (const job of toReviewJobs) {
         await updateJobStatus(client, job.id, "Company Applied");
         stats.companyApplied++;
@@ -95,7 +97,7 @@ export async function reconcile(
       company,
     );
     if (toReviewJobs.length > 0) {
-      console.log(`  Archiving ${toReviewJobs.length} job(s) from "${company}" (company blocked)`);
+      log.info({ company, count: toReviewJobs.length }, "archiving jobs (company blocked)");
       for (const job of toReviewJobs) {
         await updateJobStatus(client, job.id, "Archived");
         stats.archived++;
