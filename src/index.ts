@@ -10,11 +10,18 @@ import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
 
 const log = logger.child({ component: "main" });
+const reconcileOnly = process.argv.includes("--reconcile-only");
 
 async function main() {
   const startTime = Date.now();
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
+
+  if (reconcileOnly) {
+    const stats = await reconcile(notion, config.notionDatabaseId);
+    log.info({ stats, durationMs: Date.now() - startTime }, "reconciliation complete");
+    return;
+  }
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
 
