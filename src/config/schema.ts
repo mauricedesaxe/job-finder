@@ -23,6 +23,6 @@ export const config: Readonly<JobFinderConfig> = Object.freeze(
     jinaApiKey: process.env.JINA_API_KEY,
     jinaBaseUrl: "https://r.jina.ai",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL || undefined,
+    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
   }),
 );
