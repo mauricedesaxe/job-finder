@@ -22,6 +22,7 @@
   "type": "module",
   "scripts": {
     "scrape": "bun src/index.ts",
+    "reconcile": "bun src/index.ts --reconcile-only",
     "test": "bun test",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
