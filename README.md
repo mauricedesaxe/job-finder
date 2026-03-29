@@ -30,7 +30,7 @@ Status options (`To Review`, `Applied`, `Skipped`, `Rejected`, `Company Applied`
 
 ## Customize Your Profile
 
-Edit `src/profile.ts` to match your job search. There are two things to change:
+Edit the files in `src/config/` to match your job search. There are three things to configure:
 
 **`SEARCH_KEYWORDS`** — the search terms that get combined with each job board domain. For example, if you're looking for Python backend roles:
 
@@ -171,7 +171,7 @@ Each external service call is wrapped in a resilience stack: **semaphore** (conc
 
 ## How Search Works
 
-Each run generates search queries by combining your **keywords** from `profile.ts` with **job board domains** (Ashby, Lever, Greenhouse, Workable).
+Each run generates search queries by combining your **keywords** from `config/search.ts` with **job board domains** (Ashby, Lever, Greenhouse, Workable).
 
 The query format is `site:{domain} {keyword}` — for example:
 
