@@ -72,7 +72,7 @@ export async function evaluateJob(
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;
 
-  // Phase 1: AND filters — all must pass, short-circuit on first failure
+  // Phase 1: AND filters — run in parallel, reject on first failure in results
   if (filters.length > 0) {
     const filterResults = await Promise.allSettled(
       filters.map((filter) => evaluate(job, filter, apiKey)),
