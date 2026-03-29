@@ -1,6 +1,6 @@
 {
   "name": "jobfinder",
-  "version": "2026.03.28.1",
+  "version": "2026.03.29",
   "description": "Automated job search and enrichment pipeline. Searches job boards, evaluates listings with Claude, and stores qualified jobs in Notion.",
   "license": "MIT",
   "repository": {
