@@ -30,7 +30,7 @@ Status options (`To Review`, `Applied`, `Skipped`, `Rejected`, `Company Applied`
 
 ## Customize Your Profile
 
-Edit `src/profile.ts` to match your job search. There are two things to change:
+Edit the files in `src/config/` to match your job search. There are three things to configure:
 
 **`SEARCH_KEYWORDS`** — the search terms that get combined with each job board domain. For example, if you're looking for Python backend roles:
 
@@ -43,7 +43,7 @@ export const SEARCH_KEYWORDS = [
 ];
 ```
 
-**`EVALUATION_PROFILES`** — the LLM pass/fail criteria. The evaluator acts as a binary gatekeeper (not a scorer), so write clear rules for what should pass and what should fail. Specify the target location, seniority level, tech stack, and role type:
+**`EVALUATION_PROFILES`** (OR logic) — role-matching criteria. The evaluator acts as a binary gatekeeper (not a scorer), so write clear rules for what should pass and what should fail. You can define multiple profiles — a job passes if **any** profile accepts it:
 
 ```ts
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
@@ -65,7 +65,20 @@ A job FAILS if ANY of these are true:
 ];
 ```
 
-You can define multiple profiles — a job passes if **any** profile accepts it.
+**`EVALUATION_FILTERS`** (AND logic, optional) — hard gate criteria that **all** must pass before profiles are checked. Filters run first; if any filter fails, the job is rejected immediately without running profile evaluations (saving API calls). Leave the array empty to skip filters entirely:
+
+```ts
+export const EVALUATION_FILTERS: EvaluationFilter[] = [
+  {
+    name: "location-gate",
+    prompt: `You evaluate whether a job listing is available to someone based in the USA.
+A job PASSES if it is remote-friendly to US timezones or based in the US.
+A job FAILS if it explicitly requires a non-US location or timezone.`,
+  },
+];
+```
+
+You can combine everything in a single profile prompt (fewer API calls) or split into separate filters and profiles for modularity.
 
 ## Local Setup
 
@@ -112,9 +125,9 @@ flowchart TD
         direction TB
         P1[URL dedup\nSkip if in cache or seen this run]
         P1 --> P2[Scrape via Jina Reader\nPage → markdown]
-        P2 --> P3[Evaluate with Claude\nprofiles in parallel]
-        P3 -->|All fail| Rejected[Insert as Rejected]
-        P3 -->|At least one pass| P4[Enrich with Claude\nNormalize title, company,\nlocation, description]
+        P2 --> P3[Evaluate with Claude\nfilters first, then profiles]
+        P3 -->|Filter or all profiles fail| Rejected[Insert as Rejected]
+        P3 -->|Filters pass + profile match| P4[Enrich with Claude\nNormalize title, company,\nlocation, description]
         P4 --> P5[Fuzzy dedup with Claude\nCompare against existing titles]
         P5 -->|Duplicate| Skip1[Skip]
         P5 -->|Unique| P6{Company\nchecks}
@@ -158,7 +171,7 @@ Each external service call is wrapped in a resilience stack: **semaphore** (conc
 
 ## How Search Works
 
-Each run generates search queries by combining your **keywords** from `profile.ts` with **job board domains** (Ashby, Lever, Greenhouse, Workable).
+Each run generates search queries by combining your **keywords** from `config/search.ts` with **job board domains** (Ashby, Lever, Greenhouse, Workable).
 
 The query format is `site:{domain} {keyword}` — for example:
 
@@ -175,7 +188,7 @@ Each URL goes through a multi-stage pipeline:
 
 1. **Dedup** — skip immediately if the URL exists in the Notion cache (fetched at startup) or was already seen in this run
 2. **Scrape** — the [Jina Reader API](https://r.jina.ai) fetches the page and converts it to clean markdown (title, company, description, dates)
-3. **Evaluate** — Claude Haiku runs your evaluation profiles in parallel. The LLM acts as a binary gatekeeper — pass or fail — not a scorer. If all profiles reject the job, it's inserted as "Rejected" and processing stops
+3. **Evaluate** — Claude Haiku runs evaluation in two phases. First, AND filters run in parallel — if any filter fails, the job is rejected immediately (saving API calls). Then, OR profiles run in parallel — the job passes if any profile accepts it. If all profiles reject, the job is inserted as "Rejected" and processing stops
 4. **Enrich** — Claude Haiku normalizes the raw scraped data: cleans the title (removes company/location suffixes), proper-cases the company name, normalizes the location (e.g. `Remote - US/EU` → `Remote (US/EU)`), and rewrites the description as concise markdown
 5. **Fuzzy dedup** — if the company already has jobs in the cache, Claude Haiku compares the new title against existing ones to catch duplicates that differ only in abbreviations, reordering, or trivial additions
 6. **Company checks** — skip if the company is marked "Company Blocked", or insert as "Company Applied" if the user recently applied there (within 6 months)

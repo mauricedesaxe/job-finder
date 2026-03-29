@@ -1,5 +1,5 @@
 import { z } from "zod/v4";
-import { SEARCH_DOMAINS, SEARCH_KEYWORDS } from "./profile";
+import { SEARCH_DOMAINS, SEARCH_KEYWORDS } from "./search";
 
 const ConfigSchema = z.object({
   keywords: z.array(z.string()),
