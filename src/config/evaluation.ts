@@ -9,15 +9,12 @@ export interface EvaluationFilter extends EvaluationCriteria {}
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
   {
     name: "crypto-web3-ts",
-    prompt: `You evaluate job listings for a senior/lead TypeScript/Node.js backend or fullstack developer focused on crypto/web3, based in Europe.
+    prompt: `You evaluate job listings for a senior/lead TypeScript/Node.js backend or fullstack developer focused on crypto/web3. Location eligibility is already verified — do not evaluate it.
 A job PASSES if ALL of these are true:
-1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
-2. The role is senior or lead level (or doesn't specify level, which is acceptable).
-3. The role is in a crypto/web3/blockchain company or project.
-4. Primary stack involves TypeScript, Node.js, or JavaScript — backend, fullstack, or infrastructure.
+1. The role is senior or lead level (or doesn't specify level, which is acceptable).
+2. The role is in a crypto/web3/blockchain company or project.
+3. Primary stack involves TypeScript, Node.js, or JavaScript — backend, fullstack, or infrastructure.
 A job FAILS if ANY of these are true:
-- Explicitly requires on-site presence
-- Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role (marketing, design, sales, HR, etc.)
 - Primary stack is Go, Rust, C++, Java, or Python with no TypeScript/Node.js involvement
@@ -27,16 +24,13 @@ A job FAILS if ANY of these are true:
   },
   {
     name: "distributed-systems-ts",
-    prompt: `You evaluate job listings for a senior TypeScript/Node.js distributed systems or backend infrastructure engineer, outside of crypto/web3, based in Europe.
+    prompt: `You evaluate job listings for a senior TypeScript/Node.js distributed systems or backend infrastructure engineer, outside of crypto/web3. Location eligibility is already verified — do not evaluate it.
 A job PASSES if ALL of these are true:
-1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
-2. The role is senior or lead level (or doesn't specify level, which is acceptable).
-3. The role is outside crypto/web3/blockchain — fintech, trading infra, SaaS infrastructure, platform engineering, or general distributed systems are all fine.
-4. Primary stack involves TypeScript or Node.js.
-5. The role involves real distributed systems concerns: event-driven architecture, message queues, real-time pipelines, high-availability systems, observability, or similar. Not generic CRUD.
+1. The role is senior or lead level (or doesn't specify level, which is acceptable).
+2. The role is outside crypto/web3/blockchain — fintech, trading infra, SaaS infrastructure, platform engineering, or general distributed systems are all fine.
+3. Primary stack involves TypeScript or Node.js.
+4. The role involves real distributed systems concerns: event-driven architecture, message queues, real-time pipelines, high-availability systems, observability, or similar. Not generic CRUD.
 A job FAILS if ANY of these are true:
-- Explicitly requires on-site presence
-- Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role
 - Crypto/web3/blockchain company or project
@@ -47,15 +41,12 @@ A job FAILS if ANY of these are true:
   },
   {
     name: "fintech-trading-infra-ts",
-    prompt: `You evaluate job listings for a senior TypeScript/Node.js backend engineer specializing in real-time trading systems and financial data infrastructure, based in Europe.
+    prompt: `You evaluate job listings for a senior TypeScript/Node.js backend engineer specializing in real-time trading systems and financial data infrastructure. Location eligibility is already verified — do not evaluate it.
 A job PASSES if ALL of these are true:
-1. The role is remote-friendly OR available to European timezones (CET/EET). Reject if explicitly US-only, on-site only, or requires a specific non-European location.
-2. The role is senior or lead level (or doesn't specify level, which is acceptable).
-3. The role involves application-layer trading infrastructure: real-time data pipelines, market data systems, trading platforms, or financial backend services.
-4. Primary stack involves TypeScript or Node.js.
+1. The role is senior or lead level (or doesn't specify level, which is acceptable).
+2. The role involves application-layer trading infrastructure: real-time data pipelines, market data systems, trading platforms, or financial backend services.
+3. Primary stack involves TypeScript or Node.js.
 A job FAILS if ANY of these are true:
-- Explicitly requires on-site presence
-- Explicitly restricted to US/Asia timezones only with no European overlap
 - Junior or internship level
 - Non-engineering role
 - Generic CRUD/SaaS backend with no real-time or financial data component
@@ -66,4 +57,22 @@ A job FAILS if ANY of these are true:
   },
 ];
 
-export const EVALUATION_FILTERS: EvaluationFilter[] = [];
+export const EVALUATION_FILTERS: EvaluationFilter[] = [
+  {
+    name: "remote-europe-eligible",
+    prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else about the job (tech stack, seniority, domain).
+
+A job PASSES if:
+- It is fully remote AND does not restrict eligible countries/regions, OR
+- It is fully remote AND explicitly includes Romania, Europe, EU, EMEA, EET, CET, or "worldwide"/"anywhere"
+
+A job FAILS if ANY of these are true:
+- It requires on-site or hybrid presence, even in Romania — must be 100% remote
+- It restricts remote work to specific non-European countries or regions (e.g., "US only", "UK only", "APAC only", "US and Canada only")
+- It lists eligible remote countries and Romania is not among them
+- It requires work authorization or residency in a non-EU country (e.g., "must be authorized to work in the US")
+- It says "remote" but then clarifies a specific office city with no remote option (e.g., "Remote - San Francisco" meaning local remote)
+
+When ambiguous — e.g., the listing says "remote" with no region specified — PASS the job. Only reject when there is an explicit restriction that excludes Romania/Europe.`,
+  },
+];
