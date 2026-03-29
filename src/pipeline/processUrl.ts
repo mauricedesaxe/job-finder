@@ -28,6 +28,16 @@ export type ProcessResult =
   | "archived"
   | "errored";
 
+export interface ScrapeStats {
+  inserted: number;
+  skipped: number;
+  companyApplied: number;
+  rejected: number;
+  archived: number;
+  duplicated: number;
+  errored: number;
+}
+
 export interface ProcessContext {
   notion: Client;
   config: JobFinderConfig;

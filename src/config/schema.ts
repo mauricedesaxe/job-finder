@@ -9,6 +9,7 @@ const ConfigSchema = z.object({
   jinaApiKey: z.string().min(1, "JINA_API_KEY is required"),
   jinaBaseUrl: z.string(),
   anthropicApiKey: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+  slackWebhookUrl: z.string().url().optional(),
 });
 
 export type JobFinderConfig = z.infer<typeof ConfigSchema>;
@@ -22,5 +23,6 @@ export const config: Readonly<JobFinderConfig> = Object.freeze(
     jinaApiKey: process.env.JINA_API_KEY,
     jinaBaseUrl: "https://r.jina.ai",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
   }),
 );

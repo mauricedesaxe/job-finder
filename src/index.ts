@@ -1,13 +1,15 @@
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import { config } from "./config";
-import { type ProcessResult, processUrl } from "./pipeline/processUrl";
+import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
+import { sendFatalError, sendRunReport } from "./services/slack";
 
 async function main() {
+  const startTime = Date.now();
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
@@ -88,7 +90,7 @@ async function main() {
   syncer.stop();
 
   // Aggregate stats
-  const stats = {
+  const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
     companyApplied: 0,
@@ -131,9 +133,25 @@ async function main() {
   console.log(`Unstaled:        ${postReconcileStats.unstaled}`);
   console.log(`Company Applied: ${postReconcileStats.companyApplied}`);
   console.log(`Archived:        ${postReconcileStats.archived}`);
+
+  if (config.slackWebhookUrl) {
+    await sendRunReport(
+      config.slackWebhookUrl,
+      stats,
+      postReconcileStats,
+      {
+        urlCount: urlMap.size,
+        searchErrors,
+      },
+      Date.now() - startTime,
+    );
+  }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("Fatal error:", err);
+  if (config.slackWebhookUrl) {
+    await sendFatalError(config.slackWebhookUrl, err);
+  }
   process.exit(1);
 });
