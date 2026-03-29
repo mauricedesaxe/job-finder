@@ -35,10 +35,13 @@ export const SEARCH_DOMAINS = [
   "apply.workable.com",
 ];
 
-export interface EvaluationProfile {
+export interface EvaluationCriteria {
   name: string;
   prompt: string;
 }
+
+export interface EvaluationProfile extends EvaluationCriteria {}
+export interface EvaluationFilter extends EvaluationCriteria {}
 
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
   {
@@ -99,3 +102,5 @@ A job FAILS if ANY of these are true:
 - Strictly frontend role with no backend or infrastructure component`,
   },
 ];
+
+export const EVALUATION_FILTERS: EvaluationFilter[] = [];
