@@ -1,5 +1,8 @@
 import type { Client } from "@notionhq/client";
+import { logger } from "../logger";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
+
+const log = logger.child({ component: "notionCache" });
 
 export interface NotionCache {
   existingUrls: Set<string>;
@@ -121,10 +124,7 @@ export class CacheSyncer {
   start(client: Client, databaseId: string, intervalMs = 60_000): void {
     this.interval = setInterval(async () => {
       try {
-        const fresh = await buildNotionCache(client, databaseId, {
-          onProgress: (n) => process.stdout.write(`\r  🔄 Syncing Notion cache... ${n} items`),
-        });
-        process.stdout.write("\n");
+        const fresh = await buildNotionCache(client, databaseId);
 
         // Merge local additions into the fresh cache
         for (const url of this.localUrls) {
@@ -141,12 +141,16 @@ export class CacheSyncer {
         }
 
         this.cache = fresh;
-        console.log(
-          `  🔄 Cache synced: ${fresh.existingUrls.size} URLs, ${fresh.blockedCompanies.size} blocked, ` +
-            `${fresh.recentAppCompanies.size} recent apps`,
+        log.info(
+          {
+            urls: fresh.existingUrls.size,
+            blocked: fresh.blockedCompanies.size,
+            recentApps: fresh.recentAppCompanies.size,
+          },
+          "cache synced",
         );
       } catch (err) {
-        console.error(`  ✗ Cache sync failed: ${err}`);
+        log.error({ err }, "cache sync failed");
       }
     }, intervalMs);
   }

@@ -1,4 +1,7 @@
 import { withRetry } from "../concurrency/retry";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "http" });
 
 export async function fetchWithRetry(
   url: string,
@@ -27,7 +30,7 @@ export async function fetchWithRetry(
         return status === 429 || status === 500 || status === 503;
       },
       onRetry: (attempt) => {
-        console.log(`  ⏳ Retrying request (attempt ${attempt})...`);
+        log.warn({ attempt, url }, "retrying request");
       },
     },
   );

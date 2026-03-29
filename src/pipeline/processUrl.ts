@@ -12,12 +12,15 @@ import {
   withRetry,
 } from "../concurrency";
 import type { JobFinderConfig } from "../config";
+import { logger } from "../logger";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
+
+const log = logger.child({ component: "processUrl" });
 
 export type ProcessResult =
   | "inserted"
@@ -59,7 +62,7 @@ export async function processUrl(
 
   // Cache-based URL dedup
   if (cache.existingUrls.has(url)) {
-    console.log(`  ⏭ Skipped (exists): ${url}`);
+    log.debug({ url }, "skipped (exists in cache)");
     return "skipped";
   }
 
@@ -68,7 +71,7 @@ export async function processUrl(
     jinaBreaker.run(() =>
       withRetry(() => scrapeJobPage(url, config), {
         shouldRetry: isRetryableJina,
-        onRetry: (a) => console.log(`  ⏳ Jina retry ${a} for ${url}`),
+        onRetry: (a) => log.warn({ url, attempt: a }, "jina scrape retry"),
       }),
     ),
   );
@@ -79,7 +82,7 @@ export async function processUrl(
     anthropicBreaker.run(() =>
       withRetry(() => evaluateJob(job, config.anthropicApiKey), {
         shouldRetry: isRetryableAnthropic,
-        onRetry: (a) => console.log(`  ⏳ Anthropic eval retry ${a} for ${url}`),
+        onRetry: (a) => log.warn({ url, attempt: a }, "anthropic eval retry"),
       }),
     ),
   );
@@ -89,7 +92,10 @@ export async function processUrl(
   }
 
   if (!evaluation.pass) {
-    console.log(`  ✗ Rejected: ${job.title} @ ${job.company} — ${evaluation.reason}`);
+    log.info(
+      { url, title: job.title, company: job.company, reason: evaluation.reason },
+      "rejected",
+    );
     await notionRateLimiter.run(() =>
       notionBreaker.run(() =>
         withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Rejected"), {
@@ -105,7 +111,7 @@ export async function processUrl(
     anthropicBreaker.run(() =>
       withRetry(() => enrichJob(job, config.anthropicApiKey), {
         shouldRetry: isRetryableAnthropic,
-        onRetry: (a) => console.log(`  ⏳ Anthropic enrich retry ${a} for ${url}`),
+        onRetry: (a) => log.warn({ url, attempt: a }, "anthropic enrich retry"),
       }),
     ),
   );
@@ -123,14 +129,17 @@ export async function processUrl(
       }),
     );
     if (dedup.isDuplicate) {
-      console.log(`  ⏭ Duplicate: ${job.title} @ ${job.company} — matches "${dedup.matchedTitle}"`);
+      log.info(
+        { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
+        "duplicate",
+      );
       return "duplicated";
     }
   }
 
   // Company blocked (cache lookup)
   if (cache.blockedCompanies.has(job.company)) {
-    console.log(`  ✗ Archived (company blocked): ${job.title} @ ${job.company}`);
+    log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
     await notionRateLimiter.run(() =>
       notionBreaker.run(() =>
         withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Archived"), {
@@ -143,7 +152,7 @@ export async function processUrl(
 
   // Recent application (cache lookup)
   if (cache.recentAppCompanies.has(job.company)) {
-    console.log(`  ⚠ Company Applied: ${job.title} @ ${job.company}`);
+    log.info({ url, title: job.title, company: job.company }, "company applied");
     await notionRateLimiter.run(() =>
       notionBreaker.run(() =>
         withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Company Applied"), {
@@ -164,7 +173,7 @@ export async function processUrl(
       }),
     ),
   );
-  console.log(`  ✓ Inserted: ${job.title} @ ${job.company}`);
+  log.info({ url, title: job.title, company: job.company }, "inserted");
 
   // Update cache for within-run dedup
   syncer.addTitle(job.company, job.title);

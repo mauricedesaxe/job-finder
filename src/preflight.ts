@@ -1,5 +1,8 @@
 import type { Client } from "@notionhq/client";
+import { logger } from "./logger";
 import { JOB_STATUSES } from "./types";
+
+const log = logger.child({ component: "preflight" });
 
 const EXPECTED_PROPERTIES: Record<string, string> = {
   "Job Title": "title",
@@ -16,7 +19,7 @@ const EXPECTED_PROPERTIES: Record<string, string> = {
 };
 
 export async function runPreflight(notion: Client, databaseId: string): Promise<void> {
-  console.log("Running preflight checks...\n");
+  log.info("running preflight checks");
 
   // Retrieve database schema (also validates token + database access)
   const db = await notion.databases.retrieve({ database_id: databaseId });
@@ -34,10 +37,7 @@ export async function runPreflight(notion: Client, databaseId: string): Promise<
   }
 
   if (errors.length > 0) {
-    console.error("Preflight failed — database schema errors:");
-    for (const error of errors) {
-      console.error(`  ✗ ${error}`);
-    }
+    log.fatal({ errors }, "preflight failed: database schema errors");
     process.exit(1);
   }
 
@@ -49,7 +49,7 @@ export async function runPreflight(notion: Client, databaseId: string): Promise<
   const missingStatuses = JOB_STATUSES.filter((s) => !existingOptions.has(s));
 
   if (missingStatuses.length > 0) {
-    console.log(`Creating missing status options: ${missingStatuses.join(", ")}`);
+    log.info({ statuses: missingStatuses }, "creating missing status options");
 
     await notion.databases.update({
       database_id: databaseId,
@@ -63,5 +63,5 @@ export async function runPreflight(notion: Client, databaseId: string): Promise<
     });
   }
 
-  console.log("Preflight checks passed.\n");
+  log.info("preflight checks passed");
 }

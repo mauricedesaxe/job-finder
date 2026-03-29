@@ -1,5 +1,8 @@
+import { logger } from "../logger";
 import type { ScrapeStats } from "../pipeline/processUrl";
 import type { ReconcileStats } from "../pipeline/reconcile";
+
+const log = logger.child({ component: "slack" });
 
 export interface SearchMeta {
   urlCount: number;
@@ -110,9 +113,9 @@ export async function sendRunReport(
         },
       ],
     });
-    console.log("  ✓ Slack run report sent");
+    log.info("slack run report sent");
   } catch (err) {
-    console.warn(`  ⚠ Failed to send Slack alert: ${err instanceof Error ? err.message : err}`);
+    log.warn({ err }, "failed to send slack run report");
   }
 }
 
@@ -149,10 +152,8 @@ export async function sendFatalError(webhookUrl: string, error: unknown): Promis
         },
       ],
     });
-    console.log("  ✓ Slack error alert sent");
+    log.info("slack error alert sent");
   } catch (err) {
-    console.warn(
-      `  ⚠ Failed to send Slack error alert: ${err instanceof Error ? err.message : err}`,
-    );
+    log.warn({ err }, "failed to send slack error alert");
   }
 }
