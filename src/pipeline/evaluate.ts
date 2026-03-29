@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { EVALUATION_PROFILES, type EvaluationProfile } from "../profile";
+import { EVALUATION_FILTERS, EVALUATION_PROFILES, type EvaluationCriteria } from "../profile";
 import { getClient } from "../services/anthropic";
 import type { JobListing } from "../types";
 
@@ -28,9 +28,9 @@ const EVALUATE_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export async function evaluateSingleProfile(
+export async function evaluateSingle(
   job: JobListing,
-  profile: EvaluationProfile,
+  criteria: EvaluationCriteria,
   apiKey: string,
 ): Promise<JobEvaluation> {
   const anthropic = getClient(apiKey);
@@ -46,7 +46,7 @@ ${job.description}`;
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 256,
-    system: profile.prompt,
+    system: criteria.prompt,
     messages: [{ role: "user", content: userMessage }],
     tools: [EVALUATE_TOOL],
     tool_choice: { type: "tool", name: "evaluate_job" },
@@ -60,12 +60,33 @@ ${job.description}`;
 }
 
 export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobEvaluation> {
+  const filters = EVALUATION_FILTERS;
   const profiles = EVALUATION_PROFILES;
+
+  // Phase 1: AND filters — all must pass, short-circuit on first failure
+  if (filters.length > 0) {
+    const filterResults = await Promise.all(
+      filters.map((filter) => evaluateSingle(job, filter, apiKey)),
+    );
+    const failed = filterResults.find((r) => !r.pass);
+    if (failed) {
+      return { pass: false, reason: failed.reason };
+    }
+  }
+
+  // Phase 2: OR profiles — any must pass
+  if (profiles.length === 0) {
+    // Filters passed and no profiles configured — job passes filters alone
+    return filters.length > 0
+      ? { pass: true, reason: "Passed all filters" }
+      : { pass: false, reason: "No profiles configured" };
+  }
+
   const results = await Promise.allSettled(
-    profiles.map((profile) => evaluateSingleProfile(job, profile, apiKey)),
+    profiles.map((profile) => evaluateSingle(job, profile, apiKey)),
   );
 
-  let lastRejection: JobEvaluation = { pass: false, reason: "No profiles configured" };
+  let lastRejection: JobEvaluation = { pass: false, reason: "No profiles matched" };
 
   for (const [i, result] of results.entries()) {
     if (result.status === "fulfilled" && result.value.pass) {
@@ -79,7 +100,7 @@ export async function evaluateJob(job: JobListing, apiKey: string): Promise<JobE
   // If all profiles errored (none fulfilled), surface the first error
   // so it can be retried by the circuit breaker/retry stack
   const firstError = results.find((r) => r.status === "rejected");
-  if (lastRejection.reason === "No profiles configured" && firstError?.status === "rejected") {
+  if (lastRejection.reason === "No profiles matched" && firstError?.status === "rejected") {
     throw firstError.reason;
   }
 
