@@ -14,12 +14,7 @@ export interface StageUsage {
 export interface TokenSummary {
   byStage: Record<Stage, StageUsage>;
   total: { input: number; output: number; calls: number };
-  estimatedCost: number;
 }
-
-// Haiku pricing (USD per million tokens)
-const INPUT_COST_PER_MTOK = 0.8;
-const OUTPUT_COST_PER_MTOK = 4.0;
 
 const STAGES: Stage[] = ["evaluation", "enrichment", "dedup"];
 
@@ -53,14 +48,9 @@ export class TokenTracker {
       total.calls += this.stages[stage].calls;
     }
 
-    const estimatedCost =
-      (total.input / 1_000_000) * INPUT_COST_PER_MTOK +
-      (total.output / 1_000_000) * OUTPUT_COST_PER_MTOK;
-
     return {
       byStage: { ...this.stages },
       total,
-      estimatedCost,
     };
   }
 }

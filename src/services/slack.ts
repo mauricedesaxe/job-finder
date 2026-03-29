@@ -78,7 +78,7 @@ function buildRunReportBlocks(
   ];
 
   if (tokens && tokens.total.calls > 0) {
-    const { byStage, total, estimatedCost } = tokens;
+    const { byStage, total } = tokens;
     blocks.push(
       { type: "divider" },
       {
@@ -102,7 +102,7 @@ function buildRunReportBlocks(
           },
           {
             type: "mrkdwn",
-            text: `*Total:* ${formatTokens(total.input)} in / ${formatTokens(total.output)} out · *$${estimatedCost.toFixed(4)}*`,
+            text: `*Total:* ${formatTokens(total.input)} in / ${formatTokens(total.output)} out (${total.calls} calls)`,
           },
         ],
       },
