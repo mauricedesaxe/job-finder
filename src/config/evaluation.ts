@@ -60,19 +60,38 @@ A job FAILS if ANY of these are true:
 export const EVALUATION_FILTERS: EvaluationFilter[] = [
   {
     name: "remote-europe-eligible",
-    prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else about the job (tech stack, seniority, domain).
+    prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
 
-A job PASSES if:
-- It is fully remote AND does not restrict eligible countries/regions, OR
-- It is fully remote AND explicitly includes Romania, Europe, EU, EMEA, EET, CET, or "worldwide"/"anywhere"
+STEP 1 — Does the listing explicitly indicate the role is remote?
+Look for a clear signal: "Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", location listed as "Remote", "Remote - Europe", etc.
+If NO remote signal exists → FAIL. Do not infer remote from silence.
+Exception: crypto/web3/blockchain companies commonly operate fully remote. If the company is clearly in crypto/web3, you may PASS even without an explicit remote mention.
 
-A job FAILS if ANY of these are true:
-- It requires on-site or hybrid presence, even in Romania — must be 100% remote
-- It restricts remote work to specific non-European countries or regions (e.g., "US only", "UK only", "APAC only", "US and Canada only")
-- It lists eligible remote countries and Romania is not among them
-- It requires work authorization or residency in a non-EU country (e.g., "must be authorized to work in the US")
-- It says "remote" but then clarifies a specific office city with no remote option (e.g., "Remote - San Francisco" meaning local remote)
+STEP 2 — Is it truly 100% remote with zero required in-person days?
+FAIL if ANY regular in-person attendance is required, no matter how infrequent (weekly, monthly, quarterly).
+FAIL if it says "hybrid", "X days/month in office", "occasional on-site", or similar.
+FAIL if "option to work remotely" implies on-site is the default arrangement.
+FAIL if it says "remote" but means local-remote to a specific city (e.g., "Remote - San Francisco").
+Note: annual or bi-annual team retreats/offsites are acceptable and do NOT count as hybrid.
 
-When ambiguous — e.g., the listing says "remote" with no region specified — PASS the job. Only reject when there is an explicit restriction that excludes Romania/Europe.`,
+STEP 3 — Can someone in Romania/Europe work this role?
+FAIL if remote work is restricted to non-European regions (e.g., "US only", "APAC only").
+FAIL if it lists eligible countries and Romania/EU is not included.
+FAIL if it requires work authorization in a non-EU country.
+PASS if no geographic restriction, or if it includes Romania, Europe, EU, EMEA, EET, CET, "worldwide", or "anywhere".
+
+Examples:
+
+PASS: "We are a fully remote team distributed across Europe." → remote ✓, fully remote ✓, Europe ✓
+PASS: "Remote (Worldwide)" → remote ✓, fully remote ✓, worldwide ✓
+PASS: "DeFi protocol, our team works from anywhere." → crypto + remote signal ✓, fully remote ✓, anywhere ✓
+PASS: Crypto company, no location info mentioned → crypto exception ✓
+PASS: "A supportive remote environment. Two annual in-person team meet-ups." → remote ✓, annual offsites are fine ✓
+PASS: "Remote" with no region mentioned → remote ✓, no in-person req ✓, no restriction ✓
+FAIL: "A highly flexible remote work policy, 2 days at the office per month" → 2 days/month in office = regular hybrid attendance
+FAIL: "Full-time position in Prague. Option to work remotely." → on-site is default, remote is just an option
+FAIL: No location or remote info mentioned, non-crypto company → no remote signal at all
+FAIL: "Remote - US only" → restricted to US
+FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only`,
   },
 ];
