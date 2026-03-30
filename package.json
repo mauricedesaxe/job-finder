@@ -23,7 +23,8 @@
   "scripts": {
     "scrape": "bun src/index.ts",
     "reconcile": "bun src/index.ts --reconcile-only",
-    "test": "bun test",
+    "test": "bun test src/**/__tests__/",
+    "test:integration": "bun test src/**/__integration__/",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "typecheck": "tsc --noEmit",
