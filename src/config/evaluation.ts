@@ -65,7 +65,7 @@ export const EVALUATION_FILTERS: EvaluationFilter[] = [
 STEP 1 — Does the listing explicitly indicate the role is remote?
 Look for a clear signal: "Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", location listed as "Remote", "Remote - Europe", etc.
 If NO remote signal exists → FAIL. Do not infer remote from silence.
-Exception: crypto/web3/blockchain companies commonly operate fully remote. If the company is clearly in crypto/web3, you may PASS even without an explicit remote mention.
+Exception: crypto/web3/blockchain companies commonly operate fully remote. If the company is clearly in crypto/web3, you may PASS even without an explicit remote mention — UNLESS the listing contains an explicit on-site signal (e.g., requires local work authorization, names a specific office, or says "on-site"/"in-office"). In that case, treat it like any other company and FAIL.
 
 STEP 2 — Is it truly 100% remote with zero required in-person days?
 FAIL if ANY regular in-person attendance is required, no matter how infrequent (weekly, monthly, quarterly).
@@ -86,6 +86,7 @@ PASS: "We are a fully remote team distributed across Europe." → remote ✓, fu
 PASS: "Remote (Worldwide)" → remote ✓, fully remote ✓, worldwide ✓
 PASS: "DeFi protocol, our team works from anywhere." → crypto + remote signal ✓, fully remote ✓, anywhere ✓
 PASS: Crypto company, no location info mentioned → crypto exception ✓
+FAIL: Crypto exchange, "prioritising applicants who have a current right to work in Hong Kong" → crypto but explicit on-site signal overrides exception
 PASS: "A supportive remote environment. Two annual in-person team meet-ups." → remote ✓, annual offsites are fine ✓
 PASS: "Remote" with no region mentioned → remote ✓, no in-person req ✓, no restriction ✓
 FAIL: "A highly flexible remote work policy, 2 days at the office per month" → 2 days/month in office = regular hybrid attendance
