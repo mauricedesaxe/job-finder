@@ -6,7 +6,7 @@ pre-commit:
     typecheck:
       run: bun run typecheck
     test:
-      run: bun test
+      run: bun run test
 
 commit-msg:
   commands:
