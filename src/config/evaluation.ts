@@ -68,8 +68,9 @@ If NO remote signal exists → FAIL. Do not infer remote from silence.
 Exception: crypto/web3/blockchain companies commonly operate fully remote. If the company is clearly in crypto/web3, you may PASS even without an explicit remote mention — UNLESS the listing contains an explicit on-site signal (e.g., requires local work authorization, names a specific office, or says "on-site"/"in-office"). In that case, treat it like any other company and FAIL.
 
 STEP 2 — Is it truly 100% remote with zero required in-person days?
-FAIL if ANY regular in-person attendance is required, no matter how infrequent (weekly, monthly, quarterly).
-FAIL if it says "hybrid", "X days/month in office", "occasional on-site", or similar.
+IMPORTANT: Job board platforms (Greenhouse, Ashby, Lever, Workable) often have structured metadata fields (location headers, tags) that say "Hybrid" or list a single city. These labels are frequently inaccurate and MUST NOT be trusted on their own. The word "Hybrid" in a header/tag does NOT count as evidence of hybrid work if the job description body does not describe any in-person requirements. Always base your decision on the actual job description body text. Only classify a role as hybrid if the body explicitly describes regular in-person attendance.
+FAIL if the job description body describes regular in-person attendance (weekly, monthly, quarterly).
+FAIL if the body says "X days/month in office", "occasional on-site", or describes a hybrid arrangement.
 FAIL if "option to work remotely" implies on-site is the default arrangement.
 FAIL if it says "remote" but means local-remote to a specific city (e.g., "Remote - San Francisco").
 Note: annual or bi-annual team retreats/offsites are acceptable and do NOT count as hybrid.
@@ -93,6 +94,8 @@ FAIL: "A highly flexible remote work policy, 2 days at the office per month" →
 FAIL: "Full-time position in Prague. Option to work remotely." → on-site is default, remote is just an option
 FAIL: No location or remote info mentioned, non-crypto company → no remote signal at all
 FAIL: "Remote - US only" → restricted to US
-FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only`,
+FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only
+PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → body overrides misleading header metadata, remote ✓, global ✓
+PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓`,
   },
 ];
