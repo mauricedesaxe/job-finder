@@ -44,7 +44,7 @@ describe("remote-europe-eligible filter (integration)", () => {
     test(`${name} → PASS`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
       const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY);
-      expect(result.pass).toBe(true);
+      expect(result.pass, `Expected PASS but got FAIL: ${result.reason}`).toBe(true);
     }, 30_000);
   }
 
@@ -53,7 +53,7 @@ describe("remote-europe-eligible filter (integration)", () => {
     test(`${name} → FAIL`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
       const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY);
-      expect(result.pass).toBe(false);
+      expect(result.pass, `Expected FAIL but got PASS: ${result.reason}`).toBe(false);
     }, 30_000);
   }
 });
