@@ -4,7 +4,7 @@ import { Glob } from "bun";
 import { EVALUATION_FILTERS } from "../../config/evaluation";
 import type { JobListing } from "../../types";
 import { evaluateSingle } from "../evaluate";
-import { detectSource } from "../scrape";
+import { detectSource, extractCompanyFromUrl } from "../scrape";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY as string;
 const remoteFilter = EVALUATION_FILTERS.find(
@@ -21,7 +21,7 @@ async function loadFixture(path: string): Promise<JobListing> {
 
   return {
     title,
-    company: basename(path, ".md"),
+    company: extractCompanyFromUrl(url),
     url,
     source: detectSource(url),
     keywordsMatched: ["test"],
