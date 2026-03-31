@@ -39,29 +39,6 @@ FAIL: Crypto exchange, C++ matching engine engineer → HFT/ultra-low-latency
 FAIL: Web3 company, marketing manager → non-engineering role`,
   },
   {
-    name: "distributed-systems-ts",
-    prompt: `You evaluate job listings for a backend or infrastructure engineer working on non-trivial systems, outside of crypto/web3. Location eligibility is already verified — do not evaluate it.
-A job PASSES if ALL of these are true:
-1. The role is mid-level or above (3+ years experience), senior, or lead level (or doesn't specify level, which is acceptable).
-2. The role is outside crypto/web3/blockchain — fintech, trading infra, SaaS infrastructure, platform engineering, agencies, ad tech, or general backend are all fine. Note: an agency or consultancy that serves some crypto/DeFi clients is NOT a crypto company — judge by the company's primary identity, not its client list.
-3. The role is compatible with a polyglot engineer (TS/Node.js, Go, Rust, Java). PASS if: TS/Node.js is in the stack, or Go/Rust/Java is listed, or stack is not specified.
-4. The role involves backend engineering beyond simple CRUD: event-driven architecture, message queues (SQS, SNS, Kafka), serverless (Lambda), real-time pipelines, APIs at scale, platform engineering, observability, or similar.
-A job FAILS if ANY of these are true:
-- Explicitly junior or internship level (but "3+ years" or unspecified is fine)
-- Non-engineering role
-- Crypto/web3/blockchain company or project (agencies with some crypto clients are fine)
-- Strictly frontend role
-- HFT or ultra-low-latency systems (matching engines, FPGA, C++/C performance-critical)
-
-Examples:
-PASS: SaaS company, senior backend, Node.js + AWS Lambda + SQS → event-driven backend ✓
-PASS: Agency, backend developer, Node.js/TypeScript, 3+ years, builds APIs for DeFi/fintech clients → non-crypto agency, backend ✓
-PASS: Ad tech agency, backend focused, Node.js + AWS Lambda + SQS, part-time → event-driven backend at non-crypto company ✓
-PASS: Data company, senior TS/Backend, AI/ML features → backend engineering ✓
-FAIL: Crypto protocol, senior Rust engineer → crypto company (use crypto profile instead)
-FAIL: Junior backend developer (0-1 years), Node.js → explicitly junior`,
-  },
-  {
     name: "fintech-trading-infra-ts",
     prompt: `You evaluate job listings for a senior backend or fullstack engineer working on trading systems, financial data, or real-time financial infrastructure. Location eligibility is already verified — do not evaluate it.
 A job PASSES if ALL of these are true:
