@@ -33,6 +33,7 @@ PASS: Web3 protocol, senior backend, stack not specified → crypto + senior + s
 PASS: DeFi company, fullstack with React frontend + Go backend → fullstack with TS-compatible frontend ✓
 PASS: Blockchain company, Solana engineer, requires Node.js + Rust → multilingual stack includes Node.js ✓
 PASS: Crypto agency/studio building trading platforms, React + Go → crypto project + TS-compatible ✓
+PASS: Cross-chain protocol, senior backend, stack not specified, "experience with smart contract development" as qualification → backend infra role with blockchain integration, NOT a smart-contract-only auditor ✓
 FAIL: Blockchain company hiring Solidity auditor only → no application-layer engineering
 FAIL: Crypto exchange, C++ matching engine engineer → HFT/ultra-low-latency
 FAIL: Web3 company, marketing manager → non-engineering role`,
