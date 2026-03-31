@@ -38,6 +38,7 @@ export async function evaluateSingle(
   criteria: EvaluationCriteria,
   apiKey: string,
   tracker?: TokenTracker,
+  options?: { temperature?: number },
 ): Promise<JobEvaluation> {
   const anthropic = getClient(apiKey);
 
@@ -52,6 +53,7 @@ ${job.description}`;
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 256,
+    temperature: options?.temperature,
     system: criteria.prompt,
     messages: [{ role: "user", content: userMessage }],
     tools: [EVALUATE_TOOL],
@@ -75,21 +77,23 @@ export async function evaluateJob(
     profiles?: EvaluationCriteria[];
     evaluate?: typeof evaluateSingle;
     tracker?: TokenTracker;
+    temperature?: number;
   },
 ): Promise<JobEvaluation> {
   const filters = deps?.filters ?? EVALUATION_FILTERS;
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;
   const tracker = deps?.tracker;
+  const tempOpts = deps?.temperature !== undefined ? { temperature: deps.temperature } : undefined;
 
   // Phase 1: AND filters — run in parallel, reject on first failure in results
   if (filters.length > 0) {
     const filterResults = await Promise.allSettled(
-      filters.map((filter) => evaluate(job, filter, apiKey, tracker)),
+      filters.map((filter) => evaluate(job, filter, apiKey, tracker, tempOpts)),
     );
-    for (const [i, result] of filterResults.entries()) {
+    for (const result of filterResults) {
       if (result.status === "rejected") {
-        return { pass: false, reason: `Filter "${filters[i]?.name}" failed: ${result.reason}` };
+        throw result.reason;
       }
       if (!result.value.pass) {
         return { pass: false, reason: result.value.reason };
@@ -106,7 +110,7 @@ export async function evaluateJob(
   }
 
   const results = await Promise.allSettled(
-    profiles.map((profile) => evaluate(job, profile, apiKey, tracker)),
+    profiles.map((profile) => evaluate(job, profile, apiKey, tracker, tempOpts)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles matched" };

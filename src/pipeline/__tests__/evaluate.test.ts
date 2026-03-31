@@ -102,20 +102,18 @@ describe("evaluateJob two-phase flow", () => {
     expect(profileCalled).toBe(false);
   });
 
-  test("filter throws → job rejected (treated as filter failure)", async () => {
+  test("filter throws → error propagates for upstream retry", async () => {
     const evaluate = async (): Promise<JobEvaluation> => {
       throw new Error("API timeout");
     };
 
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("location-gate")],
-      profiles: [makeProfile("crypto")],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(false);
-    expect(result.reason).toContain("location-gate");
-    expect(result.reason).toContain("failed");
+    await expect(
+      evaluateJob(DUMMY_JOB, "fake-key", {
+        filters: [makeFilter("location-gate")],
+        profiles: [makeProfile("crypto")],
+        evaluate,
+      }),
+    ).rejects.toThrow("API timeout");
   });
 
   test("all filters pass → profiles run", async () => {
