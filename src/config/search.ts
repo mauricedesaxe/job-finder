@@ -26,6 +26,17 @@ export const SEARCH_KEYWORDS = [
   "senior engineer fintech typescript",
   "real-time systems engineer fintech",
   "backend engineer quantitative finance",
+  // AI engineering
+  "senior AI engineer",
+  "senior engineer LLM",
+  "senior backend engineer AI",
+  "AI infrastructure engineer",
+  "senior engineer RAG",
+  "senior engineer AI agents",
+  "fullstack engineer AI",
+  "senior engineer vector database",
+  "senior engineer prompt engineering",
+  "senior engineer AI platform",
 ];
 
 export const SEARCH_DOMAINS = [
