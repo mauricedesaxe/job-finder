@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { Glob } from "bun";
 import type { JobListing } from "../../types";
@@ -24,6 +25,7 @@ export async function loadFixture(path: string): Promise<JobListing> {
 }
 
 export function collectFixtures(dir: string): string[] {
+  if (!existsSync(dir)) return [];
   const glob = new Glob("*.md");
   return Array.from(glob.scanSync(dir)).sort();
 }
