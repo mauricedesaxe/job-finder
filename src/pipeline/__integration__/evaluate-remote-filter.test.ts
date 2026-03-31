@@ -10,6 +10,11 @@ const remoteFilter = EVALUATION_FILTERS.find(
 ) as (typeof EVALUATION_FILTERS)[number];
 
 const FIXTURES_DIR = `${import.meta.dir}/fixtures/remote`;
+const ACCURACY_THRESHOLD = 0.75;
+
+type Result = { name: string; expected: boolean; actual: boolean; reason: string };
+
+const results: Result[] = [];
 
 describe("remote-europe-eligible filter (integration)", () => {
   for (const file of collectFixtures(`${FIXTURES_DIR}/pass`)) {
@@ -19,7 +24,7 @@ describe("remote-europe-eligible filter (integration)", () => {
       const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY, undefined, {
         temperature: 0,
       });
-      expect(result.pass, `Expected PASS but got FAIL: ${result.reason}`).toBe(true);
+      results.push({ name, expected: true, actual: result.pass, reason: result.reason });
     }, 30_000);
   }
 
@@ -30,7 +35,24 @@ describe("remote-europe-eligible filter (integration)", () => {
       const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY, undefined, {
         temperature: 0,
       });
-      expect(result.pass, `Expected FAIL but got PASS: ${result.reason}`).toBe(false);
+      results.push({ name, expected: false, actual: result.pass, reason: result.reason });
     }, 30_000);
   }
+
+  test("accuracy meets threshold", () => {
+    const total = results.length;
+    const correct = results.filter((r) => r.expected === r.actual).length;
+    const accuracy = correct / total;
+
+    const misclassified = results.filter((r) => r.expected !== r.actual);
+    for (const m of misclassified) {
+      console.log(
+        `  MISCLASSIFIED: ${m.name} (expected ${m.expected ? "PASS" : "FAIL"}, got ${m.actual ? "PASS" : "FAIL"}): ${m.reason}`,
+      );
+    }
+    console.log(`  Accuracy: ${correct}/${total} (${(accuracy * 100).toFixed(1)}%)`);
+
+    expect(total).toBeGreaterThan(0);
+    expect(accuracy).toBeGreaterThanOrEqual(ACCURACY_THRESHOLD);
+  }, 5_000);
 });

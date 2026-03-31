@@ -80,6 +80,17 @@ A job FAILS if it explicitly requires a non-US location or timezone.`,
 
 You can combine everything in a single profile prompt (fewer API calls) or split into separate filters and profiles for modularity.
 
+## Forking for Personal Use
+
+This repo is configured for a specific job search (senior backend/fullstack, crypto, fintech, AI engineering, remote from Romania). If you fork it, you'll need to customize:
+
+1. **`src/config/search.ts`** — replace search keywords with terms relevant to your target roles
+2. **`src/config/evaluation.ts`** — rewrite the evaluation profiles and filters to match your criteria (seniority, stack, domain, location)
+3. **`src/pipeline/__integration__/fixtures/`** — delete the existing fixtures entirely, then build your own by adding real job listings you've liked/disliked. The integration tests use threshold-based accuracy, so they'll adapt as you add fixtures
+4. Run the integration tests (`bun test src/pipeline/__integration__/`) to see how well your prompts perform, then refine iteratively
+
+The evaluation prompts are the core of the system — expect to iterate on them as you encounter edge cases. The test infrastructure is designed for this: add fixtures from real jobs, run the tests, see what's misclassified, and tighten your prompts.
+
 ## Local Setup
 
 ```bash
