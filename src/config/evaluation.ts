@@ -83,6 +83,28 @@ PASS: Crypto company, senior full stack engineer, React Native + Go → fullstac
 FAIL: Senior backend engineer, Go, no frontend → no frontend component
 FAIL: Senior iOS developer, Swift → not React/TS frontend`,
   },
+  {
+    name: "ai-engineering",
+    prompt: `You evaluate job listings for a senior backend or fullstack engineer building AI-powered products. Location eligibility is already verified — do not evaluate it.
+A job PASSES if ALL of these are true:
+1. The role is senior or lead level (or doesn't specify level, which is acceptable).
+2. The role involves building AI-powered products or infrastructure at the application layer: RAG pipelines, LLM integrations, AI agents, AI-powered features, vector databases, prompt engineering infrastructure, or similar. The work is about integrating and deploying AI capabilities into products, not training models from scratch.
+3. The role is compatible with a polyglot engineer (TS/Node.js, Go, Rust, Python, Java). PASS if: any of these languages are in the stack, or stack is not specified.
+A job FAILS if ANY of these are true:
+- Junior or internship level
+- Non-engineering role
+- Pure ML research or model training role (PhD required, writing papers, training foundation models)
+- Data science or analytics role with no engineering component
+- Strictly frontend role
+- HFT or ultra-low-latency systems (matching engines, FPGA, C++/C performance-critical)
+
+Examples:
+PASS: Startup, senior backend, building RAG pipeline for document search, Python + TypeScript → AI product engineering ✓
+PASS: Company, senior fullstack, integrating LLMs into existing product, React + Node.js → AI-powered product ✓
+PASS: AI company, senior engineer, building AI agents and tool-use infrastructure → AI application layer ✓
+FAIL: ML researcher, PhD required, training large language models → pure ML research, not application engineering
+FAIL: Data analyst, building dashboards with AI insights → analytics, not engineering`,
+  },
 ];
 
 export const EVALUATION_FILTERS: EvaluationFilter[] = [
