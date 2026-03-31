@@ -91,9 +91,9 @@ export async function evaluateJob(
     const filterResults = await Promise.allSettled(
       filters.map((filter) => evaluate(job, filter, apiKey, tracker, tempOpts)),
     );
-    for (const [i, result] of filterResults.entries()) {
+    for (const result of filterResults) {
       if (result.status === "rejected") {
-        return { pass: false, reason: `Filter "${filters[i]?.name}" failed: ${result.reason}` };
+        throw result.reason;
       }
       if (!result.value.pass) {
         return { pass: false, reason: result.value.reason };
