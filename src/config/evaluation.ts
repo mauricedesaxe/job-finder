@@ -1,3 +1,5 @@
+import { DEFAULT_RATES, type ExchangeRates } from "../services/exchangeRates";
+
 export interface EvaluationCriteria {
   name: string;
   prompt: string;
@@ -112,10 +114,9 @@ FAIL: Senior Data Engineer building data pipelines with Spark and Airflow, some 
   },
 ];
 
-export const EVALUATION_FILTERS: EvaluationFilter[] = [
-  {
-    name: "remote-europe-eligible",
-    prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
+const REMOTE_FILTER: EvaluationFilter = {
+  name: "remote-europe-eligible",
+  prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
 
 STEP 1 — Does the listing explicitly indicate the role is remote?
 Look for a clear signal: "Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", location listed as "Remote", "Remote - Europe", etc.
@@ -157,8 +158,30 @@ PASS: Header says "The Netherlands (remote)" but body says "this role is not off
 PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓
 PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓
 PASS: "Work around U.S. business hours" or "US East Coast hours" → Romania (EET, UTC+2) has workable overlap with US East Coast (EST, UTC-5). Afternoon/evening in Romania overlaps with morning in US East. This is feasible and should PASS unless the listing explicitly excludes European candidates ✓`,
-  },
-  {
+};
+
+/** Currencies to include in the compensation filter prompt (when available in rates). */
+const PROMPT_CURRENCIES = [
+  "EUR",
+  "GBP",
+  "CHF",
+  "CAD",
+  "AUD",
+  "PLN",
+  "SEK",
+  "NOK",
+  "DKK",
+  "CZK",
+  "SGD",
+  "ILS",
+];
+
+function buildCompensationFilter(rates: ExchangeRates): EvaluationFilter {
+  const rateLines = PROMPT_CURRENCIES.filter((c) => c in rates)
+    .map((c) => `1 ${c} ≈ ${(rates[c] as number).toFixed(2)} USD`)
+    .join(", ");
+
+  return {
     name: "compensation-minimum",
     prompt: `You are a compensation filter. Your ONLY job is to determine whether the listed compensation meets a minimum threshold. Ignore everything else (location, tech stack, seniority, company).
 
@@ -168,7 +191,7 @@ RULES:
    - Annual salary: PASS if the maximum of the stated range is ≥ $130,000/year. FAIL if the maximum is below $130,000/year.
    - Hourly rate (contractor): PASS if the maximum of the stated range is ≥ $65/hour. FAIL if the maximum is below $65/hour.
    - Monthly rate: convert to annual (×12). Apply the $130,000/year threshold.
-   - Non-USD currencies: convert approximately to USD before comparing. Use rough rates: 1 EUR ≈ 1.10 USD, 1 GBP ≈ 1.27 USD.
+   - Non-USD currencies: convert approximately to USD before comparing. Use these rates: ${rateLines}.
 3. Only evaluate base salary/rate. Ignore equity, bonuses, or total compensation packages — focus on the stated cash compensation.
 4. When in doubt, PASS. This filter should only reject listings with clearly stated compensation below the threshold. If the math is ambiguous, the currency is unclear, or you're unsure whether a number refers to salary, PASS.
 
@@ -181,5 +204,9 @@ PASS: "€120,000 - €150,000" → max €150k ≈ $165k ≥ $130k ✓
 FAIL: "$40 - $50/hr" → max $50/hr < $65/hr
 FAIL: "$80,000 - $100,000 per year" → max $100k < $130k
 FAIL: "$3,000/month" → $36k/year < $130k`,
-  },
-];
+  };
+}
+
+export function getEvaluationFilters(rates?: ExchangeRates): EvaluationFilter[] {
+  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES)];
+}

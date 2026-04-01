@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
-  EVALUATION_FILTERS,
   EVALUATION_PROFILES,
   type EvaluationCriteria,
   type EvaluationFilter,
   type EvaluationProfile,
+  getEvaluationFilters,
 } from "../../config/evaluation";
 import type { JobListing } from "../../types";
 import { evaluateJob, evaluateSingle, type JobEvaluation } from "../evaluate";
@@ -53,8 +53,8 @@ describe("profile and filter types", () => {
     expect(EVALUATION_PROFILES.length).toBeGreaterThan(0);
   });
 
-  test("EVALUATION_FILTERS is an array", () => {
-    expect(Array.isArray(EVALUATION_FILTERS)).toBe(true);
+  test("getEvaluationFilters returns an array", () => {
+    expect(Array.isArray(getEvaluationFilters())).toBe(true);
   });
 
   test("profiles satisfy EvaluationCriteria", () => {

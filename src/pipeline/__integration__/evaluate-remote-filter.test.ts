@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { basename } from "node:path";
-import { EVALUATION_FILTERS } from "../../config/evaluation";
+import { getEvaluationFilters } from "../../config/evaluation";
 import { evaluateSingle } from "../evaluate";
 import { collectFixtures, loadFixture } from "./helpers";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY as string;
-const remoteFilter = EVALUATION_FILTERS.find(
+const remoteFilter = getEvaluationFilters().find(
   (f) => f.name === "remote-europe-eligible",
-) as (typeof EVALUATION_FILTERS)[number];
+) as ReturnType<typeof getEvaluationFilters>[number];
 
 const FIXTURES_DIR = `${import.meta.dir}/fixtures/remote`;
 const ACCURACY_THRESHOLD = 0.75;

@@ -1,8 +1,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import {
-  EVALUATION_FILTERS,
   EVALUATION_PROFILES,
   type EvaluationCriteria,
+  getEvaluationFilters,
 } from "../config/evaluation";
 import { getClient } from "../services/anthropic";
 import type { TokenTracker } from "../services/tokenTracker";
@@ -80,7 +80,7 @@ export async function evaluateJob(
     temperature?: number;
   },
 ): Promise<JobEvaluation> {
-  const filters = deps?.filters ?? EVALUATION_FILTERS;
+  const filters = deps?.filters ?? getEvaluationFilters();
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;
   const tracker = deps?.tracker;
