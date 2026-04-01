@@ -155,7 +155,8 @@ FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only
 PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → body overrides misleading header metadata, remote ✓, global ✓
 PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓
 PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓
-PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓`,
+PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓
+PASS: "Work around U.S. business hours" or "US East Coast hours" → Romania (EET, UTC+2) has workable overlap with US East Coast (EST, UTC-5). Afternoon/evening in Romania overlaps with morning in US East. This is feasible and should PASS unless the listing explicitly excludes European candidates ✓`,
   },
   {
     name: "compensation-minimum",
@@ -169,6 +170,7 @@ RULES:
    - Monthly rate: convert to annual (×12). Apply the $130,000/year threshold.
    - Non-USD currencies: convert approximately to USD before comparing. Use rough rates: 1 EUR ≈ 1.10 USD, 1 GBP ≈ 1.27 USD.
 3. Only evaluate base salary/rate. Ignore equity, bonuses, or total compensation packages — focus on the stated cash compensation.
+4. When in doubt, PASS. This filter should only reject listings with clearly stated compensation below the threshold. If the math is ambiguous, the currency is unclear, or you're unsure whether a number refers to salary, PASS.
 
 Examples:
 PASS: No salary mentioned anywhere → no compensation info, pass by default ✓
