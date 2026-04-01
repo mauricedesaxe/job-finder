@@ -1,3 +1,5 @@
+import { DEFAULT_RATES, type ExchangeRates } from "../services/exchangeRates";
+
 export interface EvaluationCriteria {
   name: string;
   prompt: string;
@@ -9,7 +11,7 @@ export interface EvaluationFilter extends EvaluationCriteria {}
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
   {
     name: "crypto-web3-ts",
-    prompt: `You evaluate job listings for a senior/lead backend or fullstack developer focused on crypto/web3. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior/lead backend or fullstack developer focused on crypto/web3. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role is in or serves the crypto/web3/blockchain space. This includes: crypto-native companies, agencies/studios/consultancies whose specific role or department works on crypto/trading/DeFi projects, or roles that explicitly mention crypto/blockchain/trading platforms as the work domain.
@@ -40,7 +42,7 @@ FAIL: Web3 company, marketing manager → non-engineering role`,
   },
   {
     name: "fintech-trading-infra-ts",
-    prompt: `You evaluate job listings for a senior backend or fullstack engineer working on trading systems, financial data, or real-time financial infrastructure. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior backend or fullstack engineer working on trading systems, financial data, or real-time financial infrastructure. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role involves trading infrastructure, real-time data pipelines, market data systems, trading platforms, DeFi trading, crypto trading platforms, or financial backend services.
@@ -62,7 +64,7 @@ FAIL: Generic fintech CRUD API, no real-time component → no trading/real-time 
   },
   {
     name: "senior-fullstack-react",
-    prompt: `You evaluate job listings for a senior fullstack engineer with strong React/TypeScript frontend skills. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior fullstack engineer with strong React/TypeScript frontend skills. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role is fullstack — involves BOTH frontend and backend work.
@@ -85,7 +87,7 @@ FAIL: Senior iOS developer, Swift → not React/TS frontend`,
   },
   {
     name: "ai-engineering",
-    prompt: `You evaluate job listings for a senior backend or fullstack engineer building AI-powered products. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior backend or fullstack engineer building AI-powered products. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role involves building AI-powered products or infrastructure at the application layer: RAG pipelines, LLM integrations, AI agents, AI-powered features, vector databases, prompt engineering infrastructure, or similar. The work is about integrating and deploying AI capabilities into products, not training models from scratch.
@@ -95,6 +97,8 @@ A job FAILS if ANY of these are true:
 - Non-engineering role
 - Pure ML research or model training role (PhD required, writing papers, training foundation models)
 - Data science or analytics role with no engineering component
+- DevOps, SRE, or infrastructure-primary roles where AI is a secondary concern (e.g., deploying LLMs, managing GPU clusters, maintaining AI infrastructure). The primary function must be building AI-powered product features, not operating infrastructure.
+- Deep data engineering roles centered on batch processing frameworks (Spark) and workflow orchestrators (Airflow) — i.e., the primary job is data pipeline infrastructure, not building AI-powered product features. Note: event streaming (Kafka) is fine.
 - Strictly frontend role
 - HFT or ultra-low-latency systems (matching engines, FPGA, C++/C performance-critical)
 
@@ -102,15 +106,17 @@ Examples:
 PASS: Startup, senior backend, building RAG pipeline for document search, Python + TypeScript → AI product engineering ✓
 PASS: Company, senior fullstack, integrating LLMs into existing product, React + Node.js → AI-powered product ✓
 PASS: AI company, senior engineer, building AI agents and tool-use infrastructure → AI application layer ✓
+PASS: Senior AI Engineer, event-driven architecture with Kafka, building RAG pipelines → AI product engineering with event streaming ✓
 FAIL: ML researcher, PhD required, training large language models → pure ML research, not application engineering
-FAIL: Data analyst, building dashboards with AI insights → analytics, not engineering`,
+FAIL: Data analyst, building dashboards with AI insights → analytics, not engineering
+FAIL: Senior DevOps Engineer managing LLM deployments and AI infrastructure → DevOps/infra primary, not product engineering
+FAIL: Senior Data Engineer building data pipelines with Spark and Airflow, some ML integration → deep data engineering primary, not AI product engineering`,
   },
 ];
 
-export const EVALUATION_FILTERS: EvaluationFilter[] = [
-  {
-    name: "remote-europe-eligible",
-    prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
+const REMOTE_FILTER: EvaluationFilter = {
+  name: "remote-europe-eligible",
+  prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
 
 STEP 1 — Does the listing explicitly indicate the role is remote?
 Look for a clear signal: "Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", location listed as "Remote", "Remote - Europe", etc.
@@ -149,6 +155,58 @@ FAIL: "Remote - US only" → restricted to US
 FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only
 PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → body overrides misleading header metadata, remote ✓, global ✓
 PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓
-PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓`,
-  },
+PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓
+PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓
+PASS: "Work around U.S. business hours" or "US East Coast hours" → Romania (EET, UTC+2) has workable overlap with US East Coast (EST, UTC-5). Afternoon/evening in Romania overlaps with morning in US East. This is feasible and should PASS unless the listing explicitly excludes European candidates ✓`,
+};
+
+/** Currencies to include in the compensation filter prompt (when available in rates). */
+const PROMPT_CURRENCIES = [
+  "EUR",
+  "GBP",
+  "CHF",
+  "CAD",
+  "AUD",
+  "PLN",
+  "SEK",
+  "NOK",
+  "DKK",
+  "CZK",
+  "SGD",
+  "ILS",
 ];
+
+function buildCompensationFilter(rates: ExchangeRates): EvaluationFilter {
+  const rateLines = PROMPT_CURRENCIES.filter((c) => c in rates)
+    .map((c) => `1 ${c} ≈ ${(rates[c] as number).toFixed(2)} USD`)
+    .join(", ");
+
+  return {
+    name: "compensation-minimum",
+    prompt: `You are a compensation filter. Your ONLY job is to determine whether the listed compensation meets a minimum threshold. Ignore everything else (location, tech stack, seniority, company).
+
+RULES:
+1. If NO salary, compensation, or rate is mentioned anywhere in the listing → PASS. Most job listings do not include compensation, and that is fine.
+2. If compensation IS mentioned:
+   - Annual salary: PASS if the maximum of the stated range is ≥ $130,000/year. FAIL if the maximum is below $130,000/year.
+   - Hourly rate (contractor): PASS if the maximum of the stated range is ≥ $65/hour. FAIL if the maximum is below $65/hour.
+   - Monthly rate: convert to annual (×12). Apply the $130,000/year threshold.
+   - Non-USD currencies: convert approximately to USD before comparing. Use these rates: ${rateLines}.
+3. Only evaluate base salary/rate. Ignore equity, bonuses, or total compensation packages — focus on the stated cash compensation.
+4. When in doubt, PASS. This filter should only reject listings with clearly stated compensation below the threshold. If the math is ambiguous, the currency is unclear, or you're unsure whether a number refers to salary, PASS.
+
+Examples:
+PASS: No salary mentioned anywhere → no compensation info, pass by default ✓
+PASS: "$150,000 - $200,000" → max $200k ≥ $130k ✓
+PASS: "Salary range between $200,000 - $250,000" → max $250k ≥ $130k ✓
+PASS: "$100/hr" → $100/hr ≥ $65/hr ✓
+PASS: "€120,000 - €150,000" → max €150k ≈ $165k ≥ $130k ✓
+FAIL: "$40 - $50/hr" → max $50/hr < $65/hr
+FAIL: "$80,000 - $100,000 per year" → max $100k < $130k
+FAIL: "$3,000/month" → $36k/year < $130k`,
+  };
+}
+
+export function getEvaluationFilters(rates?: ExchangeRates): EvaluationFilter[] {
+  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES)];
+}

@@ -1,10 +1,12 @@
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import { config } from "./config";
+import { getEvaluationFilters } from "./config/evaluation";
 import { logger } from "./logger";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
+import { fetchExchangeRates } from "./services/exchangeRates";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, CacheSyncer } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
@@ -38,6 +40,9 @@ async function main() {
     },
     "notion cache built",
   );
+
+  const rates = await fetchExchangeRates();
+  const filters = getEvaluationFilters(rates);
 
   const syncer = new CacheSyncer(cache);
   const tracker = new TokenTracker();
@@ -91,7 +96,7 @@ async function main() {
 
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, syncer, seenUrls, tracker }),
+      processUrl(url, keyword, { notion, config, syncer, seenUrls, tracker, filters }),
     ),
   );
 
