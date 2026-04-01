@@ -112,6 +112,8 @@ bun run scrape
 5. Set the cron schedule to `0 8 */2 * *` (every 2 days at 8 AM UTC)
 6. Increase the job timeout to **45 minutes** (the scraper can take 10-30+ min depending on results)
 
+> **Note:** Avoid modifying the Notion database while the cron job is running. The scraper caches the database state at startup and concurrent edits can cause pagination errors.
+
 ## Architecture
 
 ```mermaid
@@ -119,9 +121,7 @@ flowchart TD
     Start([bun run scrape]) --> Preflight[Preflight checks\nValidate Notion schema]
     Preflight --> PreReconcile[Pre-reconcile\nSync job statuses]
     PreReconcile --> Cache[Build Notion cache\nURLs, blocked companies,\nrecent apps, titles by company]
-    Cache --> Syncer[Start CacheSyncer\nRefresh every 60s]
-
-    Syncer --> Search
+    Cache --> Search
 
     subgraph Search [Phase 1: Search]
         direction TB
@@ -205,7 +205,7 @@ Each URL goes through a multi-stage pipeline:
 6. **Company checks** — skip if the company is marked "Company Blocked", or insert as "Company Applied" if the user recently applied there (within 6 months)
 7. **Insert** — write to Notion with status "To Review"
 
-A `CacheSyncer` runs in the background, refreshing the Notion cache every 60 seconds and merging local additions so that jobs inserted mid-run are visible for dedup.
+Jobs inserted during a run are immediately added to the local cache so they're visible for dedup within the same run.
 
 ## Job Statuses
 
