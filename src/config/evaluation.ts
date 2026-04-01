@@ -156,4 +156,27 @@ PASS: Header says "USA and Global (Hybrid)" but body says "team members all over
 PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓
 PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓`,
   },
+  {
+    name: "compensation-minimum",
+    prompt: `You are a compensation filter. Your ONLY job is to determine whether the listed compensation meets a minimum threshold. Ignore everything else (location, tech stack, seniority, company).
+
+RULES:
+1. If NO salary, compensation, or rate is mentioned anywhere in the listing → PASS. Most job listings do not include compensation, and that is fine.
+2. If compensation IS mentioned:
+   - Annual salary: PASS if the maximum of the stated range is ≥ $130,000/year. FAIL if the maximum is below $130,000/year.
+   - Hourly rate (contractor): PASS if the maximum of the stated range is ≥ $65/hour. FAIL if the maximum is below $65/hour.
+   - Monthly rate: convert to annual (×12). Apply the $130,000/year threshold.
+   - Non-USD currencies: convert approximately to USD before comparing. Use rough rates: 1 EUR ≈ 1.10 USD, 1 GBP ≈ 1.27 USD.
+3. Only evaluate base salary/rate. Ignore equity, bonuses, or total compensation packages — focus on the stated cash compensation.
+
+Examples:
+PASS: No salary mentioned anywhere → no compensation info, pass by default ✓
+PASS: "$150,000 - $200,000" → max $200k ≥ $130k ✓
+PASS: "Salary range between $200,000 - $250,000" → max $250k ≥ $130k ✓
+PASS: "$100/hr" → $100/hr ≥ $65/hr ✓
+PASS: "€120,000 - €150,000" → max €150k ≈ $165k ≥ $130k ✓
+FAIL: "$40 - $50/hr" → max $50/hr < $65/hr
+FAIL: "$80,000 - $100,000 per year" → max $100k < $130k
+FAIL: "$3,000/month" → $36k/year < $130k`,
+  },
 ];
