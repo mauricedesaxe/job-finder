@@ -8,7 +8,7 @@ import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import { createNotionClient } from "./services/notion";
-import { buildNotionCache, CacheSyncer } from "./services/notionCache";
+import { buildNotionCache, NotionCacheUpdater } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
 import { TokenTracker } from "./services/tokenTracker";
 
@@ -44,7 +44,7 @@ async function main() {
   const rates = await fetchExchangeRates();
   const filters = getEvaluationFilters(rates);
 
-  const syncer = new CacheSyncer(cache);
+  const syncer = new NotionCacheUpdater(cache);
   const tracker = new TokenTracker();
 
   // Phase 1: Parallel search — collect all URLs
@@ -92,15 +92,11 @@ async function main() {
 
   log.info({ urls: urlMap.size }, "phase 2: processing urls");
 
-  syncer.start(notion, config.notionDatabaseId);
-
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
       processUrl(url, keyword, { notion, config, syncer, seenUrls, tracker, filters }),
     ),
   );
-
-  syncer.stop();
 
   // Aggregate stats
   const stats: ScrapeStats = {
