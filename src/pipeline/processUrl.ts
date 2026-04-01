@@ -12,6 +12,7 @@ import {
   withRetry,
 } from "../concurrency";
 import type { JobFinderConfig } from "../config";
+import type { EvaluationCriteria } from "../config/evaluation";
 import { logger } from "../logger";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
@@ -48,6 +49,7 @@ export interface ProcessContext {
   syncer: CacheSyncer;
   seenUrls: Set<string>;
   tracker?: TokenTracker;
+  filters?: EvaluationCriteria[];
 }
 
 export async function processUrl(
@@ -82,7 +84,7 @@ export async function processUrl(
   // Evaluate (profiles run in parallel internally)
   const evaluation = await anthropicSemaphore.run(() =>
     anthropicBreaker.run(() =>
-      withRetry(() => evaluateJob(job, config.anthropicApiKey, { tracker }), {
+      withRetry(() => evaluateJob(job, config.anthropicApiKey, { tracker, filters: ctx.filters }), {
         shouldRetry: isRetryableAnthropic,
         onRetry: (a) => log.warn({ url, attempt: a }, "anthropic eval retry"),
       }),
