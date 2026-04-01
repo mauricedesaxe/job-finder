@@ -15,7 +15,7 @@ import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { insertJob } from "../services/notion";
-import type { CacheSyncer } from "../services/notionCache";
+import type { NotionCacheUpdater } from "../services/notionCache";
 import type { TokenTracker } from "../services/tokenTracker";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
@@ -46,7 +46,7 @@ export interface ScrapeStats {
 export interface ProcessContext {
   notion: Client;
   config: JobFinderConfig;
-  syncer: CacheSyncer;
+  syncer: NotionCacheUpdater;
   seenUrls: Set<string>;
   tracker?: TokenTracker;
   filters?: EvaluationFilter[];
