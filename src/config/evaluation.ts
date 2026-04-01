@@ -154,7 +154,8 @@ FAIL: "Remote - US only" → restricted to US
 FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only
 PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → body overrides misleading header metadata, remote ✓, global ✓
 PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓
-PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓`,
+PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓
+PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓`,
   },
   {
     name: "compensation-minimum",
