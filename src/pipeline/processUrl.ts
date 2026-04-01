@@ -12,7 +12,7 @@ import {
   withRetry,
 } from "../concurrency";
 import type { JobFinderConfig } from "../config";
-import type { EvaluationCriteria } from "../config/evaluation";
+import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { insertJob } from "../services/notion";
 import type { CacheSyncer } from "../services/notionCache";
@@ -49,7 +49,7 @@ export interface ProcessContext {
   syncer: CacheSyncer;
   seenUrls: Set<string>;
   tracker?: TokenTracker;
-  filters?: EvaluationCriteria[];
+  filters?: EvaluationFilter[];
 }
 
 export async function processUrl(
