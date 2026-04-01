@@ -9,7 +9,7 @@ export interface EvaluationFilter extends EvaluationCriteria {}
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
   {
     name: "crypto-web3-ts",
-    prompt: `You evaluate job listings for a senior/lead backend or fullstack developer focused on crypto/web3. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior/lead backend or fullstack developer focused on crypto/web3. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role is in or serves the crypto/web3/blockchain space. This includes: crypto-native companies, agencies/studios/consultancies whose specific role or department works on crypto/trading/DeFi projects, or roles that explicitly mention crypto/blockchain/trading platforms as the work domain.
@@ -40,7 +40,7 @@ FAIL: Web3 company, marketing manager → non-engineering role`,
   },
   {
     name: "fintech-trading-infra-ts",
-    prompt: `You evaluate job listings for a senior backend or fullstack engineer working on trading systems, financial data, or real-time financial infrastructure. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior backend or fullstack engineer working on trading systems, financial data, or real-time financial infrastructure. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role involves trading infrastructure, real-time data pipelines, market data systems, trading platforms, DeFi trading, crypto trading platforms, or financial backend services.
@@ -62,7 +62,7 @@ FAIL: Generic fintech CRUD API, no real-time component → no trading/real-time 
   },
   {
     name: "senior-fullstack-react",
-    prompt: `You evaluate job listings for a senior fullstack engineer with strong React/TypeScript frontend skills. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior fullstack engineer with strong React/TypeScript frontend skills. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role is fullstack — involves BOTH frontend and backend work.
@@ -85,7 +85,7 @@ FAIL: Senior iOS developer, Swift → not React/TS frontend`,
   },
   {
     name: "ai-engineering",
-    prompt: `You evaluate job listings for a senior backend or fullstack engineer building AI-powered products. Location eligibility is already verified — do not evaluate it.
+    prompt: `You evaluate job listings for a senior backend or fullstack engineer building AI-powered products. Location eligibility is already verified by a separate filter — do NOT evaluate it. Do not reject based on timezone requirements, office location, or geographic restrictions.
 A job PASSES if ALL of these are true:
 1. The role is senior or lead level (or doesn't specify level, which is acceptable).
 2. The role involves building AI-powered products or infrastructure at the application layer: RAG pipelines, LLM integrations, AI agents, AI-powered features, vector databases, prompt engineering infrastructure, or similar. The work is about integrating and deploying AI capabilities into products, not training models from scratch.
