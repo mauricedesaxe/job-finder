@@ -91,8 +91,10 @@ export async function reconcile(
   }
 
   // Pass 3: Propagate "Company Blocked" → archive
+  // Same read-then-write pattern to avoid cursor invalidation.
   const blockedJobs = await queryJobsByStatus(client, databaseId, "Company Blocked");
   const blockedCompanies = new Set(blockedJobs.map((j) => j.company));
+  const blockedUpdates: Array<{ company: string; jobId: string }> = [];
 
   for (const company of blockedCompanies) {
     const toReviewJobs = await queryJobsByStatusAndCompany(
@@ -101,13 +103,15 @@ export async function reconcile(
       "To Review",
       company,
     );
-    if (toReviewJobs.length > 0) {
-      log.info({ company, count: toReviewJobs.length }, "archiving jobs (company blocked)");
-      for (const job of toReviewJobs) {
-        await updateJobStatus(client, job.id, "Archived");
-        stats.archived++;
-      }
+    for (const job of toReviewJobs) {
+      blockedUpdates.push({ company, jobId: job.id });
     }
+  }
+
+  for (const { company, jobId } of blockedUpdates) {
+    log.info({ company }, "archiving jobs (company blocked)");
+    await updateJobStatus(client, jobId, "Archived");
+    stats.archived++;
   }
 
   return stats;
