@@ -84,10 +84,18 @@ export async function processUrl(
   // Evaluate (profiles run in parallel internally)
   const evaluation = await anthropicSemaphore.run(() =>
     anthropicBreaker.run(() =>
-      withRetry(() => evaluateJob(job, config.anthropicApiKey, { tracker, filters: ctx.filters }), {
-        shouldRetry: isRetryableAnthropic,
-        onRetry: (a) => log.warn({ url, attempt: a }, "anthropic eval retry"),
-      }),
+      withRetry(
+        () =>
+          evaluateJob(job, config.openrouterApiKey, {
+            tracker,
+            filters: ctx.filters,
+            model: config.llmModel,
+          }),
+        {
+          shouldRetry: isRetryableAnthropic,
+          onRetry: (a) => log.warn({ url, attempt: a }, "llm eval retry"),
+        },
+      ),
     ),
   );
 
@@ -113,9 +121,9 @@ export async function processUrl(
   // Enrich
   const enriched = await anthropicSemaphore.run(() =>
     anthropicBreaker.run(() =>
-      withRetry(() => enrichJob(job, config.anthropicApiKey, tracker), {
+      withRetry(() => enrichJob(job, config.openrouterApiKey, tracker, config.llmModel), {
         shouldRetry: isRetryableAnthropic,
-        onRetry: (a) => log.warn({ url, attempt: a }, "anthropic enrich retry"),
+        onRetry: (a) => log.warn({ url, attempt: a }, "llm enrich retry"),
       }),
     ),
   );
@@ -129,7 +137,14 @@ export async function processUrl(
   if (existingTitles.length > 0) {
     const dedup = await anthropicSemaphore.run(() =>
       withRetry(
-        () => checkFuzzyDuplicate(job.title, existingTitles, config.anthropicApiKey, tracker),
+        () =>
+          checkFuzzyDuplicate(
+            job.title,
+            existingTitles,
+            config.openrouterApiKey,
+            tracker,
+            config.llmModel,
+          ),
         { shouldRetry: isRetryableAnthropic },
       ),
     );
