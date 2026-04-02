@@ -83,6 +83,8 @@ export async function checkFuzzyDuplicate(
     log.warn({ model: modelName }, "No usage data in response");
   }
 
+  // Intentionally lenient: on missing/malformed tool calls we default to
+  // "not a duplicate" so borderline jobs still reach the user for review.
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall || toolCall.type !== "function") {
     return { isDuplicate: false };
