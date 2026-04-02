@@ -1,5 +1,6 @@
-import type Anthropic from "@anthropic-ai/sdk";
-import { getClient } from "../services/anthropic";
+import type OpenAI from "openai";
+import { logger } from "../logger";
+import { getClient } from "../services/llm";
 import type { TokenTracker } from "../services/tokenTracker";
 
 export interface DedupResult {
@@ -7,23 +8,28 @@ export interface DedupResult {
   matchedTitle?: string;
 }
 
-const DEDUP_TOOL: Anthropic.Messages.Tool = {
-  name: "check_duplicate",
-  description:
-    "Decide whether the new job title refers to the same role as any existing title at the same company",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      isDuplicate: {
-        type: "boolean",
-        description: "True if the new title is the same role as an existing title",
+const log = logger.child({ component: "dedup" });
+
+const DEDUP_TOOL: OpenAI.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "check_duplicate",
+    description:
+      "Decide whether the new job title refers to the same role as any existing title at the same company",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        isDuplicate: {
+          type: "boolean",
+          description: "True if the new title is the same role as an existing title",
+        },
+        matchedTitle: {
+          type: "string",
+          description: "The existing title that matches, or null if no match",
+        },
       },
-      matchedTitle: {
-        type: "string",
-        description: "The existing title that matches, or null if no match",
-      },
+      required: ["isDuplicate"],
     },
-    required: ["isDuplicate"],
   },
 };
 
@@ -32,6 +38,7 @@ export async function checkFuzzyDuplicate(
   existingTitles: string[],
   apiKey: string,
   tracker?: TokenTracker,
+  model?: string,
 ): Promise<DedupResult> {
   if (existingTitles.length === 0) {
     return { isDuplicate: false };
@@ -45,34 +52,53 @@ export async function checkFuzzyDuplicate(
     }
   }
 
-  const anthropic = getClient(apiKey);
+  const client = getClient(apiKey);
+  const modelName = model ?? "google/gemini-2.5-flash";
 
   const numbered = existingTitles.map((t, i) => `${i + 1}. ${t}`).join("\n");
 
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
+  const response = await client.chat.completions.create({
+    model: modelName,
     max_tokens: 128,
-    system: `You compare job titles at the same company to detect duplicates. Two titles are duplicates if they refer to the same role despite minor wording differences: abbreviations (Sr. = Senior, Eng = Engineer), reordering (Backend Engineer = Engineer, Backend), or trivial additions (e.g. adding a team name). They are NOT duplicates if the seniority level, domain, or function differs (e.g. "Senior Backend Engineer" vs "Staff Frontend Engineer").`,
     messages: [
+      {
+        role: "system",
+        content: `You compare job titles at the same company to detect duplicates. Two titles are duplicates if they refer to the same role despite minor wording differences: abbreviations (Sr. = Senior, Eng = Engineer), reordering (Backend Engineer = Engineer, Backend), or trivial additions (e.g. adding a team name). They are NOT duplicates if the seniority level, domain, or function differs (e.g. "Senior Backend Engineer" vs "Staff Frontend Engineer").`,
+      },
       {
         role: "user",
         content: `New title: "${newTitle}"\n\nExisting titles at the same company:\n${numbered}\n\nIs the new title a duplicate of any existing title?`,
       },
     ],
     tools: [DEDUP_TOOL],
-    tool_choice: { type: "tool", name: "check_duplicate" },
+    tool_choice: { type: "function", function: { name: "check_duplicate" } },
   });
 
-  tracker?.add(response.model, "dedup", response.usage);
+  if (response.usage) {
+    tracker?.add(response.model ?? modelName, "dedup", {
+      input_tokens: response.usage.prompt_tokens,
+      output_tokens: response.usage.completion_tokens,
+    });
+  } else {
+    log.warn({ model: modelName }, "No usage data in response");
+  }
 
-  const toolBlock = response.content.find((block) => block.type === "tool_use");
-  if (!toolBlock || toolBlock.type !== "tool_use") {
+  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+  if (!toolCall || toolCall.type !== "function") {
     return { isDuplicate: false };
   }
 
-  const input = toolBlock.input as { isDuplicate: boolean; matchedTitle?: string };
-  return {
-    isDuplicate: input.isDuplicate,
-    matchedTitle: input.matchedTitle ?? undefined,
-  };
+  try {
+    const input = JSON.parse(toolCall.function.arguments) as {
+      isDuplicate: boolean;
+      matchedTitle?: string;
+    };
+    return {
+      isDuplicate: input.isDuplicate,
+      matchedTitle: input.matchedTitle ?? undefined,
+    };
+  } catch {
+    log.warn({ arguments: toolCall.function.arguments }, "Failed to parse dedup tool arguments");
+    return { isDuplicate: false };
+  }
 }
