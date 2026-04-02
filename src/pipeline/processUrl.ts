@@ -1,12 +1,12 @@
 import type { Client } from "@notionhq/client";
 import {
-  anthropicBreaker,
-  anthropicSemaphore,
-  isRetryableAnthropic,
   isRetryableJina,
+  isRetryableLLM,
   isRetryableNotion,
   jinaBreaker,
   jinaReaderSemaphore,
+  llmBreaker,
+  llmSemaphore,
   notionBreaker,
   notionRateLimiter,
   withRetry,
@@ -82,8 +82,8 @@ export async function processUrl(
   const job = parseJobDetails(markdown, url, keyword);
 
   // Evaluate (profiles run in parallel internally)
-  const evaluation = await anthropicSemaphore.run(() =>
-    anthropicBreaker.run(() =>
+  const evaluation = await llmSemaphore.run(() =>
+    llmBreaker.run(() =>
       withRetry(
         () =>
           evaluateJob(job, config.openrouterApiKey, {
@@ -92,7 +92,7 @@ export async function processUrl(
             model: config.llmModel,
           }),
         {
-          shouldRetry: isRetryableAnthropic,
+          shouldRetry: isRetryableLLM,
           onRetry: (a) => log.warn({ url, attempt: a }, "llm eval retry"),
         },
       ),
@@ -119,10 +119,10 @@ export async function processUrl(
   }
 
   // Enrich
-  const enriched = await anthropicSemaphore.run(() =>
-    anthropicBreaker.run(() =>
+  const enriched = await llmSemaphore.run(() =>
+    llmBreaker.run(() =>
       withRetry(() => enrichJob(job, config.openrouterApiKey, tracker, config.llmModel), {
-        shouldRetry: isRetryableAnthropic,
+        shouldRetry: isRetryableLLM,
         onRetry: (a) => log.warn({ url, attempt: a }, "llm enrich retry"),
       }),
     ),
@@ -135,7 +135,7 @@ export async function processUrl(
   // Fuzzy dedup (cache-based company lookup, LLM for title comparison)
   const existingTitles = cache.jobsByCompany.get(job.company) ?? [];
   if (existingTitles.length > 0) {
-    const dedup = await anthropicSemaphore.run(() =>
+    const dedup = await llmSemaphore.run(() =>
       withRetry(
         () =>
           checkFuzzyDuplicate(
@@ -145,7 +145,7 @@ export async function processUrl(
             tracker,
             config.llmModel,
           ),
-        { shouldRetry: isRetryableAnthropic },
+        { shouldRetry: isRetryableLLM },
       ),
     );
     if (dedup.isDuplicate) {

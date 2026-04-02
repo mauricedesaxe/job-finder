@@ -17,7 +17,7 @@ export const isRetryableJina = (err: unknown): boolean => {
   return status === 429 || status === 500 || status === 503;
 };
 
-export const isRetryableAnthropic = (err: unknown): boolean => {
+export const isRetryableLLM = (err: unknown): boolean => {
   const status = getErrorStatus(err);
   return status === 429 || status === 500 || status === 502 || status === 503;
 };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isRetryableAnthropic, isRetryableJina, isRetryableNotion, withRetry } from "../retry";
+import { isRetryableJina, isRetryableLLM, isRetryableNotion, withRetry } from "../retry";
 
 describe("withRetry", () => {
   test("returns on first success", async () => {
@@ -95,13 +95,13 @@ describe("shouldRetry predicates", () => {
     expect(isRetryableJina(new Error("network"))).toBe(false);
   });
 
-  test("isRetryableAnthropic", () => {
-    expect(isRetryableAnthropic({ status: 429 })).toBe(true);
-    expect(isRetryableAnthropic({ status: 500 })).toBe(true);
-    expect(isRetryableAnthropic({ status: 502 })).toBe(true);
-    expect(isRetryableAnthropic({ status: 503 })).toBe(true);
-    expect(isRetryableAnthropic({ status: 400 })).toBe(false);
-    expect(isRetryableAnthropic({ status: 529 })).toBe(false);
+  test("isRetryableLLM", () => {
+    expect(isRetryableLLM({ status: 429 })).toBe(true);
+    expect(isRetryableLLM({ status: 500 })).toBe(true);
+    expect(isRetryableLLM({ status: 502 })).toBe(true);
+    expect(isRetryableLLM({ status: 503 })).toBe(true);
+    expect(isRetryableLLM({ status: 400 })).toBe(false);
+    expect(isRetryableLLM({ status: 529 })).toBe(false);
   });
 
   test("isRetryableNotion", () => {
