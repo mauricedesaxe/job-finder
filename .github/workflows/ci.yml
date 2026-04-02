@@ -7,28 +7,52 @@ on:
     branches: [main]
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
     if: "!startsWith(github.event.head_commit.message, 'release: ')"
     steps:
       - uses: actions/checkout@v4
-
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2"
-
       - run: bun install --frozen-lockfile
-
       - name: Lint
         run: bun run lint
 
+  typecheck:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'release: ')"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+      - run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun run typecheck
 
+  unit-tests:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'release: ')"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+      - run: bun install --frozen-lockfile
       - name: Unit tests
         run: bun run test
 
+  integration-tests:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'release: ')"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+      - run: bun install --frozen-lockfile
       - name: Integration tests
         run: bun run test:integration
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

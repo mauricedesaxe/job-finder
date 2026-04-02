@@ -1,13 +1,13 @@
 # jobfinder
 
-Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with Claude, and stores qualified jobs in Notion. Fork it and customize the search profile to match your own job search criteria.
+Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with an LLM via OpenRouter, and stores qualified jobs in Notion. Fork it and customize the search profile to match your own job search criteria.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) runtime installed
 - A [Notion integration](https://www.notion.so/my-integrations) with read/write access to your database — you'll need the **Integration Token** and **Database ID**
 - A [Jina AI](https://jina.ai) API key — used for searching and scraping job pages
-- An [Anthropic](https://console.anthropic.com) API key — used for evaluating, enriching, and deduplicating jobs with Claude
+- An [OpenRouter](https://openrouter.ai) API key — used for evaluating, enriching, and deduplicating jobs via LLM (model configurable via `LLM_MODEL` env var, defaults to `google/gemini-2.5-flash`)
 
 ## Notion Database Setup
 
@@ -107,7 +107,8 @@ bun run scrape
    - `NOTION_TOKEN`
    - `NOTION_DATABASE_ID`
    - `JINA_API_KEY`
-   - `ANTHROPIC_API_KEY`
+   - `OPENROUTER_API_KEY`
+   - `LLM_MODEL` (optional, defaults to `google/gemini-2.5-flash`)
 4. In **Settings**, change the service type to **Cron Job**
 5. Set the cron schedule to `0 8 */2 * *` (every 2 days at 8 AM UTC)
 6. Increase the job timeout to **45 minutes** (the scraper can take 10-30+ min depending on results)
@@ -136,10 +137,10 @@ flowchart TD
         direction TB
         P1[URL dedup\nSkip if in cache or seen this run]
         P1 --> P2[Scrape via Jina Reader\nPage → markdown]
-        P2 --> P3[Evaluate with Claude\nfilters first, then profiles]
+        P2 --> P3[Evaluate with LLM\nfilters first, then profiles]
         P3 -->|Filter or all profiles fail| Rejected[Insert as Rejected]
-        P3 -->|Filters pass + profile match| P4[Enrich with Claude\nNormalize title, company,\nlocation, description]
-        P4 --> P5[Fuzzy dedup with Claude\nCompare against existing titles]
+        P3 -->|Filters pass + profile match| P4[Enrich with LLM\nNormalize title, company,\nlocation, description]
+        P4 --> P5[Fuzzy dedup with LLM\nCompare against existing titles]
         P5 -->|Duplicate| Skip1[Skip]
         P5 -->|Unique| P6{Company\nchecks}
         P6 -->|Blocked| Archive[Insert as Archived]
@@ -152,9 +153,9 @@ flowchart TD
 
     JinaSearch -.-> Jina[(Jina AI\ns.jina.ai / r.jina.ai)]
     P2 -.-> Jina
-    P3 -.-> Claude[(Claude Haiku)]
-    P4 -.-> Claude
-    P5 -.-> Claude
+    P3 -.-> LLM[(LLM via OpenRouter)]
+    P4 -.-> LLM
+    P5 -.-> LLM
     Insert -.-> Notion[(Notion DB)]
     Rejected -.-> Notion
     Archive -.-> Notion
@@ -162,7 +163,7 @@ flowchart TD
     Cache -.-> Notion
 
     style Jina fill:#e8f4f8,stroke:#0891b2
-    style Claude fill:#fef3c7,stroke:#d97706
+    style LLM fill:#fef3c7,stroke:#d97706
     style Notion fill:#f3e8ff,stroke:#9333ea
     style Rejected fill:#fee2e2,stroke:#dc2626
     style Skip1 fill:#f3f4f6,stroke:#6b7280
@@ -177,7 +178,7 @@ Each external service call is wrapped in a resilience stack: **semaphore** (conc
 |---------|-------------|------------|
 | Jina Search | 5 parallel | — |
 | Jina Reader | 8 parallel | — |
-| Claude | 10 parallel | — |
+| LLM (OpenRouter) | 10 parallel | — |
 | Notion | 3 parallel | 3 req/s (token bucket) |
 
 ## How Search Works
@@ -199,9 +200,9 @@ Each URL goes through a multi-stage pipeline:
 
 1. **Dedup** — skip immediately if the URL exists in the Notion cache (fetched at startup) or was already seen in this run
 2. **Scrape** — the [Jina Reader API](https://r.jina.ai) fetches the page and converts it to clean markdown (title, company, description, dates)
-3. **Evaluate** — Claude Haiku runs evaluation in two phases. First, AND filters run in parallel — if any filter fails, the job is rejected immediately (saving API calls). Then, OR profiles run in parallel — the job passes if any profile accepts it. If all profiles reject, the job is inserted as "Rejected" and processing stops
-4. **Enrich** — Claude Haiku normalizes the raw scraped data: cleans the title (removes company/location suffixes), proper-cases the company name, normalizes the location (e.g. `Remote - US/EU` → `Remote (US/EU)`), and rewrites the description as concise markdown
-5. **Fuzzy dedup** — if the company already has jobs in the cache, Claude Haiku compares the new title against existing ones to catch duplicates that differ only in abbreviations, reordering, or trivial additions
+3. **Evaluate** — LLM via OpenRouter runs evaluation in two phases. First, AND filters run in parallel — if any filter fails, the job is rejected immediately (saving API calls). Then, OR profiles run in parallel — the job passes if any profile accepts it. If all profiles reject, the job is inserted as "Rejected" and processing stops
+4. **Enrich** — LLM via OpenRouter normalizes the raw scraped data: cleans the title (removes company/location suffixes), proper-cases the company name, normalizes the location (e.g. `Remote - US/EU` → `Remote (US/EU)`), and rewrites the description as concise markdown
+5. **Fuzzy dedup** — if the company already has jobs in the cache, LLM via OpenRouter compares the new title against existing ones to catch duplicates that differ only in abbreviations, reordering, or trivial additions
 6. **Company checks** — skip if the company is marked "Company Blocked", or insert as "Company Applied" if the user recently applied there (within 6 months)
 7. **Insert** — write to Notion with status "To Review"
 
