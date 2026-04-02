@@ -84,10 +84,13 @@ export async function reconcile(
     }
   }
 
-  for (const { company, jobId } of companyAppliedUpdates) {
-    log.info({ company }, "propagating company applied status");
-    await updateJobStatus(client, jobId, "Company Applied");
-    stats.companyApplied++;
+  const companyAppliedGrouped = Map.groupBy(companyAppliedUpdates, (u) => u.company);
+  for (const [company, updates] of companyAppliedGrouped) {
+    log.info({ company, count: updates.length }, "propagating company applied status");
+    for (const { jobId } of updates) {
+      await updateJobStatus(client, jobId, "Company Applied");
+      stats.companyApplied++;
+    }
   }
 
   // Pass 3: Propagate "Company Blocked" → archive
@@ -108,10 +111,13 @@ export async function reconcile(
     }
   }
 
-  for (const { company, jobId } of blockedUpdates) {
-    log.info({ company }, "archiving jobs (company blocked)");
-    await updateJobStatus(client, jobId, "Archived");
-    stats.archived++;
+  const blockedGrouped = Map.groupBy(blockedUpdates, (u) => u.company);
+  for (const [company, updates] of blockedGrouped) {
+    log.info({ company, count: updates.length }, "archiving jobs (company blocked)");
+    for (const { jobId } of updates) {
+      await updateJobStatus(client, jobId, "Archived");
+      stats.archived++;
+    }
   }
 
   return stats;
