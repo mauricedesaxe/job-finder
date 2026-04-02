@@ -97,9 +97,11 @@ describe("shouldRetry predicates", () => {
 
   test("isRetryableAnthropic", () => {
     expect(isRetryableAnthropic({ status: 429 })).toBe(true);
-    expect(isRetryableAnthropic({ status: 529 })).toBe(true);
     expect(isRetryableAnthropic({ status: 500 })).toBe(true);
+    expect(isRetryableAnthropic({ status: 502 })).toBe(true);
+    expect(isRetryableAnthropic({ status: 503 })).toBe(true);
     expect(isRetryableAnthropic({ status: 400 })).toBe(false);
+    expect(isRetryableAnthropic({ status: 529 })).toBe(false);
   });
 
   test("isRetryableNotion", () => {
