@@ -31,4 +31,4 @@ jobs:
       - name: Integration tests
         run: bun run test:integration
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
