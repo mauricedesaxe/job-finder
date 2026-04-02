@@ -41,7 +41,7 @@ Flagged during code audit — each needs verification before fixing.
 - [ ] **RateLimiter not concurrency-safe** (`src/concurrency/rateLimiter.ts:20-30`) — `acquire()` does check-then-act (`if tokens >= 1 → tokens--`) without serialization; two concurrent callers can both pass the check. Also, `waitMs` goes negative when `this.tokens > 1` after refill
 - [ ] **LLM tool_use responses not validated** (`src/pipeline/evaluate.ts:67`, `enrich.ts:78`, `dedup.ts:73`) — `toolBlock.input as <Type>` with no Zod parse; if model returns unexpected shape, data silently corrupts
 - [ ] **Dedup silent false-negative** (`src/pipeline/dedup.ts:68-71`) — missing tool_use block returns `{ isDuplicate: false }` instead of throwing; transient API issue → duplicate insertions. Inconsistent with evaluate/enrich which throw
-- [ ] **No request timeouts** (`src/services/http.ts`, pipeline LLM calls) — no `AbortController`/`signal` on any fetch or Anthropic call; a stuck request blocks the semaphore slot forever
+- [ ] **No request timeouts** (`src/services/http.ts`, pipeline LLM calls) — no `AbortController`/`signal` on any fetch or LLM call; a stuck request blocks the semaphore slot forever
 
 ### Medium severity
 
