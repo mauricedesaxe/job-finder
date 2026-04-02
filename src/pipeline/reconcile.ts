@@ -67,7 +67,10 @@ export async function reconcile(
   }
 
   // Pass 2: Propagate "Company Applied"
+  // Collect all jobs to update first (read phase), then write — interleaving
+  // reads and writes can invalidate Notion pagination cursors.
   const appliedCompanies = await queryAppliedCompanies(client, databaseId);
+  const companyAppliedUpdates: Array<{ company: string; jobId: string }> = [];
 
   for (const company of appliedCompanies) {
     const toReviewJobs = await queryJobsByStatusAndCompany(
@@ -76,13 +79,15 @@ export async function reconcile(
       "To Review",
       company,
     );
-    if (toReviewJobs.length > 0) {
-      log.info({ company, count: toReviewJobs.length }, "propagating company applied status");
-      for (const job of toReviewJobs) {
-        await updateJobStatus(client, job.id, "Company Applied");
-        stats.companyApplied++;
-      }
+    for (const job of toReviewJobs) {
+      companyAppliedUpdates.push({ company, jobId: job.id });
     }
+  }
+
+  for (const { company, jobId } of companyAppliedUpdates) {
+    log.info({ company }, "propagating company applied status");
+    await updateJobStatus(client, jobId, "Company Applied");
+    stats.companyApplied++;
   }
 
   // Pass 3: Propagate "Company Blocked" → archive
