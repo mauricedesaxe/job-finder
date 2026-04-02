@@ -3,7 +3,8 @@ import { basename } from "node:path";
 import { evaluateJob } from "../evaluate";
 import { collectFixtures, loadFixture } from "./helpers";
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY as string;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY as string;
+const LLM_MODEL = process.env.LLM_MODEL ?? "google/gemini-2.5-flash";
 
 const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 const ACCURACY_THRESHOLD = 0.75;
@@ -17,7 +18,10 @@ describe("full evaluation pipeline (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → PASS`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
-      const result = await evaluateJob(job, ANTHROPIC_API_KEY, { temperature: 0 });
+      const result = await evaluateJob(job, OPENROUTER_API_KEY, {
+        temperature: 0,
+        model: LLM_MODEL,
+      });
       results.push({ name, expected: true, actual: result.pass, reason: result.reason });
     }, 60_000);
   }
@@ -26,7 +30,10 @@ describe("full evaluation pipeline (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → FAIL`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
-      const result = await evaluateJob(job, ANTHROPIC_API_KEY, { temperature: 0 });
+      const result = await evaluateJob(job, OPENROUTER_API_KEY, {
+        temperature: 0,
+        model: LLM_MODEL,
+      });
       results.push({ name, expected: false, actual: result.pass, reason: result.reason });
     }, 60_000);
   }

@@ -4,7 +4,8 @@ import { getEvaluationFilters } from "../../config/evaluation";
 import { evaluateSingle } from "../evaluate";
 import { collectFixtures, loadFixture } from "./helpers";
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY as string;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY as string;
+const LLM_MODEL = process.env.LLM_MODEL ?? "google/gemini-2.5-flash";
 const remoteFilter = getEvaluationFilters().find(
   (f) => f.name === "remote-europe-eligible",
 ) as ReturnType<typeof getEvaluationFilters>[number];
@@ -21,8 +22,9 @@ describe("remote-europe-eligible filter (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → PASS`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
-      const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY, undefined, {
+      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
         temperature: 0,
+        model: LLM_MODEL,
       });
       results.push({ name, expected: true, actual: result.pass, reason: result.reason });
     }, 30_000);
@@ -32,8 +34,9 @@ describe("remote-europe-eligible filter (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → FAIL`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
-      const result = await evaluateSingle(job, remoteFilter, ANTHROPIC_API_KEY, undefined, {
+      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
         temperature: 0,
+        model: LLM_MODEL,
       });
       results.push({ name, expected: false, actual: result.pass, reason: result.reason });
     }, 30_000);
