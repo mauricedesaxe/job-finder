@@ -19,7 +19,14 @@ Given raw scraped job data, return cleaned and normalized versions of each field
 - **title**: Just the job title, no company name, location, or other suffixes
 - **company**: Proper company name with correct capitalization and spacing (e.g. "Monad Foundation" not "monad.foundation", "Paxos Labs" not "PaxosLabs")
 - **description**: A clean, well-formatted summary of the role using markdown. Structure it with sections like "## Overview", "## Responsibilities", "## Requirements", "## Tech Stack", "## Compensation" (only include sections that have content). Use bullet points for lists. Strip navigation elements, boilerplate, legal disclaimers, and repeated company marketing. Should be readable in 30 seconds.
-- **location**: Normalized location (e.g. "Remote (Global)", "Remote (US/EU)", "Remote (Europe)", "New York, NY", "London, UK"). If unclear, say "Not specified".`;
+- **location**: A short canonical location string (e.g. "Remote (Global)", "Remote (US/EU)", "Remote (Europe)", "Remote (US)", "Remote", "New York, NY", "London, UK").
+
+  STRICT RULES — be conservative; do NOT infer or invent restrictions:
+  * Only encode geographic restrictions that are EXPLICITLY stated in the listing (e.g. "US only", "EU residents only", "must be eligible to work in Canada").
+  * A mentioned office is NOT a restriction. "Remote-friendly with an NYC office" → "Remote", NOT "Remote (US/NYC preferred)". "Hybrid in San Francisco" → "Hybrid (San Francisco)" only because the listing states the requirement.
+  * Do not write phrases like "preferred" or "primarily" unless those exact words appear in the source.
+  * If the listing says "remote" without a region → "Remote".
+  * If the listing gives no location/eligibility signal at all → "Not specified".`;
 
 const ENRICH_TOOL: OpenAI.ChatCompletionTool = {
   type: "function",
