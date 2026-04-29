@@ -9,6 +9,48 @@ CLI script (`bun src/index.ts`) deployed as a Railway cron job (every 2 days). S
 
 ---
 
+## 0. ATS-Native Enrichment via Public APIs (P0, highest leverage)
+
+**The single most impactful false-positive fix we have identified so far.**
+
+### Problem
+
+The eval pipeline relies on Jina's text scrape to extract location, workplace type, and other structured signals from the job posting body. Most ATS pages (Ashby, Lever, Greenhouse) are SPAs that render structured data — location, isRemote/workplaceType, country eligibility — in sidebar widgets via JS. That metadata never reaches our markdown.
+
+The result: roles that are explicitly "OnSite New York" or "Hybrid Chicago/SF" in the ATS structured data scrape as location-unspecified, and the geo filter waves them through. Walking the To-Review pile with Alex confirmed this is the most common false-positive class — we observed it on Polymarket (NYC OnSite), Curie (Hybrid Chicago/SF), and Ledger (hybrid policy buried in benefits, the body silent on workplace type). Conversely, body text can mislead in the other direction: Yuno's AI Engineer says "work from everywhere" but Lever's API reports `country: CO`, `allLocations: [LATAM + US]` — no Europe.
+
+### Solution: query the ATS public API alongside (or instead of) Jina
+
+All three of the JS-rendered ATS sources expose unauthenticated public APIs that return clean structured data:
+
+| ATS | Endpoint | Useful fields |
+|---|---|---|
+| Ashby | `https://api.ashbyhq.com/posting-api/job-board/{org}` (returns full job list; filter client-side by id) | `location`, `secondaryLocations[].location`, `isRemote`, `workplaceType` (`OnSite`/`Hybrid`/`Remote`), `address.postalAddress` |
+| Lever | `https://api.lever.co/v0/postings/{org}/{id}?mode=json` | `categories.location`, `categories.allLocations[]`, `categories.commitment`, `workplaceType` (`remote`/`hybrid`/`on-site`), `country` (ISO) |
+| Greenhouse | `https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{id}` | `location.name`, `offices[]`, `departments[]`, `content` (HTML) |
+| Workable | No clean public API discovered. `apply.workable.com/api/v3/...` returns 404 unauth. Continue with Jina + body-content rules; revisit later. |
+
+For the three that have APIs, the proposed flow inside `processUrl.ts`:
+
+1. After URL detection (`detectSource`), branch on source.
+2. For ashbyhq/lever/greenhouse: call the API, extract structured location/workplace/country fields, and either (a) prepend a `## Location\n...\n## Workplace Type\n...` block to the markdown before LLM eval, or (b) populate `JobListing.location` and a new `JobListing.workplaceType` field directly and skip the LLM enrichment for those fields.
+3. For workable/other: keep current Jina-based flow.
+
+### Open questions before implementing
+
+- **Rate limits** — we have only hit each API once. Need to confirm: is there a per-IP limit? Per-org? What does Ashby/Lever/Greenhouse return on throttling? Need to add the same circuit-breaker / retry / rate-limiter pattern we use for Jina.
+- **Reliability** — these are public-but-undocumented endpoints (Ashby's especially). What is the failure mode if the schema changes? Should we Zod-parse the response and fail safe to Jina-only on parse error?
+- **Ashby endpoint shape** — `job-board/{org}` returns the whole list. For a workspace with hundreds of openings, fetching the entire list to find one ID is wasteful. Investigate whether `job-posting/{id}` works with any auth scheme (we got "Unauthorized" unauth) or whether per-org caching is the right shape.
+- **Workplace type taxonomy** — Ashby uses `OnSite/Hybrid/Remote`, Lever uses `remote/hybrid/on-site`, Greenhouse has no first-class field (use offices[] heuristic). Need a normalized `JobListing.workplaceType` union and a mapper per source.
+- **Body conflicts** — when the body says "work from everywhere" but the API says LATAM-only, which wins? Trust the API for hard filters (geo eligibility) since marketers write loose copy in the body. Surface both to the LLM if we keep enrichment in the loop.
+- **Greenhouse content is HTML** — currently we feed Jina markdown to enrichment/eval. If we use the API content, we either need to convert HTML→markdown locally or feed HTML to the LLM (fine for eval, may cost more tokens).
+
+### Why this is P0
+
+Every false-positive fixture we've captured for hybrid/onsite-leaking-through (Polymarket, Curie, Ledger, OpenUp partially) would be caught at zero LLM cost the moment this lands. It is the highest-leverage single change we have identified.
+
+---
+
 ## 1. LLM-as-a-Judge Tests (P0)
 
 ### Evaluation tests — done
