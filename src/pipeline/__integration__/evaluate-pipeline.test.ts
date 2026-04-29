@@ -1,7 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { basename } from "node:path";
-import { evaluateJob } from "../evaluate";
+import type { JobListing } from "../../types";
+import { evaluateJob, type JobEvaluation } from "../evaluate";
+import { structuralFilter } from "../structuralFilter";
 import { collectFixtures, loadFixture } from "./helpers";
+
+async function evaluateFullPipeline(
+  job: JobListing,
+  apiKey: string,
+  options: { temperature?: number; model?: string },
+): Promise<JobEvaluation> {
+  const structural = structuralFilter(job);
+  if (!structural.pass) return { pass: false, reason: structural.reason };
+  return evaluateJob(job, apiKey, options);
+}
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY as string;
 const LLM_MODEL = process.env.LLM_MODEL ?? "google/gemini-2.5-flash";
@@ -18,7 +30,7 @@ describe("full evaluation pipeline (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → PASS`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
-      const result = await evaluateJob(job, OPENROUTER_API_KEY, {
+      const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
         temperature: 0,
         model: LLM_MODEL,
       });
@@ -30,7 +42,7 @@ describe("full evaluation pipeline (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → FAIL`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
-      const result = await evaluateJob(job, OPENROUTER_API_KEY, {
+      const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
         temperature: 0,
         model: LLM_MODEL,
       });
