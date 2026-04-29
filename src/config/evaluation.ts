@@ -209,6 +209,66 @@ FAIL: "$3,000/month" → $36k/year < $130k`,
   };
 }
 
+const ROLE_QUALITY_FILTER: EvaluationFilter = {
+  name: "role-quality",
+  prompt: `You are a role-quality filter. Your ONLY job is to detect listings whose role shape, stack, or seniority bar makes them a poor fit for a senior backend-leaning fullstack engineer. Ignore location, compensation, and domain — those are evaluated by other filters and profiles.
+
+The candidate is a polyglot whose primary stack is TypeScript/Node.js, with strong working knowledge of Go, Rust, and Python. They have ~6 years of experience. They prefer hands-on senior or lead roles.
+
+FAIL if ANY of these apply:
+
+1. ENTERPRISE STACK — the must-have/primary backend stack is dominated by enterprise languages with no modern alternative:
+   - "Spring Boot", "Spring Cloud", "Java/Spring", "JPA" required as the backend stack
+   - ".NET", "ASP.NET", "ASP.NET Core", "C#" required as the backend stack
+   - "Scala" required as the primary backend
+   - "C++" in must-have backend skills
+   - Backend language list contains ONLY enterprise languages (e.g., "Java, C#, or Scala") with no TS/Node/Go/Rust/Python as primary alternatives
+   PASS if Java/.NET/C#/Scala appears only as nice-to-have, secondary, or as one of many options that includes TS/Node/Go/Rust/Python.
+
+2. PURE ARCHITECT, NO IC — the role is purely architectural with no individual-contributor / hands-on coding work:
+   - Title contains "Architect" AND responsibilities are vision/strategy/leadership only
+   - No "build", "code", "ship", "develop", "implement", or "write" appear as primary actions
+   - Reads as "drive technical strategy", "lead architecture", "long-term planning" without concrete delivery
+   PASS if the role is "Architect/Lead" but the responsibilities include hands-on coding, building features, or shipping production code.
+
+3. SOLUTIONS / FDE / FIELD ENGINEER — primarily customer-facing technical:
+   - Title contains "Solutions Engineer", "Forward Deployed Engineer", "Customer Engineer", "Field Engineer", "Sales Engineer"
+   - Body emphasizes "work directly with customers", "strategic accounts", "voice of the developer community", "translate customer needs"
+   PASS if the title is normal Software/Backend/Fullstack engineer even if customer collaboration is mentioned in passing.
+
+4. PURE DATA ENGINEERING — primary work is data plumbing, not product engineering:
+   - Title contains "Data Engineer" AND must-have skills are dominated by data-warehouse / pipeline tooling
+   - Required skills focus on Snowflake, dbt, Airflow, Debezium, CDC pipelines, DMS, OpenFlow, BigQuery
+   - AI/LLM tooling is only mentioned as nice-to-have or "intelligent insights"
+   PASS if the role builds AI products and uses some data tooling along the way (Kafka for event streaming is fine).
+
+5. TOO-SENIOR BAR — explicit "10+ years" or "12+ years" requirement at Principal/Distinguished level. Roles asking for 5-9 years pass.
+
+6. INTERVIEW PROCESS DISCLOSED AS 4+ SYNCHRONOUS ROUNDS — the listing publishes a multi-stage process with 4 or more synchronous interview rounds (recruiter screen, behavioral, technical, system-design, culture-fit, hiring-manager call, etc.). DO NOT count: take-home assignments, async coding tests, reference checks, offers, application reviews — these are not interview rounds. PASS if 1-3 synchronous rounds are described, or if no process is disclosed.
+
+7. NON-ENGLISH BODY — substantial non-English text leaks into the description (Russian, Chinese, Arabic, etc.) that isn't a translated UI element or stated language requirement. A single mid-sentence non-English token strongly suggests a non-English-primary team.
+
+When in doubt, PASS. This filter should only reject listings where one of the above signals is clearly present in the body. Borderline cases stay in the pile for the user to decide.
+
+Examples:
+
+PASS: "Stack: TypeScript, React, Go, Python" → modern polyglot, no enterprise BS ✓
+PASS: "Backend: Node.js, Python; familiarity with Java is a plus" → Java is plus, not must-have ✓
+PASS: "5+ years software engineering, building RAG pipelines with Python" → standard senior bar, AI-product role ✓
+PASS: "Senior Architect, Blockchain & DeFi — hands-on, dig deep into the code" → architect + IC content ✓
+PASS: "Senior Software Engineer; some customer collaboration" → not primarily FDE ✓
+FAIL: "Must have: Java 11+, Spring Boot, Spring Cloud" → enterprise Java/Spring stack ✓ enterprise
+FAIL: "10+ years experience; production with Java, Golang, or C++" → 10+ bar AND enterprise language alternatives without modern primary ✓
+FAIL: "Software Engineer, Solutions — be the technical partner for top crypto teams" → Solutions Engineer customer-facing role
+FAIL: "Senior Staff Data Engineer; dbt, Snowflake, Airflow, Debezium primary" → pure data engineering, AI not central
+FAIL: "Senior Backend Developer (Node.js); ... оптимизация под нагрузкой ..." → Russian text in otherwise-English body, non-English-primary team
+FAIL: "Interview Process: 1) Talent screen 2) Behavioral 3) Two 90-min technicals 4) Culture-add" → 4+ synchronous rounds disclosed
+PASS: "Process: 1) Initial screening 2) Live pairing session 3) Founder call 4) Offer" → "Offer" is not an interview round, only 3 synchronous rounds ✓
+PASS: "Process: phone screen, take-home assignment, on-site loop, reference check" → take-home and reference check don't count as synchronous rounds ✓
+FAIL: "Senior Software Engineer; design, drive strategy, define vision; lead architecture across teams; promote best practices" → architect-only framing with no IC content
+PASS: "Senior Engineer; design and build production systems; ship features end-to-end; mentor juniors" → leadership + IC ✓`,
+};
+
 export function getEvaluationFilters(rates?: ExchangeRates): EvaluationFilter[] {
-  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES)];
+  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES), ROLE_QUALITY_FILTER];
 }
