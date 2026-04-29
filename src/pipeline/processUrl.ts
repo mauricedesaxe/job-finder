@@ -110,7 +110,7 @@ export async function processUrl(
     );
     await notionRateLimiter.run(() =>
       notionBreaker.run(() =>
-        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Rejected"), {
+        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
           shouldRetry: isRetryableNotion,
         }),
       ),

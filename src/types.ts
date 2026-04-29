@@ -3,6 +3,7 @@ export const JOB_STATUSES = [
   "Applied",
   "Skipped",
   "Rejected",
+  "Auto-Rejected",
   "Company Applied",
   "Company Blocked",
   "Archived",
