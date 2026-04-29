@@ -97,8 +97,8 @@ A job FAILS if ANY of these are true:
 - Non-engineering role
 - Pure ML research or model training role (PhD required, writing papers, training foundation models)
 - Data science or analytics role with no engineering component
-- DevOps, SRE, or infrastructure-primary roles where AI is a secondary concern (e.g., deploying LLMs, managing GPU clusters, maintaining AI infrastructure). The primary function must be building AI-powered product features, not operating infrastructure.
-- Deep data engineering roles centered on batch processing frameworks (Spark) and workflow orchestrators (Airflow) — i.e., the primary job is data pipeline infrastructure, not building AI-powered product features. Note: event streaming (Kafka) is fine.
+- DevOps, SRE, or operational MLOps roles where AI is a secondary concern (deploying LLMs to clusters, managing GPU pools, on-call for AI infrastructure, model-serving cluster ops). The role must be engineering — not operating infrastructure. Note: building AI Platform / Agent Platform engineering (model routing, evaluation frameworks, agent runtimes, RAG infrastructure, tool-calling abstractions, context management) IS in scope and PASSES — those are foundational engineering for AI products, not ops.
+- Deep data engineering roles where the primary job is data pipeline infrastructure with AI tooling only as a nice-to-have. Look for "Data Engineer" in the title plus must-have skills dominated by data-warehouse tooling (Snowflake, dbt, Airflow, Debezium, CDC pipelines, DMS) without AI/LLM/agent work as the primary function. Note: event streaming (Kafka) appearing in the stack is fine when the role is AI-product-leaning.
 - Strictly frontend role
 - HFT or ultra-low-latency systems (matching engines, FPGA, C++/C performance-critical)
 
@@ -107,10 +107,12 @@ PASS: Startup, senior backend, building RAG pipeline for document search, Python
 PASS: Company, senior fullstack, integrating LLMs into existing product, React + Node.js → AI-powered product ✓
 PASS: AI company, senior engineer, building AI agents and tool-use infrastructure → AI application layer ✓
 PASS: Senior AI Engineer, event-driven architecture with Kafka, building RAG pipelines → AI product engineering with event streaming ✓
+PASS: Senior SWE, AI Platform — model routing, agent architecture, context management, evaluation frameworks for product teams → AI Platform engineering, foundational to AI products ✓
 FAIL: ML researcher, PhD required, training large language models → pure ML research, not application engineering
+FAIL: Senior LLM Engineer, fine-tuning and distillation, model architectures, Triton/vLLM inference servers → model-training/research primary, not application engineering
 FAIL: Data analyst, building dashboards with AI insights → analytics, not engineering
 FAIL: Senior DevOps Engineer managing LLM deployments and AI infrastructure → DevOps/infra primary, not product engineering
-FAIL: Senior Data Engineer building data pipelines with Spark and Airflow, some ML integration → deep data engineering primary, not AI product engineering`,
+FAIL: Senior Staff Data Engineer, dbt + Snowflake + Airflow + Debezium for wealth-mgmt warehouse → deep data engineering primary, AI is nice-to-have only`,
   },
 ];
 
