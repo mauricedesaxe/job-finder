@@ -24,8 +24,13 @@ const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 // Alex prefers fewer false positives over fewer false negatives — too many
 // jobs already flood the To-Review pile. FP threshold is therefore stricter.
 // Both numbers should ratchet down as we close eval gaps.
-const FP_RATE_MAX = 0.3; // % of reject fixtures the eval wrongly passes
-const FN_RATE_MAX = 0.3; // % of pass fixtures the eval wrongly fails
+//
+// Current achieved rates with the role-quality filter and the softened
+// ai-engineering profile: FP ≈ 17%, FN ≈ 8%. Thresholds set with a small
+// buffer above achieved rates to absorb LLM non-determinism (temperature 0
+// is not deterministic on these models).
+const FP_RATE_MAX = 0.22; // % of reject fixtures the eval wrongly passes
+const FN_RATE_MAX = 0.15; // % of pass fixtures the eval wrongly fails
 
 // Run fixtures in parallel through the LLM. evaluateJob already fans out the
 // 3 filters + 4 profiles in parallel, so each fixture is ~7 LLM calls. With
