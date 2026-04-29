@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { basename } from "node:path";
+import { Semaphore } from "../../concurrency";
 import type { JobListing } from "../../types";
 import { evaluateJob, type JobEvaluation } from "../evaluate";
 import { structuralFilter } from "../structuralFilter";
@@ -26,34 +27,55 @@ const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 const FP_RATE_MAX = 0.3; // % of reject fixtures the eval wrongly passes
 const FN_RATE_MAX = 0.3; // % of pass fixtures the eval wrongly fails
 
+// Run fixtures in parallel through the LLM. evaluateJob already fans out the
+// 3 filters + 4 profiles in parallel, so each fixture is ~7 LLM calls. With
+// 70+ fixtures that's 500+ in-flight calls if we go fully unbounded —
+// OpenRouter would throttle. Cap at 12 concurrent fixtures.
+const FIXTURE_CONCURRENCY = 12;
+const PARALLEL_RUN_TIMEOUT_MS = 600_000;
+
 type Result = { name: string; expected: boolean; actual: boolean; reason: string };
 
 const results: Result[] = [];
 
 describe("full evaluation pipeline (integration)", () => {
-  for (const file of collectFixtures(`${FIXTURES_DIR}/pass`)) {
-    const name = basename(file, ".md");
-    test(`${name} → PASS`, async () => {
-      const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
-      const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
-        temperature: 0,
-        model: LLM_MODEL,
-      });
-      results.push({ name, expected: true, actual: result.pass, reason: result.reason });
-    }, 60_000);
-  }
+  beforeAll(async () => {
+    const passFiles = collectFixtures(`${FIXTURES_DIR}/pass`).map((file) => ({
+      file,
+      dir: "pass" as const,
+      expected: true,
+    }));
+    const rejectFiles = collectFixtures(`${FIXTURES_DIR}/reject`).map((file) => ({
+      file,
+      dir: "reject" as const,
+      expected: false,
+    }));
+    const all = [...passFiles, ...rejectFiles];
 
-  for (const file of collectFixtures(`${FIXTURES_DIR}/reject`)) {
-    const name = basename(file, ".md");
-    test(`${name} → FAIL`, async () => {
-      const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
-      const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
-        temperature: 0,
-        model: LLM_MODEL,
-      });
-      results.push({ name, expected: false, actual: result.pass, reason: result.reason });
-    }, 60_000);
-  }
+    const sem = new Semaphore(FIXTURE_CONCURRENCY);
+    const evaluations = await Promise.all(
+      all.map(({ file, dir, expected }) =>
+        sem.run(async (): Promise<Result> => {
+          const name = basename(file, ".md");
+          try {
+            const job = await loadFixture(`${FIXTURES_DIR}/${dir}/${file}`);
+            const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
+              temperature: 0,
+              model: LLM_MODEL,
+            });
+            return { name, expected, actual: result.pass, reason: result.reason };
+          } catch (err) {
+            // A single bad LLM response or transient API error must not kill
+            // the whole batch. Record the fixture as unknown so it shows up
+            // as a misclassification on whichever side is wrong.
+            const message = err instanceof Error ? err.message : String(err);
+            return { name, expected, actual: !expected, reason: `errored: ${message}` };
+          }
+        }),
+      ),
+    );
+    for (const e of evaluations) results.push(e);
+  }, PARALLEL_RUN_TIMEOUT_MS);
 
   test("FP and FN rates meet thresholds", () => {
     const total = results.length;
