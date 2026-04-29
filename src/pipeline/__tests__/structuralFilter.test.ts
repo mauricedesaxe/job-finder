@@ -34,6 +34,26 @@ describe("structuralFilter", () => {
     expect(result.reason).toContain("Aggregator");
   });
 
+  test("rejects 'General Application' titles", () => {
+    const result = structuralFilter({ ...baseJob, title: "General Application" });
+    expect(result.pass).toBe(false);
+    expect(result.reason).toContain("Generic");
+  });
+
+  test("rejects talent-pool titles", () => {
+    expect(structuralFilter({ ...baseJob, title: "Talent Pool" }).pass).toBe(false);
+    expect(structuralFilter({ ...baseJob, title: "Talent Community" }).pass).toBe(false);
+    expect(structuralFilter({ ...baseJob, title: "Future Opportunities" }).pass).toBe(false);
+    expect(structuralFilter({ ...baseJob, title: "Open Application" }).pass).toBe(false);
+    expect(structuralFilter({ ...baseJob, title: "Join Our Talent Network" }).pass).toBe(false);
+  });
+
+  test("does not reject titles that merely contain the word 'general'", () => {
+    expect(
+      structuralFilter({ ...baseJob, title: "Senior Engineer, General AI Platform" }).pass,
+    ).toBe(true);
+  });
+
   test("passes ordinary direct-employer listings", () => {
     expect(structuralFilter(baseJob).pass).toBe(true);
     expect(
