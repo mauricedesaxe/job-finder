@@ -21,6 +21,7 @@ import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
+import { structuralFilter } from "./structuralFilter";
 
 const log = logger.child({ component: "processUrl" });
 
@@ -80,6 +81,23 @@ export async function processUrl(
     ),
   );
   const job = parseJobDetails(markdown, url, keyword);
+
+  // Structural pre-filter — deterministic checks (aggregators, etc.) before paying for LLM eval
+  const structural = structuralFilter(job);
+  if (!structural.pass) {
+    log.info(
+      { url, title: job.title, company: job.company, reason: structural.reason },
+      "rejected (structural)",
+    );
+    await notionRateLimiter.run(() =>
+      notionBreaker.run(() =>
+        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
+          shouldRetry: isRetryableNotion,
+        }),
+      ),
+    );
+    return "rejected";
+  }
 
   // Evaluate (profiles run in parallel internally)
   const evaluation = await llmSemaphore.run(() =>
