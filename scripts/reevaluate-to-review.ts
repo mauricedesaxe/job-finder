@@ -14,10 +14,11 @@
  */
 
 import { Client } from "@notionhq/client";
-import { Semaphore } from "../src/concurrency";
+import { atsApiRateLimiter, atsApiSemaphore, Semaphore } from "../src/concurrency";
 import { evaluateJob, type JobEvaluation } from "../src/pipeline/evaluate";
 import { parseJobDetails, scrapeJobPage } from "../src/pipeline/scrape";
 import { structuralFilter } from "../src/pipeline/structuralFilter";
+import { clearAshbyCache, fetchAtsData, formatAtsBlock } from "../src/services/ats";
 import { updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
 
@@ -76,7 +77,7 @@ async function fetchToReview(): Promise<ToReview[]> {
   return out;
 }
 
-async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: string; stage: string }> {
+async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: string; stage: string; atsSource: string | null }> {
   // Re-fetch markdown via Jina so we evaluate against the same input
   // shape the production pipeline sees.
   const markdown = await scrapeJobPage(item.url, { jinaBaseUrl: "https://r.jina.ai", jinaApiKey: jinaApiKey! });
@@ -86,26 +87,45 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
   job.title = item.title || job.title;
   job.company = item.company || job.company;
 
+  // ATS-native enrichment — same step as processUrl. Prepends structured
+  // location/workplaceType/country signals to the body before LLM eval.
+  const atsData = await atsApiSemaphore.run(() =>
+    atsApiRateLimiter.run(() => fetchAtsData(item.url)),
+  );
+  if (atsData) {
+    job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
+  }
+
+  const atsSource = atsData?.source ?? null;
+
   const structural = structuralFilter(job);
   if (!structural.pass) {
-    return { pass: false, reason: structural.reason, stage: "structural" };
+    return { pass: false, reason: structural.reason, stage: "structural", atsSource };
   }
 
   const evaluation: JobEvaluation = await evaluateJob(job, openrouterApiKey!, {
     temperature: 0,
     model: llmModel,
   });
-  return { pass: evaluation.pass, reason: evaluation.reason, stage: evaluation.pass ? "passed" : "llm-eval" };
+  return {
+    pass: evaluation.pass,
+    reason: evaluation.reason,
+    stage: evaluation.pass ? "passed" : "llm-eval",
+    atsSource,
+  };
 }
 
 async function main() {
+  // Reset per-run ATS caches (Ashby returns whole-org listings).
+  clearAshbyCache();
+
   const all = await fetchToReview();
   const items = Number.isFinite(LIMIT) ? all.slice(0, LIMIT) : all;
   console.log(`Found ${all.length} To Review entries${items.length < all.length ? ` (processing first ${items.length})` : ""}`);
   console.log(`Mode: ${DRY_RUN ? "DRY RUN (no Notion writes)" : "LIVE — will mark rejects as Auto-Rejected"}\n`);
 
   const sem = new Semaphore(FIXTURE_CONCURRENCY);
-  const verdicts: Array<{ item: ToReview; pass: boolean; reason: string; stage: string; error?: string }> = [];
+  const verdicts: Array<{ item: ToReview; pass: boolean; reason: string; stage: string; atsSource: string | null; error?: string }> = [];
   let completed = 0;
 
   await Promise.all(
@@ -116,7 +136,7 @@ async function main() {
           verdicts.push({ item, ...v });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          verdicts.push({ item, pass: true, reason: "errored", stage: "error", error: message });
+          verdicts.push({ item, pass: true, reason: "errored", stage: "error", atsSource: null, error: message });
         }
         completed++;
         if (completed % 10 === 0 || completed === items.length) {
@@ -130,16 +150,21 @@ async function main() {
   const passes = verdicts.filter((v) => v.pass);
   const errors = verdicts.filter((v) => v.error);
 
+  const atsEnriched = verdicts.filter((v) => v.atsSource !== null);
+  const atsRejects = rejects.filter((v) => v.atsSource !== null);
+
   console.log(`\n=== Summary ===`);
   console.log(`  Total: ${verdicts.length}`);
   console.log(`  Passes (would stay in To Review): ${passes.length}`);
   console.log(`  Rejects (would be marked Auto-Rejected): ${rejects.length}`);
   console.log(`  Errors during eval: ${errors.length}`);
+  console.log(`  ATS-enriched: ${atsEnriched.length} (rejects: ${atsRejects.length})`);
 
   if (rejects.length > 0) {
     console.log(`\n=== Reject candidates ===`);
     for (const r of rejects) {
-      console.log(`\n[${r.stage}] ${r.item.title} @ ${r.item.company}`);
+      const ats = r.atsSource ? ` [ats:${r.atsSource}]` : "";
+      console.log(`\n[${r.stage}]${ats} ${r.item.title} @ ${r.item.company}`);
       console.log(`  ${r.item.url}`);
       console.log(`  reason: ${r.reason}`);
     }
