@@ -6,6 +6,7 @@ import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/pro
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
+import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, NotionCacheUpdater } from "./services/notionCache";
@@ -19,6 +20,10 @@ async function main() {
   const startTime = Date.now();
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
+
+  // Reset per-run ATS caches (Ashby returns whole-org listings; we cache them
+  // for the run, but stale entries between runs would mask updates).
+  clearAshbyCache();
 
   if (reconcileOnly) {
     const stats = await reconcile(notion, config.notionDatabaseId);
