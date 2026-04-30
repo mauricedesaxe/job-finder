@@ -11,6 +11,7 @@ const ConfigSchema = z.object({
   openrouterApiKey: z.string().min(1, "OPENROUTER_API_KEY is required"),
   llmModel: z.string().default("google/gemini-2.5-flash"),
   slackWebhookUrl: z.string().url().optional(),
+  enableAtsEnrichment: z.boolean().default(true),
 });
 
 export type JobFinderConfig = z.infer<typeof ConfigSchema>;
@@ -26,5 +27,8 @@ export const config: Readonly<JobFinderConfig> = Object.freeze(
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
     llmModel: process.env.LLM_MODEL,
     slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
+    enableAtsEnrichment: process.env.ENABLE_ATS_ENRICHMENT
+      ? process.env.ENABLE_ATS_ENRICHMENT === "true"
+      : undefined,
   }),
 );

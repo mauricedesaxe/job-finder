@@ -1,5 +1,7 @@
 import type { Client } from "@notionhq/client";
 import {
+  atsApiRateLimiter,
+  atsApiSemaphore,
   isRetryableJina,
   isRetryableLLM,
   isRetryableNotion,
@@ -14,6 +16,7 @@ import {
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
+import { fetchAtsData, formatAtsBlock } from "../services/ats";
 import { insertJob } from "../services/notion";
 import type { NotionCacheUpdater } from "../services/notionCache";
 import type { TokenTracker } from "../services/tokenTracker";
@@ -81,6 +84,17 @@ export async function processUrl(
     ),
   );
   const job = parseJobDetails(markdown, url, keyword);
+
+  // ATS-native enrichment — query the ATS public API for clean structured
+  // location/workplaceType/country data and prepend it to the body before the
+  // LLM eval. Failures fall back to Jina-only.
+  if (config.enableAtsEnrichment) {
+    const atsData = await atsApiSemaphore.run(() => atsApiRateLimiter.run(() => fetchAtsData(url)));
+    if (atsData) {
+      log.debug({ url, source: atsData.source }, "ats enriched");
+      job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
+    }
+  }
 
   // Structural pre-filter — deterministic checks (aggregators, etc.) before paying for LLM eval
   const structural = structuralFilter(job);
