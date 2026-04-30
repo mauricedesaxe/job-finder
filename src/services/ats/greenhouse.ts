@@ -20,7 +20,7 @@ export function parseGreenhouseUrl(url: string): { org: string; id: string } | n
   }
 }
 
-function extractCountry(officeLocation: string | undefined): string | null {
+function extractCountry(officeLocation: string | null | undefined): string | null {
   if (!officeLocation) return null;
   // offices[].location is "City, Region, Country" — take the last comma-segment.
   const parts = officeLocation

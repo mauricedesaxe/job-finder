@@ -31,7 +31,7 @@ export function parseAshbyUrl(url: string): { org: string; id: string } | null {
   }
 }
 
-function normalizeWorkplaceType(value: string | undefined): WorkplaceType | null {
+function normalizeWorkplaceType(value: string | null | undefined): WorkplaceType | null {
   if (!value) return null;
   switch (value.toLowerCase()) {
     case "remote":

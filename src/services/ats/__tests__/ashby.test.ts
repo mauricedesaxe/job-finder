@@ -130,4 +130,27 @@ describe("fetchAshbyJob", () => {
     );
     expect(result).toBeNull();
   });
+
+  test("accepts null for optional fields (Ashby returns null, not undefined)", async () => {
+    const payload = {
+      jobs: [
+        {
+          id: "job1",
+          location: "Remote",
+          secondaryLocations: null,
+          isRemote: null,
+          workplaceType: null,
+          address: null,
+        },
+      ],
+    };
+    const result = await fetchAshbyJob("https://jobs.ashbyhq.com/foo/job1", jsonFetcher(payload));
+    expect(result).toEqual({
+      source: "ashby",
+      location: "Remote",
+      locations: ["Remote"],
+      workplaceType: null,
+      country: null,
+    });
+  });
 });
