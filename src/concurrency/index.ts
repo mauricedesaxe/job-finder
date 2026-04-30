@@ -6,6 +6,7 @@ export { CircuitBreaker, CircuitBreakerOpenError } from "./circuitBreaker";
 export { RateLimiter } from "./rateLimiter";
 export type { RetryOptions } from "./retry";
 export {
+  isRetryableAts,
   isRetryableJina,
   isRetryableLLM,
   isRetryableNotion,
@@ -23,3 +24,9 @@ export const notionRateLimiter = new RateLimiter(3, 3); // 3 req/s, burst 3
 export const jinaBreaker = new CircuitBreaker(5, 30_000);
 export const llmBreaker = new CircuitBreaker(5, 30_000);
 export const notionBreaker = new CircuitBreaker(5, 60_000);
+
+// ATS public APIs (Lever, Ashby, Greenhouse) — pooled across all three sources.
+// 100 req/min ceiling is well below documented per-host limits but keeps us polite.
+export const atsApiSemaphore = new Semaphore(8);
+export const atsApiRateLimiter = new RateLimiter(100 / 60, 5);
+export const atsApiBreaker = new CircuitBreaker(5, 30_000);

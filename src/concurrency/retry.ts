@@ -27,6 +27,11 @@ export const isRetryableNotion = (err: unknown): boolean => {
   return status === 429 || status === 502 || status === 503;
 };
 
+export const isRetryableAts = (err: unknown): boolean => {
+  const status = getErrorStatus(err);
+  return status === 429 || status === 500 || status === 502 || status === 503;
+};
+
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
   const { maxRetries = 3, baseDelayMs = 1000, shouldRetry = () => false, onRetry } = options;
 
