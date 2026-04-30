@@ -3,6 +3,7 @@ import {
   type AshbyOrgResponse,
   type AtsJobData,
   ashbyOrgResponseSchema,
+  type Fetcher,
   type WorkplaceType,
 } from "./types";
 
@@ -45,7 +46,7 @@ function normalizeWorkplaceType(value: string | undefined): WorkplaceType | null
   }
 }
 
-async function fetchOrg(org: string): Promise<AshbyOrgResponse | null> {
+async function fetchOrg(org: string, fetcher: Fetcher): Promise<AshbyOrgResponse | null> {
   const cached = orgCache.get(org);
   if (cached) return cached;
 
@@ -53,7 +54,7 @@ async function fetchOrg(org: string): Promise<AshbyOrgResponse | null> {
 
   let res: Response;
   try {
-    res = await fetch(apiUrl);
+    res = await fetcher(apiUrl);
   } catch (err) {
     log.warn({ err, org }, "ashby fetch failed");
     return null;
@@ -82,12 +83,15 @@ async function fetchOrg(org: string): Promise<AshbyOrgResponse | null> {
   return result.data;
 }
 
-export async function fetchAshbyJob(url: string): Promise<AtsJobData | null> {
+export async function fetchAshbyJob(
+  url: string,
+  fetcher: Fetcher = fetch,
+): Promise<AtsJobData | null> {
   const parsed = parseAshbyUrl(url);
   if (!parsed) return null;
   const { org, id } = parsed;
 
-  const orgData = await fetchOrg(org);
+  const orgData = await fetchOrg(org, fetcher);
   if (!orgData) return null;
 
   const job = orgData.jobs.find((j) => j.id === id);

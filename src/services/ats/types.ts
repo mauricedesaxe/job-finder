@@ -4,6 +4,9 @@ export type AtsSource = "lever" | "ashby" | "greenhouse";
 
 export type WorkplaceType = "Remote" | "Hybrid" | "OnSite";
 
+// Injected so unit tests can supply recorded responses without hitting the network.
+export type Fetcher = (url: string) => Promise<Response>;
+
 export interface AtsJobData {
   source: AtsSource;
   location: string;
