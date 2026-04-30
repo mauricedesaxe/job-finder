@@ -1,5 +1,5 @@
 import { logger } from "../../logger";
-import { type AtsJobData, greenhouseJobSchema } from "./types";
+import { type AtsJobData, type Fetcher, greenhouseJobSchema } from "./types";
 
 const log = logger.child({ component: "ats/greenhouse" });
 
@@ -30,7 +30,10 @@ function extractCountry(officeLocation: string | undefined): string | null {
   return parts.length > 1 ? (parts[parts.length - 1] ?? null) : null;
 }
 
-export async function fetchGreenhouseJob(url: string): Promise<AtsJobData | null> {
+export async function fetchGreenhouseJob(
+  url: string,
+  fetcher: Fetcher = fetch,
+): Promise<AtsJobData | null> {
   const parsed = parseGreenhouseUrl(url);
   if (!parsed) return null;
   const { org, id } = parsed;
@@ -39,7 +42,7 @@ export async function fetchGreenhouseJob(url: string): Promise<AtsJobData | null
 
   let res: Response;
   try {
-    res = await fetch(apiUrl);
+    res = await fetcher(apiUrl);
   } catch (err) {
     log.warn({ err, url }, "greenhouse fetch failed");
     return null;

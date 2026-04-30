@@ -1,5 +1,5 @@
 import { logger } from "../../logger";
-import { type AtsJobData, leverJobSchema, type WorkplaceType } from "./types";
+import { type AtsJobData, type Fetcher, leverJobSchema, type WorkplaceType } from "./types";
 
 const log = logger.child({ component: "ats/lever" });
 
@@ -31,7 +31,10 @@ function normalizeWorkplaceType(value: string | undefined): WorkplaceType | null
   }
 }
 
-export async function fetchLeverJob(url: string): Promise<AtsJobData | null> {
+export async function fetchLeverJob(
+  url: string,
+  fetcher: Fetcher = fetch,
+): Promise<AtsJobData | null> {
   const parsed = parseLeverUrl(url);
   if (!parsed) return null;
   const { org, id } = parsed;
@@ -40,7 +43,7 @@ export async function fetchLeverJob(url: string): Promise<AtsJobData | null> {
 
   let res: Response;
   try {
-    res = await fetch(apiUrl);
+    res = await fetcher(apiUrl);
   } catch (err) {
     log.warn({ err, url }, "lever fetch failed");
     return null;
