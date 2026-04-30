@@ -15,19 +15,23 @@ export interface AtsJobData {
   country: string | null;
 }
 
+// All three ATS surfaces emit `null` for unset fields on at least some payloads
+// (observed live on Ashby), so optional fields use .nullish() to accept both
+// undefined (missing) and null (explicitly null).
+
 // Lever — https://api.lever.co/v0/postings/{org}/{id}?mode=json
 export const leverJobSchema = z.object({
   categories: z
     .object({
-      location: z.string().optional(),
-      allLocations: z.array(z.string()).optional(),
-      commitment: z.string().optional(),
-      department: z.string().optional(),
-      team: z.string().optional(),
+      location: z.string().nullish(),
+      allLocations: z.array(z.string()).nullish(),
+      commitment: z.string().nullish(),
+      department: z.string().nullish(),
+      team: z.string().nullish(),
     })
-    .optional(),
-  workplaceType: z.string().optional(),
-  country: z.string().optional(),
+    .nullish(),
+  workplaceType: z.string().nullish(),
+  country: z.string().nullish(),
 });
 
 export type LeverJob = z.infer<typeof leverJobSchema>;
@@ -35,31 +39,31 @@ export type LeverJob = z.infer<typeof leverJobSchema>;
 // Ashby — https://api.ashbyhq.com/posting-api/job-board/{org}
 export const ashbyJobSchema = z.object({
   id: z.string(),
-  location: z.string().optional(),
+  location: z.string().nullish(),
   secondaryLocations: z
     .array(
       z.object({
         location: z.string(),
       }),
     )
-    .optional(),
-  isRemote: z.boolean().optional(),
-  workplaceType: z.string().optional(),
+    .nullish(),
+  isRemote: z.boolean().nullish(),
+  workplaceType: z.string().nullish(),
   address: z
     .object({
       postalAddress: z
         .object({
-          addressCountry: z.string().optional(),
-          addressLocality: z.string().optional(),
+          addressCountry: z.string().nullish(),
+          addressLocality: z.string().nullish(),
         })
-        .optional(),
+        .nullish(),
     })
-    .optional(),
+    .nullish(),
 });
 
 export const ashbyOrgResponseSchema = z.object({
   jobs: z.array(ashbyJobSchema),
-  apiVersion: z.string().optional(),
+  apiVersion: z.string().nullish(),
 });
 
 export type AshbyJob = z.infer<typeof ashbyJobSchema>;
@@ -72,16 +76,16 @@ export const greenhouseJobSchema = z.object({
     .object({
       name: z.string(),
     })
-    .optional(),
+    .nullish(),
   offices: z
     .array(
       z.object({
         id: z.number(),
-        name: z.string().optional(),
-        location: z.string().optional(),
+        name: z.string().nullish(),
+        location: z.string().nullish(),
       }),
     )
-    .optional(),
+    .nullish(),
 });
 
 export type GreenhouseJob = z.infer<typeof greenhouseJobSchema>;
