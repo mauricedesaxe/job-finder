@@ -127,7 +127,9 @@ A listing may begin with a "## ATS Structured Data" block. When present, it is e
 - "Workplace type" is authoritative. Hybrid means hybrid; you may only override it if the body explicitly contradicts ("100% remote", "fully remote regardless of location"). Body silence does NOT override Hybrid. (OnSite is filtered upstream — you should not see it; if you ever do, FAIL.)
 - "All listed locations" reflects where the employer is actively hiring. Use it to judge geographic eligibility per the rules below.
 - "Primary location" is often the HQ city — do not over-index on it as a hiring restriction.
-- "Country (HQ)" is the headquartering country. When "All listed locations" does not name specific countries (e.g., it is empty, or it only contains generic tokens like "Remote") and the body is silent on geo, treat Country (HQ) as the de-facto hiring country.
+- "Country (HQ)" is the headquartering country. CRITICAL: when "All listed locations" does not name any specific country (e.g., it is empty, or contains only generic tokens like "Remote"), Country (HQ) IS the country signal — treat it identically to a single country appearing in the locations list. The literal token "Remote" in a location does NOT mean "no country restriction"; it means "the role is remote, country comes from Country (HQ)".
+
+The word "Remote" anywhere (in ATS metadata or in the body) describes WORK MODE, not GEOGRAPHIC SCOPE. To override a country restriction you need an explicit geographic-scope signal in the body per rule A — a body that just says "fully remote" or "Remote" repeatedly is NOT a global signal.
 
 When there is no ATS block (e.g., Workable listings), rely entirely on the body.
 
@@ -150,7 +152,7 @@ Annual or bi-annual offsites/retreats are acceptable and do NOT count as hybrid.
 
 Apply the first rule that fits, in order:
 
-A. Body says "worldwide", "employees worldwide", "anywhere", or "global" → PASS, regardless of any ATS country list. Country lists often reflect legal entities, not restrictions.
+A. Body indicates a globally distributed team — phrases like "worldwide", "anywhere", "globally distributed team", "global team", "international team", "employees worldwide", "employees in [N]+ countries", or describes the team spanning multiple continents → PASS, regardless of any ATS country list. Country lists often reflect legal entities, not restrictions. Bare "remote-first" or "distributed team" without a "global"/"worldwide"/"international"/multi-country qualifier is NOT enough — those phrases can describe a within-country distributed team.
 
 B. Body explicitly restricts to non-EU regions ("US only", "APAC only", "must be authorized to work in [non-EU]") → FAIL.
 
@@ -190,7 +192,11 @@ PASS: ATS Workplace type=Remote, locations include Portugal/Spain/UK/Ireland alo
 
 [Country / cheap-country handling]
 FAIL: ATS Workplace type=Remote, country=United States, locations=[Remote], body discusses role/stack but is silent on geo → rule F, locations don't name a country so fall back to Country (HQ); single non-EU + body silent
+FAIL: ATS Workplace type=Remote, country=US, locations=[Remote], body says "Remote" multiple times and lists US-style benefits (medical/dental, 401k) but no geographic-scope statement → rule F, "Remote" describes work mode not scope; Country (HQ)=US is the country signal
 FAIL: ATS Workplace type=Remote, locations=[Canada], country=Canada, body silent on geo → rule F, single non-EU country in locations + body silent
+PASS: ATS Workplace type=Remote, locations=[Canada, Remote], country=Canada, body says "be part of a high-performing, globally distributed team" → rule A, "globally distributed team" overrides single-country ATS
+PASS: ATS Workplace type=Remote, locations=[United States], country=United States, body says "we're an international team with engineers across the Americas, Europe, and Asia" → rule A, multi-continent description overrides single-country ATS
+FAIL: ATS Workplace type=Remote, locations=[Canada], country=Canada, body says only "remote-first culture" → rule F, "remote-first" alone does not imply multi-country
 PASS: ATS Workplace type=Remote, country=United States, body says "we hire globally regardless of location, employees in 25+ countries" → rule A, body says global
 FAIL: ATS Workplace type=Remote, locations="United States, Canada, Mexico, Brazil", body silent on geo → rule E, all non-EU
 FAIL: ATS Workplace type=Remote, locations="India, Pakistan, Egypt, Philippines, Spain", body says "fully remote", country=India → rule C, cheap-country skew with token EU country
