@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { basename } from "node:path";
 import { Semaphore } from "../../concurrency";
 import { getEvaluationFilters } from "../../config/evaluation";
@@ -45,6 +45,11 @@ const FN_RATE_MAX = 0.25; // ≤ 1 of 4 pass fixtures may wrongly fail
 const FIXTURE_CONCURRENCY = 8;
 const PARALLEL_RUN_TIMEOUT_MS = 300_000;
 
+// Bun 1.2.23 rejects the (fn, timeoutMs) shape of `beforeAll` at runtime even
+// though bun-types accepts it. Use the module-scoped default instead — the
+// per-test 5_000ms timeout below still wins because per-test takes precedence.
+setDefaultTimeout(PARALLEL_RUN_TIMEOUT_MS);
+
 type Result = { name: string; expected: boolean; actual: boolean; reason: string };
 
 const results: Result[] = [];
@@ -90,7 +95,7 @@ describe("ATS-aware remote-europe-eligible filter (integration)", () => {
       ),
     );
     for (const e of evaluations) results.push(e);
-  }, PARALLEL_RUN_TIMEOUT_MS);
+  });
 
   test("FP and FN rates meet thresholds", () => {
     const total = results.length;
