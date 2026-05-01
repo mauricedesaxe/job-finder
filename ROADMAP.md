@@ -72,3 +72,23 @@ Skip Notion insertion for blocked/applied companies entirely. Saves Notion write
 
 Match company from URL path (e.g. `ashbyhq.com/company-name/`) against known blocked companies before scraping. Maximum savings (skips Jina call too) but least accurate — URL path patterns vary across ATS platforms and don't always contain the company name.
 
+---
+
+## 4. Quick-Eval Summary on Notion Page (P1)
+
+**Problem:** Walking the To-Review pile in Notion is slow because each entry only shows scraped title/company/location — Alex still has to click into the page and read the body to decide. The `/walk-to-review` skill produces a punchy 5-7-line summary (stack, senior signal, comp, location/remote, culture flags, one-line read) that he found "useful and powerful" for quick triage.
+
+**Idea:** Generate the same summary at enrichment time and store it as a Notion property (or top-of-page block) so Alex can triage straight from the Notion list view without leaving Notion.
+
+### Sketch
+- New enrichment field, e.g. `quickSummary` — bullet list with: stack one-liner, senior signal (years required), comp (in body or "not specified"), location/remote signal, culture flags (hybrid, agency, architect-only, etc.), one-line lean (pass/reject/borderline rationale).
+- Add to the LLM enrichment prompt with N-shot examples mirroring the manual-walk format.
+- Store as a Notion rich_text property or as a callout block at the top of the page body.
+- Profile-aware: include hits/misses against the matched profile rules so the summary doubles as a transparency note.
+- Could replace or complement the existing `Why Match` reason that's already surfaced.
+
+### Open questions
+- Property vs page block: properties are visible in list view (best for triage) but limited in formatting; blocks render richer but require opening the page.
+- Cost: this is one more LLM call per qualified job. Could be folded into existing enrichment to avoid an extra call.
+- FP risk: a confidently-wrong summary could bias Alex toward the wrong verdict. The summary should be advisory, not the verdict.
+
