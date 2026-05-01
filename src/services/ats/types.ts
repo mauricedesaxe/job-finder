@@ -1,11 +1,13 @@
 import { z } from "zod";
 
-export type AtsSource = "lever" | "ashby" | "greenhouse";
+export type AtsSource = "lever" | "ashby" | "greenhouse" | "workable";
 
 export type WorkplaceType = "Remote" | "Hybrid" | "OnSite";
 
 // Injected so unit tests can supply recorded responses without hitting the network.
-export type Fetcher = (url: string) => Promise<Response>;
+// Mirrors the `fetch` signature so POST-bodied calls (Workable) work alongside
+// the simple GETs the other fetchers use.
+export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface AtsJobData {
   source: AtsSource;
@@ -89,3 +91,39 @@ export const greenhouseJobSchema = z.object({
 });
 
 export type GreenhouseJob = z.infer<typeof greenhouseJobSchema>;
+
+// Workable — POST https://apply.workable.com/api/v3/accounts/{slug}/jobs
+// (no per-job endpoint exists; we filter the list response by shortcode).
+export const workableJobSchema = z.object({
+  shortcode: z.string(),
+  title: z.string().nullish(),
+  workplace: z.string().nullish(),
+  remote: z.boolean().nullish(),
+  location: z
+    .object({
+      country: z.string().nullish(),
+      countryCode: z.string().nullish(),
+      city: z.string().nullish(),
+      region: z.string().nullish(),
+    })
+    .nullish(),
+  locations: z
+    .array(
+      z.object({
+        country: z.string().nullish(),
+        countryCode: z.string().nullish(),
+        city: z.string().nullish(),
+        region: z.string().nullish(),
+      }),
+    )
+    .nullish(),
+});
+
+export const workableListResponseSchema = z.object({
+  results: z.array(workableJobSchema),
+  total: z.number().nullish(),
+  nextPage: z.string().nullish(),
+});
+
+export type WorkableJob = z.infer<typeof workableJobSchema>;
+export type WorkableListResponse = z.infer<typeof workableListResponseSchema>;

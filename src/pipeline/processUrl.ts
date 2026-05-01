@@ -89,7 +89,9 @@ export async function processUrl(
   // location/workplaceType/country data and prepend it to the body before the
   // LLM eval. Failures fall back to Jina-only.
   if (config.enableAtsEnrichment) {
-    const atsData = await atsApiSemaphore.run(() => atsApiRateLimiter.run(() => fetchAtsData(url)));
+    const atsData = await atsApiSemaphore.run(() =>
+      atsApiRateLimiter.run(() => fetchAtsData(url, { title: job.title })),
+    );
     if (atsData) {
       log.debug({ url, source: atsData.source }, "ats enriched");
       job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;

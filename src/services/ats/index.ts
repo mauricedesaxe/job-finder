@@ -3,6 +3,7 @@ import { clearAshbyCache, fetchAshbyJob } from "./ashby";
 import { fetchGreenhouseJob } from "./greenhouse";
 import { fetchLeverJob } from "./lever";
 import type { AtsJobData, AtsSource, Fetcher } from "./types";
+import { fetchWorkableJob } from "./workable";
 
 export type { AtsJobData, AtsSource } from "./types";
 export { clearAshbyCache };
@@ -13,11 +14,13 @@ export function detectAtsSource(url: string): AtsSource | null {
   if (url.includes("lever.co")) return "lever";
   if (url.includes("ashbyhq.com")) return "ashby";
   if (url.includes("greenhouse.io")) return "greenhouse";
+  if (url.includes("apply.workable.com")) return "workable";
   return null;
 }
 
 export async function fetchAtsData(
   url: string,
+  opts: { title?: string } = {},
   fetcher: Fetcher = fetch,
 ): Promise<AtsJobData | null> {
   const source = detectAtsSource(url);
@@ -31,6 +34,12 @@ export async function fetchAtsData(
         return await fetchAshbyJob(url, fetcher);
       case "greenhouse":
         return await fetchGreenhouseJob(url, fetcher);
+      case "workable":
+        // Workable has no per-job endpoint — we full-text search for the
+        // title to land the target on the first 10 results, then filter by
+        // shortcode. Empty/missing title means no enrichment for this run.
+        if (!opts.title) return null;
+        return await fetchWorkableJob(url, opts.title, fetcher);
     }
   } catch (err) {
     log.warn({ err, url }, "ATS dispatcher unexpected error");
