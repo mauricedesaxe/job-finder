@@ -165,3 +165,39 @@ Run on every commit via lefthook? No — same as the eval integration suite, gat
 - A "Why Match" Notion property update — keep using the existing reason field for now; the callout supersedes it visually for the human.
 - Recomputing the summary on every run — too expensive and it's ephemeral data.
 
+---
+
+## 5. Role-Quality Filter Gaps (P1)
+
+Surfaced during the 2026-05-01 walk-to-review pass. Each gap has at least one fixture pinned in `src/pipeline/__integration__/fixtures/evaluate/reject/` so a future prompt edit can be validated with the integration suite. Order matches confidence — top entries are clear edits, lower ones need more thought.
+
+### 5.1 DevOps / Kubernetes-primary roles (clear reject)
+
+**Evidence:** `reject/boundless-senior-infrastructure-devops.md`. Title was "Senior Software Engineer - Infrastructure" (sounds like SWE) but the body is pure SRE/DevOps — Kubernetes, Docker, Terraform/Ansible/Pulumi, AWS/GCP multi-region, GPU/bare-metal optimization. TS/Go listed only as "scripting language". Crypto-web3-ts profile passed because TS/Go appears anywhere in the stack list; role-quality didn't fail because the existing DevOps-related rule (4) is scoped to data-engineer titles plus a narrow MLOps exclusion in the AI profile.
+
+**Direction:** Add a `role-quality` rule that fails when must-have skills are dominated by Kubernetes / IaC / multi-region cloud-ops, regardless of title. "Containers + IaC + cloud-multi-region as primary must-haves" is the shape; Terraform alone in nice-to-have is fine. Alex's bar: "I don't know Kubernetes and I don't want to learn it." Note any Terraform/IaC mention as a *secondary* skill is OK.
+
+### 5.2 Any Java requirement (tighten, don't loosen)
+
+**Evidence:** No new fixture from this walk; existing `reject/okto-payments-senior-engineer-java.md` covers primary-Java. The current rule passes when "Java/.NET/C#/Scala appears only as nice-to-have, secondary, or as one of many options". Alex stated: "We also must absolutely reject any Java." This contradicts the current fallback.
+
+**Direction:** Tighten rule 1 — required-Java in any tier (must-have, nice-to-have-but-required-on-the-team, "you'll work in a Java-heavy environment") fails. Soft mention ("we also have a few Java services") is still ambiguous; need a couple of new fixtures distinguishing "Java tangentially mentioned" (pass) vs "Java on the team and you'll touch it" (fail). Don't ship before adding those fixtures, or risk over-rejecting clean polyglot stacks.
+
+### 5.3 Interview rounds: 4 is fine, 5 is too much
+
+**Evidence:** Dataiku (URL `https://boards.greenhouse.io/dataiku/jobs/5963977004`, no fixture saved per user direction). Listed process: 1 recruiter call, 1 tech interview, take-home OR live coding, 2 VPs of Engineering. That is 4 sync rounds (take-home path) or 5 (live-coding path). Alex would have applied to the 4-round variant but not 5.
+
+**Direction:** Change role-quality rule 6 threshold from "4+ synchronous rounds → FAIL" to "5+ synchronous rounds → FAIL". Update the failing example accordingly and add a 4-round pass example. Risk is low since the fail threshold is moving up (rejection rate decreases).
+
+### 5.4 L1 / consensus / microchain protocol depth (deferred)
+
+**Evidence:** `reject/linera-software-engineer-rust-l1.md` (microchain L1, Rust-only); `reject/alpen-labs-engineering-lead-l2-systems.md` (Bitcoin L2 / ZK rollups, Rust + EVM + L2 systems programming, lead role). Both passed the crypto-web3-ts profile because Rust is in the polyglot list. Alex's bar: "I am a polyglot. I know Rust, but if they are looking for someone with L1 expertise with Rust, that is well outside of my knowledge."
+
+**Direction:** Add a stack-depth signal to the crypto-web3-ts profile (or role-quality, depending on layer) that fails when the work is L1/L2 protocol architecture, consensus, or core node software — even when the listed stack is just Rust. Existing memory `feedback_stack_depth_signals` covers the heuristic; the prompt doesn't yet. Alex deferred this — "we don't necessarily have to fix this right now, as it would entail looking at the prompts and everything." Park until the next prompt-iteration session.
+
+### 5.5 Lever single-country with multi-continent operations language (false positive in remote filter)
+
+**Evidence:** `pass/ats/jeeves-mexico-ats-body-multi-continent.md`. Lever metadata is unambiguous (`country=MX`, `locations=["Mexico"]`, `team="Engineering - LatAm"`). The body says "operates across 20+ countries including Brazil, Canada, Colombia, Mexico, the United Kingdom, across Europe, and the United States" — but that is *company operations / customer reach*, not *hiring scope*. The remote filter passed the listing under rule A by reading the operations language as a multi-continent team signal.
+
+**Note:** Alex called this a pass on the basis that the operations language is enough; he's willing to apply even though hiring scope is LatAm-only. The fixture is therefore in `pass/ats/`, NOT `reject/ats/`. The gap in the prompt is whether rule A should distinguish "company operates in X" from "team distributed across X" — currently it doesn't, and the user's call here is that conflating them is acceptable. Track as a *known false-positive shape* worth revisiting if multiple Mexico-only listings start landing in To-Review.
+
