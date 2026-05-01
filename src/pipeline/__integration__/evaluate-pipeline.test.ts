@@ -32,13 +32,17 @@ const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 // FN is locked in at 0.10 to hold the 2.4% achieved rate — any drift
 // upward must be a deliberate change, not noise.
 //
-// FP is *temporarily* loosened to 0.30 to admit known-failing reject
-// fixtures whose prompt fixes are tracked in ROADMAP §5.1 (DevOps/K8s
-// primary), §5.4 (L1/consensus depth), plus the new
-// huzzle-founding-engineer-staffing-framing fixture (staffing-shop
-// pattern with a real product responsibility list). 0.30 is too high —
-// the working target is ≤ 0.15. Ratchet down as each prompt gap closes.
-const FP_RATE_MAX = 0.3; // % of reject fixtures the eval wrongly passes — TEMPORARY; target ≤ 0.15
+// FP was tightened from 0.30 → 0.20 after closing prompt gaps from
+// ROADMAP §5.1 (DevOps/K8s primary, now rule-quality §8 framed as
+// responsibilities-not-skills) and §5.4 (L1/consensus depth, now
+// rule-quality §9 framed as "build the chain itself" not "uses chain
+// adjacent skills"). Structural filter also now rejects careers-index
+// URLs and "general application" framing prefixed by company name.
+// Achieved measurement after those changes: FP ≈ 17.5%, FN ≈ 4.8%.
+// 0.20 still beats the working target of ≤ 0.15 — ratchet again
+// when wayflyer (Python/Django CRUD), via-hatchit (cryptography
+// specialist), and pavago/huzzle (cheap-shop staffing) prompts close.
+const FP_RATE_MAX = 0.2; // % of reject fixtures the eval wrongly passes — target ≤ 0.15
 const FN_RATE_MAX = 0.1; // % of pass fixtures the eval wrongly fails
 
 // Run fixtures in parallel through the LLM. evaluateJob already fans out the
