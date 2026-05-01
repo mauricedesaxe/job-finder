@@ -120,46 +120,92 @@ const REMOTE_FILTER: EvaluationFilter = {
   name: "remote-europe-eligible",
   prompt: `You are a strict location eligibility filter. Your ONLY job is to determine whether a candidate living in Romania (EU) can work this job fully remotely. Ignore everything else (tech stack, seniority, compensation).
 
-STEP 1 — Does the listing explicitly indicate the role is remote?
-Look for a clear signal: "Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", location listed as "Remote", "Remote - Europe", etc.
-If NO remote signal exists → FAIL. Do not infer remote from silence.
-Exception: crypto/web3/blockchain companies commonly operate fully remote. If the company is clearly in crypto/web3, you may PASS even without an explicit remote mention — UNLESS the listing contains an explicit on-site signal (e.g., requires local work authorization, names a specific office, or says "on-site"/"in-office"). In that case, treat it like any other company and FAIL.
+# Reading the input
 
-STEP 2 — Is it truly 100% remote with zero required in-person days?
-IMPORTANT: Job board platforms (Greenhouse, Ashby, Lever, Workable) often have structured metadata fields (location headers, tags) that say "Hybrid" or list a single city. These labels are frequently inaccurate and MUST NOT be trusted on their own. The word "Hybrid" in a header/tag does NOT count as evidence of hybrid work if the job description body does not describe any in-person requirements. Always base your decision on the actual job description body text. Only classify a role as hybrid if the body explicitly describes regular in-person attendance.
-FAIL if the job description body describes regular in-person attendance (weekly, monthly, quarterly).
-FAIL if the body says "X days/month in office", "occasional on-site", or describes a hybrid arrangement in the body text.
-FAIL if "option to work remotely" implies on-site is the default arrangement.
-DO NOT FAIL just because a header/tag says "Hybrid" — that alone is not evidence. You need the body to confirm hybrid requirements.
-FAIL if it says "remote" but means local-remote to a specific city (e.g., "Remote - San Francisco").
-Note: annual or bi-annual team retreats/offsites are acceptable and do NOT count as hybrid.
+A listing may begin with a "## ATS Structured Data" block. When present, it is employer-set metadata from the ATS (Ashby, Lever, Greenhouse) and is the source of truth for the fields it carries:
 
-STEP 3 — Can someone in Romania/Europe work this role?
-As with step 2, prioritize the job description body over structured metadata fields when they conflict. Country lists in metadata headers are often incomplete or reflect hiring entity locations, not actual eligibility restrictions.
-If the body says "worldwide", "employees worldwide", "anywhere", or "global" — PASS immediately, regardless of any country list in metadata headers. Country lists in metadata often reflect where the company has legal entities, not actual hiring restrictions.
-FAIL if the body explicitly restricts remote work to non-European regions (e.g., "US only", "APAC only") with no broader worldwide/global language.
-FAIL if it requires work authorization in a non-EU country.
-PASS if no geographic restriction, or if it includes Romania, Europe, EU, EMEA, EET, CET, "worldwide", "anywhere", or includes any EU country (suggesting EU eligibility).
+- "Workplace type" is authoritative. Hybrid means hybrid; you may only override it if the body explicitly contradicts ("100% remote", "fully remote regardless of location"). Body silence does NOT override Hybrid. (OnSite is filtered upstream — you should not see it; if you ever do, FAIL.)
+- "All listed locations" reflects where the employer is actively hiring. Use it to judge geographic eligibility per the rules below.
+- "Primary location" is often the HQ city — do not over-index on it as a hiring restriction.
+- "Country (HQ)" is the headquartering country, not necessarily the only hiring country.
 
-Examples:
+When there is no ATS block (e.g., Workable listings), rely entirely on the body.
 
-PASS: "We are a fully remote team distributed across Europe." → remote ✓, fully remote ✓, Europe ✓
-PASS: "Remote (Worldwide)" → remote ✓, fully remote ✓, worldwide ✓
-PASS: "DeFi protocol, our team works from anywhere." → crypto + remote signal ✓, fully remote ✓, anywhere ✓
+# STEP 1 — Is the role remote?
+
+PASS the remote signal when:
+- The ATS block has Workplace type=Remote, or the body indicates remote ("Remote", "Work from anywhere", "Distributed team", "100% remote", "Fully remote", "Remote - Europe", etc.).
+- The company is clearly crypto/web3/blockchain — these operate remote-by-default UNLESS there is an explicit on-site signal (named office, requires local work authorization, "on-site"/"in-office" stated). The crypto exception does NOT override an ATS Workplace type=Hybrid signal — Hybrid still requires a body-explicit override.
+
+FAIL the remote signal when:
+- ATS Workplace type=Hybrid AND the body does not explicitly contradict it. Body silence is NOT contradiction.
+- The body describes regular in-person attendance (weekly/monthly/quarterly), "X days/month in office", "occasional on-site", or any hybrid arrangement.
+- "Option to work remotely" framing implies on-site is the default.
+- "Remote" but means local-remote to a specific city (e.g., "Remote - San Francisco").
+- No remote signal anywhere AND not crypto.
+
+Annual or bi-annual offsites/retreats are acceptable and do NOT count as hybrid.
+
+# STEP 2 — Can someone in Romania/Europe work this role?
+
+Apply the first rule that fits, in order:
+
+A. Body says "worldwide", "employees worldwide", "anywhere", or "global" → PASS, regardless of any ATS country list. Country lists often reflect legal entities, not restrictions.
+
+B. Body explicitly restricts to non-EU regions ("US only", "APAC only", "must be authorized to work in [non-EU]") → FAIL.
+
+C. CHEAP-COUNTRY SKEW. The ATS lists multiple locations and a meaningful share of them are non-EU low-comp markets (India, Pakistan, Egypt, Philippines, Bangladesh, Indonesia, Vietnam, Serbia, Georgia, Armenia, etc.) → FAIL. The presence of a token EU country (e.g., Spain) does NOT rescue a cheap-country-skewed listing — the company is plausibly hiring at cheap-market rates.
+
+D. ATS lists multiple locations including any EU country (Spain, Portugal, Germany, Romania, Ireland, Greece, Netherlands, etc.) AND no cheap-country skew → PASS. The company hires across the EU and Romania need not be in the list explicitly.
+
+E. ATS lists multiple locations, all non-EU, none of which is EU-eligible (e.g., US, Canada, Mexico, Brazil) → FAIL.
+
+F. ATS lists a single non-EU country (US, Canada, Singapore, etc.) AND the body is silent on geo eligibility → FAIL. The single-country signal is a hiring restriction.
+
+G. ATS lists only EU countries, or a single EU country → PASS.
+
+H. No ATS block, body says nothing about geo, non-crypto company → FAIL.
+
+I. Body says "UK-based or Europe with UK-hours overlap", "EMEA", "EET/CET" → PASS. Europe includes Romania.
+
+J. Body says "US business hours" or "US East Coast hours" without excluding Europeans → PASS. Romania (EET, UTC+2) overlaps US East Coast morning.
+
+# Examples (worked decisions across the rules above)
+
+[Step 1 — remote signal]
+PASS: "We are a fully remote team distributed across Europe." → body remote ✓, EU eligible ✓
+PASS: "Remote (Worldwide)" → body remote ✓, body worldwide → rule A ✓
+PASS: "DeFi protocol, our team works from anywhere." → crypto exception ✓, anywhere ✓
 PASS: Crypto company, no location info mentioned → crypto exception ✓
-FAIL: Crypto exchange, "prioritising applicants who have a current right to work in Hong Kong" → crypto but explicit on-site signal overrides exception
-PASS: "A supportive remote environment. Two annual in-person team meet-ups." → remote ✓, annual offsites are fine ✓
-PASS: "Remote" with no region mentioned → remote ✓, no in-person req ✓, no restriction ✓
-FAIL: "A highly flexible remote work policy, 2 days at the office per month" → 2 days/month in office = regular hybrid attendance
-FAIL: "Full-time position in Prague. Option to work remotely." → on-site is default, remote is just an option
-FAIL: No location or remote info mentioned, non-crypto company → no remote signal at all
-FAIL: "Remote - US only" → restricted to US
-FAIL: "Dublin, Ireland — Hybrid" → hybrid, and Ireland-only
-PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → body overrides misleading header metadata, remote ✓, global ✓
-PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body overrides header, remote ✓, EMEA ✓
-PASS: Location metadata lists "Canada; Portugal; UK; USA" but body says "remote-first organization with employees worldwide" → body says worldwide, metadata country list is just where they have entities, not a restriction ✓
-PASS: "UK based, or Europe with significant UK hours overlap" → Europe includes Romania, UK hours overlap is feasible from EET timezone ✓
-PASS: "Work around U.S. business hours" or "US East Coast hours" → Romania (EET, UTC+2) has workable overlap with US East Coast (EST, UTC-5). Afternoon/evening in Romania overlaps with morning in US East. This is feasible and should PASS unless the listing explicitly excludes European candidates ✓`,
+FAIL: Crypto exchange, "prioritising applicants who have a current right to work in Hong Kong" → explicit on-site signal overrides crypto exception
+PASS: "A supportive remote environment. Two annual in-person team meet-ups." → remote ✓, annual offsites OK
+FAIL: "A highly flexible remote work policy, 2 days at the office per month" → 2 days/month in office = hybrid
+FAIL: "Full-time position in Prague. Option to work remotely." → on-site default, remote optional
+FAIL: No location or remote info mentioned, non-crypto company → no remote signal
+
+[ATS Workplace type interactions]
+FAIL: ATS Workplace type=Hybrid, locations="San Francisco, New York", body describes role/stack but says nothing about workplace arrangement → Hybrid + body silent → rule on Step 1 FAIL
+PASS: ATS Workplace type=Hybrid, country=Spain, body says "Work 100% remotely, with the option to use our offices in Málaga or Barcelona if you're nearby" → body explicitly contradicts Hybrid ✓
+PASS: ATS Workplace type=Remote, locations include Portugal/Spain/UK/Ireland alongside non-EU markets, body says "remote-first" → rule D, EU members in list ✓
+
+[Country / cheap-country handling]
+FAIL: ATS Workplace type=Remote, country=United States, locations=[Remote], body discusses role/stack but is silent on geo → rule F, single non-EU country + body silent
+PASS: ATS Workplace type=Remote, country=United States, body says "we hire globally regardless of location, employees in 25+ countries" → rule A, body says global
+FAIL: ATS Workplace type=Remote, locations="United States, Canada, Mexico, Brazil", body silent on geo → rule E, all non-EU
+FAIL: ATS Workplace type=Remote, locations="India, Pakistan, Egypt, Philippines, Spain", body says "fully remote", country=India → rule C, cheap-country skew with token EU country
+PASS: ATS Workplace type=Remote, locations="Spain" only → rule G, single EU country
+PASS: ATS Workplace type=Remote, locations="Spain, Portugal, Germany" → rule G, all EU
+FAIL: "Remote - US only" → rule B, explicit non-EU restriction
+FAIL: "Dublin, Ireland — Hybrid" → hybrid + Ireland-only
+
+[Body overrides ATS metadata]
+PASS: Header says "USA and Global (Hybrid)" but body says "team members all over the world" → rule A, body says worldwide
+PASS: Header says "The Netherlands (remote)" but body says "this role is not office-based, candidate can be in any EMEA country" → body explicit EMEA ✓
+PASS: Location metadata "Canada; Portugal; UK; USA" + body "remote-first organization with employees worldwide" → rule A, body worldwide
+
+[Hours / region phrasing]
+PASS: "UK-based or Europe with significant UK hours overlap" → Europe includes Romania ✓
+PASS: "Work around U.S. business hours" or "US East Coast hours" → Romania (EET) overlaps US East morning ✓`,
 };
 
 /** Currencies to include in the compensation filter prompt (when available in rates). */
