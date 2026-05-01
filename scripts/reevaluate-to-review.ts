@@ -87,10 +87,14 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
   // shape the production pipeline sees.
   const markdown = await scrapeJobPage(item.url, { jinaBaseUrl: "https://r.jina.ai", jinaApiKey: jinaApiKey! });
   const job: JobListing = parseJobDetails(markdown, item.url, "");
-  // Preserve title/company from Notion for identification — they're
-  // already enriched there and clearer than the raw extraction.
-  job.title = item.title || job.title;
-  job.company = item.company || job.company;
+  // Do NOT overwrite job.title / job.company with the Notion-stored values:
+  // those are post-enrich (the enrich LLM step rewrites them after evaluation).
+  // The production pipeline runs the eval against the raw extraction, so we
+  // must feed the same input to reproduce its verdict — overriding here can
+  // flip borderline LLM verdicts (e.g. "swaprail" → PASS but "SwapRail" →
+  // FAIL on the location filter, due to capitalisation-driven hallucination).
+  // The script's report output uses the Notion-stored item.title/item.company
+  // for human readability, which is independent of what the LLM sees.
 
   // ATS-native enrichment — same step as processUrl. Prepends structured
   // location/workplaceType/country signals to the body before LLM eval.
