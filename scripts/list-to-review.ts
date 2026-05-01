@@ -12,7 +12,7 @@ const FIX_DIRS = [
 
 const fixtureUrls = new Set<string>();
 for (const dir of FIX_DIRS) {
-  for (const f of readdirSync(dir)) {
+  for (const f of readdirSync(dir, { recursive: true }) as string[]) {
     if (!f.endsWith(".md")) continue;
     const c = readFileSync(`${dir}/${f}`, "utf8");
     const m = c.match(/^URL Source:\s*(.+)$/m);
