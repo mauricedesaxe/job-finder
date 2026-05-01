@@ -11,6 +11,7 @@ import type { AtsJobData, Fetcher } from "../types";
 import ledgerFixture from "./fixtures/ashby-ledger-org.json";
 import openupFixture from "./fixtures/greenhouse-openup-senior-ai-engineer.json";
 import yunoFixture from "./fixtures/lever-yuno-platform-engineer-ai.json";
+import v2aiFixture from "./fixtures/workable-v2-ai-listing.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>
@@ -34,8 +35,10 @@ describe("detectAtsSource", () => {
   test("detects greenhouse", () => {
     expect(detectAtsSource("https://boards.greenhouse.io/foo/jobs/1")).toBe("greenhouse");
   });
+  test("detects workable", () => {
+    expect(detectAtsSource("https://apply.workable.com/foo/j/123")).toBe("workable");
+  });
   test("returns null for unsupported source", () => {
-    expect(detectAtsSource("https://apply.workable.com/foo/j/123")).toBeNull();
     expect(detectAtsSource("https://example.com/jobs")).toBeNull();
   });
 });
@@ -44,6 +47,7 @@ describe("fetchAtsData", () => {
   test("dispatches to lever client", async () => {
     const result = await fetchAtsData(
       "https://jobs.lever.co/yuno/33309adb-efb0-414c-9e9a-da13435a0242",
+      {},
       jsonFetcher(yunoFixture),
     );
     expect(result?.source).toBe("lever");
@@ -53,6 +57,7 @@ describe("fetchAtsData", () => {
   test("dispatches to ashby client", async () => {
     const result = await fetchAtsData(
       "https://jobs.ashbyhq.com/ledger/4fabe068-ce5b-4962-abd5-1d9dbb7c63f8",
+      {},
       jsonFetcher(ledgerFixture),
     );
     expect(result?.source).toBe("ashby");
@@ -62,14 +67,35 @@ describe("fetchAtsData", () => {
   test("dispatches to greenhouse client", async () => {
     const result = await fetchAtsData(
       "https://boards.greenhouse.io/openup/jobs/4847917101",
+      {},
       jsonFetcher(openupFixture),
     );
     expect(result?.source).toBe("greenhouse");
     expect(result?.location).toBe("Amsterdam");
   });
 
+  test("dispatches to workable client when title is provided", async () => {
+    const result = await fetchAtsData(
+      "https://apply.workable.com/v2-ai/j/CF51DE915D/",
+      { title: "Full Stack AI Principal Engineer" },
+      jsonFetcher(v2aiFixture),
+    );
+    expect(result?.source).toBe("workable");
+    expect(result?.workplaceType).toBe("Hybrid");
+    expect(result?.country).toBe("Australia");
+  });
+
+  test("returns null for workable URL when no title is supplied", async () => {
+    const result = await fetchAtsData(
+      "https://apply.workable.com/v2-ai/j/CF51DE915D/",
+      {},
+      jsonFetcher(v2aiFixture),
+    );
+    expect(result).toBeNull();
+  });
+
   test("returns null for unsupported URL", async () => {
-    const result = await fetchAtsData("https://apply.workable.com/foo/j/123", jsonFetcher({}));
+    const result = await fetchAtsData("https://example.com/foo", {}, jsonFetcher({}));
     expect(result).toBeNull();
   });
 });
