@@ -95,7 +95,7 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
   // ATS-native enrichment — same step as processUrl. Prepends structured
   // location/workplaceType/country signals to the body before LLM eval.
   const atsData = await atsApiSemaphore.run(() =>
-    atsApiRateLimiter.run(() => fetchAtsData(item.url)),
+    atsApiRateLimiter.run(() => fetchAtsData(item.url, { title: job.title })),
   );
   if (atsData) {
     job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
