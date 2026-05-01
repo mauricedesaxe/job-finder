@@ -2,8 +2,9 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { basename } from "node:path";
 import { Semaphore } from "../../concurrency";
 import { getEvaluationFilters } from "../../config/evaluation";
+import { atsStructuralFilter } from "../../services/ats";
 import { evaluateSingle } from "../evaluate";
-import { collectFixtures, loadFixture } from "./helpers";
+import { collectFixtures, loadFixture, parseAtsBlockFromFixture } from "./helpers";
 
 // This suite tests the remote-europe-eligible filter against fixtures whose
 // reject/pass signal lives in the `## ATS Structured Data` block prepended by
@@ -69,6 +70,13 @@ describe("ATS-aware remote-europe-eligible filter (integration)", () => {
           const name = basename(file, ".md");
           try {
             const job = await loadFixture(`${FIXTURES_DIR}/${dir}/${file}`);
+            // Mirror processUrl.ts ordering: ATS hard-reject first (cheap and
+            // deterministic), then the location-eligibility LLM filter.
+            const atsData = parseAtsBlockFromFixture(job.description);
+            const atsCheck = atsStructuralFilter(atsData);
+            if (!atsCheck.pass) {
+              return { name, expected, actual: false, reason: atsCheck.reason };
+            }
             const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
               temperature: 0,
               model: LLM_MODEL,

@@ -18,7 +18,12 @@ import { atsApiRateLimiter, atsApiSemaphore, Semaphore } from "../src/concurrenc
 import { evaluateJob, type JobEvaluation } from "../src/pipeline/evaluate";
 import { parseJobDetails, scrapeJobPage } from "../src/pipeline/scrape";
 import { structuralFilter } from "../src/pipeline/structuralFilter";
-import { clearAshbyCache, fetchAtsData, formatAtsBlock } from "../src/services/ats";
+import {
+  atsStructuralFilter,
+  clearAshbyCache,
+  fetchAtsData,
+  formatAtsBlock,
+} from "../src/services/ats";
 import { updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
 
@@ -97,6 +102,11 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
   }
 
   const atsSource = atsData?.source ?? null;
+
+  const atsCheck = atsStructuralFilter(atsData);
+  if (!atsCheck.pass) {
+    return { pass: false, reason: atsCheck.reason, stage: "ats", atsSource };
+  }
 
   const structural = structuralFilter(job);
   if (!structural.pass) {
