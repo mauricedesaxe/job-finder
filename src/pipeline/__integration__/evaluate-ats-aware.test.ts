@@ -37,7 +37,7 @@ const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 
 // FP costs more than FN (false positives flood To-Review). The suite is small
 // (6 reject + 3 pass) so granularity is coarse — adjust as fixtures are added.
-const FP_RATE_MAX = 0.17; // ≤ 1 of 6 reject fixtures may leak through
+const FP_RATE_MAX = 0; // no reject fixture may leak through after the prompt fix
 const FN_RATE_MAX = 0.34; // ≤ 1 of 3 pass fixtures may wrongly fail
 
 // Each fixture is one filter call. Cap concurrency so we don't trip

@@ -127,7 +127,7 @@ A listing may begin with a "## ATS Structured Data" block. When present, it is e
 - "Workplace type" is authoritative. Hybrid means hybrid; you may only override it if the body explicitly contradicts ("100% remote", "fully remote regardless of location"). Body silence does NOT override Hybrid. (OnSite is filtered upstream — you should not see it; if you ever do, FAIL.)
 - "All listed locations" reflects where the employer is actively hiring. Use it to judge geographic eligibility per the rules below.
 - "Primary location" is often the HQ city — do not over-index on it as a hiring restriction.
-- "Country (HQ)" is the headquartering country, not necessarily the only hiring country.
+- "Country (HQ)" is the headquartering country. When "All listed locations" does not name specific countries (e.g., it is empty, or it only contains generic tokens like "Remote") and the body is silent on geo, treat Country (HQ) as the de-facto hiring country.
 
 When there is no ATS block (e.g., Workable listings), rely entirely on the body.
 
@@ -160,7 +160,7 @@ D. ATS lists multiple locations including any EU country (Spain, Portugal, Germa
 
 E. ATS lists multiple locations, all non-EU, none of which is EU-eligible (e.g., US, Canada, Mexico, Brazil) → FAIL.
 
-F. ATS lists a single non-EU country (US, Canada, Singapore, etc.) AND the body is silent on geo eligibility → FAIL. The single-country signal is a hiring restriction.
+F. The ATS country signal is a single non-EU country AND the body is silent on geo eligibility → FAIL. The country signal can come from "All listed locations" (e.g., locations=["Canada"]) OR from "Country (HQ)" when locations are unspecific or absent (e.g., locations=["Remote"], Country (HQ)=US). Treat both shapes the same: a single non-EU country signal with no body override is a hiring restriction.
 
 G. ATS lists only EU countries, or a single EU country → PASS.
 
@@ -189,7 +189,8 @@ PASS: ATS Workplace type=Hybrid, country=Spain, body says "Work 100% remotely, w
 PASS: ATS Workplace type=Remote, locations include Portugal/Spain/UK/Ireland alongside non-EU markets, body says "remote-first" → rule D, EU members in list ✓
 
 [Country / cheap-country handling]
-FAIL: ATS Workplace type=Remote, country=United States, locations=[Remote], body discusses role/stack but is silent on geo → rule F, single non-EU country + body silent
+FAIL: ATS Workplace type=Remote, country=United States, locations=[Remote], body discusses role/stack but is silent on geo → rule F, locations don't name a country so fall back to Country (HQ); single non-EU + body silent
+FAIL: ATS Workplace type=Remote, locations=[Canada], country=Canada, body silent on geo → rule F, single non-EU country in locations + body silent
 PASS: ATS Workplace type=Remote, country=United States, body says "we hire globally regardless of location, employees in 25+ countries" → rule A, body says global
 FAIL: ATS Workplace type=Remote, locations="United States, Canada, Mexico, Brazil", body silent on geo → rule E, all non-EU
 FAIL: ATS Workplace type=Remote, locations="India, Pakistan, Egypt, Philippines, Spain", body says "fully remote", country=India → rule C, cheap-country skew with token EU country
