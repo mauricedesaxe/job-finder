@@ -96,7 +96,7 @@ Examples already in the tree:
    - Culture flags (architect-only, internal-tooling, hybrid, in-office, agency, talent pool, 4+ rounds, language barrier)
    - Your read — pass / reject / borderline — in one sentence so he can confirm or correct fast.
 6. **Get the verdict.** Alex says pass / reject / skip / torn. If torn, **skip the fixture** — don't encode an ambiguous decision.
-7. **Save the fixture** to `src/pipeline/__integration__/fixtures/evaluate/{pass|reject}/<slug>.md` using the same Jina output. Naming: `<company-slug>-<role-slug>.md`, all lowercase, hyphenated.
+7. **Save the fixture** in the directory chosen in step 3 — `src/pipeline/__integration__/fixtures/evaluate/{pass|reject}/<slug>.md` for body-only, `src/pipeline/__integration__/fixtures/evaluate/{pass|reject}/ats/<slug>.md` for ATS-aware (with the `formatAtsBlock` block prepended above the Jina output). Naming: `<company-slug>-<role-slug>.md`, all lowercase, hyphenated.
 8. **Reflect the verdict in Notion.** Once Alex confirms a reject, move that page out of "To Review". Otherwise the same job will sit in the pile next session and (worse) get re-presented as if no decision had been made. Run at the end of each batch:
 
    ```
