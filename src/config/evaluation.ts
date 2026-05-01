@@ -99,6 +99,7 @@ A job FAILS if ANY of these are true:
 - Data science or analytics role with no engineering component
 - DevOps, SRE, or operational MLOps roles where AI is a secondary concern (deploying LLMs to clusters, managing GPU pools, on-call for AI infrastructure, model-serving cluster ops). The role must be engineering — not operating infrastructure. Note: building AI Platform / Agent Platform engineering (model routing, evaluation frameworks, agent runtimes, RAG infrastructure, tool-calling abstractions, context management) IS in scope and PASSES — those are foundational engineering for AI products, not ops.
 - Deep data engineering roles where the primary job is data pipeline infrastructure with AI tooling only as a nice-to-have. Look for "Data Engineer" in the title plus must-have skills dominated by data-warehouse tooling (Snowflake, dbt, Airflow, Debezium, CDC pipelines, DMS) without AI/LLM/agent work as the primary function. Note: event streaming (Kafka) appearing in the stack is fine when the role is AI-product-leaning.
+- Internal automation / RPA at a non-engineering business — the primary work is automating back-office workflows for the company's own operations team, the business is NOT a software/engineering company, and the success metrics are purely internal ("automations shipped", "manual reporting reduced", "internal SOPs automated"). Signals: must-have or strong-plus tools include n8n, Zapier, Make, or other low-code automation frameworks; the listing is at an e-commerce/marketing/sales/operations company (NOT an engineering shop). PASS when the company is itself a software/engineering company hiring an internal AI lead — that's a real engineering role, even if metrics include internal productivity. PASS when the AI work goes into an external-facing product even if internal stakeholders also use it.
 - Strictly frontend role
 - HFT or ultra-low-latency systems (matching engines, FPGA, C++/C performance-critical)
 
@@ -112,7 +113,9 @@ FAIL: ML researcher, PhD required, training large language models → pure ML re
 FAIL: Senior LLM Engineer, fine-tuning and distillation, model architectures, Triton/vLLM inference servers → model-training/research primary, not application engineering
 FAIL: Data analyst, building dashboards with AI insights → analytics, not engineering
 FAIL: Senior DevOps Engineer managing LLM deployments and AI infrastructure → DevOps/infra primary, not product engineering
-FAIL: Senior Staff Data Engineer, dbt + Snowflake + Airflow + Debezium for wealth-mgmt warehouse → deep data engineering primary, AI is nice-to-have only`,
+FAIL: Senior Staff Data Engineer, dbt + Snowflake + Airflow + Debezium for wealth-mgmt warehouse → deep data engineering primary, AI is nice-to-have only
+FAIL: Senior AI Automation Engineer at e-commerce co (8+ Amazon-first brands); build internal AI agents like "Clawbot"; n8n/Zapier/Make as strong-plus; success measured by "automations shipped" and "manual reporting reduced 30%+" → non-engineering business, internal-ops automation shop
+PASS: AI Lead Engineer at a crypto-eng company (e.g. OP Labs, building L2 infrastructure); build copilots and agents to drive internal team productivity; Python + Go; metrics include time saved + cost reduction → real engineering company hiring internal AI lead, not RPA shop`,
   },
 ];
 
@@ -142,9 +145,12 @@ PASS the remote signal when:
 FAIL the remote signal when:
 - ATS Workplace type=Hybrid AND the body does not explicitly contradict it. Body silence is NOT contradiction.
 - The body describes regular in-person attendance (weekly/monthly/quarterly), "X days/month in office", "occasional on-site", or any hybrid arrangement.
+- The body labels the work model as "hybrid" with hybrid being the DEFAULT and remote only an option — e.g., "Flexible work model (hybrid and options for remote work)", "Hybrid setup with X days in office, occasional remote OK". When hybrid is the framing default and remote is qualified ("option for", "with flexibility for"), this is hybrid-primary → FAIL.
 - "Option to work remotely" framing implies on-site is the default.
 - "Remote" but means local-remote to a specific city (e.g., "Remote - San Francisco").
 - No remote signal anywhere AND not crypto.
+
+PASS the remote signal when hybrid is offered alongside fully-remote as parallel alternatives — e.g., "Remote / Hybrid (Warsaw)" (slash-separated, remote listed first or equally), "Remote-first with optional hybrid for those near the office", or a "Total Autonomy (Remote-First)" framing elsewhere in the body that overrides any "(Hybrid)" mention. The discriminator: if the remote-only path is plainly available without conditions, PASS; if remote is qualified ("option for", "where allowed", "with flexibility for"), FAIL.
 
 Annual or bi-annual offsites/retreats are acceptable and do NOT count as hybrid.
 
@@ -183,6 +189,8 @@ FAIL: Crypto exchange, "prioritising applicants who have a current right to work
 PASS: "A supportive remote environment. Two annual in-person team meet-ups." → remote ✓, annual offsites OK
 FAIL: "A highly flexible remote work policy, 2 days at the office per month" → 2 days/month in office = hybrid
 FAIL: "Full-time position in Prague. Option to work remotely." → on-site default, remote optional
+FAIL: Body says "Flexible work model (hybrid and options for remote work)" — hybrid is the default framing, remote is the qualified option ("options for") → hybrid-primary
+PASS: Header "Location: Remote / Hybrid (Warsaw)" with body elsewhere "Total Autonomy (Remote-First)" → remote and hybrid offered as parallel options, remote-first body confirms remote is unconditional
 FAIL: No location or remote info mentioned, non-crypto company → no remote signal
 
 [ATS Workplace type interactions]
@@ -301,6 +309,19 @@ FAIL if ANY of these apply:
 
 7. NON-ENGLISH BODY — substantial non-English text leaks into the description (Russian, Chinese, Arabic, etc.) that isn't a translated UI element or stated language requirement. A single mid-sentence non-English token strongly suggests a non-English-primary team.
 
+8. INFRA-OPS-AS-PRIMARY-RESPONSIBILITY — the role's described day-to-day is operating infrastructure, NOT building product features. Read the responsibilities, not the must-have skills list. PASS if must-haves include K8s/Docker/Terraform/Datadog but the responsibilities are "build APIs, apply LLMs to features, ship product to users". FAIL only when the responsibilities themselves are operational:
+   - "Architect highly available, auto-scaling infrastructure across multiple regions" / "Own deployment pipelines and release schedules" / "Cost Optimization: spot instance management" / "Multi-Tenant Deployments" as the listed deliverables
+   - "Build the monitoring, tracing, and alerting that keeps the platform healthy. When something breaks at 3am, your dashboards and alerts should explain why" / "Observability and reliability" as a listed deliverable
+   - "Messaging and event-driven architecture — design and implement the messaging layer for inter-service communication" as the listed deliverable
+   - Title is "Infrastructure Engineer", "Platform Engineer — [X] Infrastructure", "DevOps Engineer", "SRE", or similar; the listed responsibilities confirm operational ownership
+   This rule does NOT fire on AI Platform Engineers who BUILD the AI platform and apply LLMs to product features (those PASS via the AI profile's explicit AI-Platform exception). The discriminator is the verbs in the responsibility list: "build", "apply", "deploy features" PASS; "operate", "monitor", "own deployments", "tune observability", "manage clusters" FAIL.
+
+9. CORE-PROTOCOL CHAIN IMPLEMENTATION — the role builds the blockchain itself, not applications on top of one. The body describes building, designing, or owning the L1/L2/microchain protocol's own internals:
+   - "Contribute to the architecture of blockchain protocols and distributed systems" combined with the company being an L1/L2/microchain (e.g. "first blockchain optimized for...", "scalable Bitcoin ecosystem", "high-performance operating system designed to redefine scalability and throughput for Ethereum")
+   - "Production-grade infrastructure for our protocol" where "our protocol" IS a chain the company is building
+   - Required experience explicitly names "L2 technologies", "core protocol contributors", "consensus protocol implementation", "node software development", "ZK rollup core implementation"
+   This rule does NOT fire on application-layer crypto roles. PASS for: dApp engineers (DEX/wallet/RWA tokenization on an existing chain), backend engineers integrating with smart contracts, on-chain indexers, blockchain payment infrastructure (wallet/transaction lifecycle), MEV-aware product engineering, chain integration work. The discriminator is whether the role builds the chain (FAIL) or builds an application that USES a chain (PASS). "Consensus algorithms" or "MEV awareness" appearing as a single nice-to-have skill is NOT enough — those are common in application-layer crypto stacks.
+
 When in doubt, PASS. This filter should only reject listings where one of the above signals is clearly present in the body. Borderline cases stay in the pile for the user to decide.
 
 Examples:
@@ -310,6 +331,9 @@ PASS: "Backend: Node.js, Python; familiarity with Java is a plus" → Java is pl
 PASS: "5+ years software engineering, building RAG pipelines with Python" → standard senior bar, AI-product role ✓
 PASS: "Senior Architect, Blockchain & DeFi — hands-on, dig deep into the code" → architect + IC content ✓
 PASS: "Senior Software Engineer; some customer collaboration" → not primarily FDE ✓
+PASS: "Senior AI Engineer - AI Platform; architect AI platform services; apply LLMs to deliver intelligent features; build APIs that integrate AI-powered features into the core product. Required: K8s/Docker/AWS/GCP, MLOps best practices" → responsibilities are build/apply/deliver features, not operate (rule 8 does not fire) ✓
+PASS: "Senior Solana Blockchain Engineer; build the DOMA Protocol that tokenizes domains as RWAs on Solana; backend services to interface with the Solana blockchain. Required: 5y Node.js + 3y blockchain (Solidity/Rust + consensus algorithms)" → application-layer DApp on Solana, "consensus algorithms" is one nice-to-have skill, not the deliverable (rule 9 does not fire) ✓
+PASS: "Blockchain Engineer at MoonPay; transaction infrastructure at scale, manage transaction lifecycle; cross-chain integrations; MEV awareness desired" → wallet/payment platform, application-layer; MEV is a nice-to-have skill not core-protocol implementation (rule 9 does not fire) ✓
 FAIL: "Must have: Java 11+, Spring Boot, Spring Cloud" → enterprise Java/Spring stack ✓ enterprise
 FAIL: "10+ years experience; production with Java, Golang, or C++" → 10+ bar AND enterprise language alternatives without modern primary ✓
 FAIL: "Software Engineer, Solutions — be the technical partner for top crypto teams" → Solutions Engineer customer-facing role
@@ -319,9 +343,71 @@ FAIL: "Interview Process: 1) Talent screen 2) Behavioral 3) Two 90-min technical
 PASS: "Process: 1) Initial screening 2) Live pairing session 3) Founder call 4) Offer" → "Offer" is not an interview round, only 3 synchronous rounds ✓
 PASS: "Process: phone screen, take-home assignment, on-site loop, reference check" → take-home and reference check don't count as synchronous rounds ✓
 FAIL: "Senior Software Engineer; design, drive strategy, define vision; lead architecture across teams; promote best practices" → architect-only framing with no IC content
-PASS: "Senior Engineer; design and build production systems; ship features end-to-end; mentor juniors" → leadership + IC ✓`,
+PASS: "Senior Engineer; design and build production systems; ship features end-to-end; mentor juniors" → leadership + IC ✓
+FAIL: "Senior Software Engineer - Infrastructure; What you'll do: Architect highly available auto-scaling infrastructure across multiple regions and cloud providers; Own deployment pipelines and release schedules; Multi-tenant deployments; Cost optimization with spot instances" → operational deliverables (rule 8)
+FAIL: "Senior Platform Engineer — AI Agent Infrastructure; Your contribution: Messaging and event-driven architecture; Infrastructure and deployment, own cloud infrastructure, automate provisioning with IaC; Observability and reliability — build monitoring, tracing, alerting; When something breaks at 3am" → operational deliverables, AI in title is branding (rule 8)
+FAIL: "Software Engineer (Rust) at Linera, the first blockchain optimized for real-time applications; develop open-source software in Rust and contribute to the design of high-performance Web3 solutions; contribute to the architecture of blockchain protocols and distributed systems; help build our cutting-edge blockchain infrastructure" → company IS a microchain protocol, role IS the protocol (rule 9)
+FAIL: "Engineering Team Lead at Alpen Labs (scalable Bitcoin ecosystem); responsible for leading a high-impact team focused on delivering production-grade infrastructure for our protocol; Rust, EVM-compatible chains, and L2 technologies; core infrastructure and protocol components" → L2 protocol implementation (rule 9)`,
+};
+
+const CHEAP_SHOP_FILTER: EvaluationFilter = {
+  name: "cheap-shop-placement",
+  prompt: `You are a cheap-shop / staffing-placement filter. Your ONLY job is to detect listings that combine multiple signals of a low-margin staffing or placement shop. Ignore stack, location, seniority — those are evaluated by other filters. A single signal is not enough; the rejection only fires when signals stack.
+
+# CHEAP-SHOP SIGNALS
+
+S1. **Recruiter-placement framing** — body opens with or repeatedly uses "Our client is", "Our client is seeking", "We are hiring on behalf of [different company]", "[Recruiter Co] is partnering with [Client Co] to find". The candidate would be placed AT a third-party client. NOT triggered by a holding company / parent company / consultancy hiring an engineer onto its own team. NOT triggered by a digital studio describing client engagements.
+
+S2. **Recruiter-shop self-description** — body explicitly describes the listing entity as a placement / connection service: "we connect [skill] with companies", "we match [talent] to client teams", "we place engineering talent", "[Co] connects top [region] talent with global companies". Stronger version of S1.
+
+S3. **Recruiter-name in title** — title shaped "[Staffing/Recruiter] - [Role]" where the staffing co is the LISTING entity (e.g., "Hatch IT - Senior Software Engineer, Cryptography"). The role title is prefixed by a recruiting brand, and the body confirms the candidate would work elsewhere.
+
+S4. **Junior bar dressed as senior** — for a senior/lead/founding role, the minimum experience is "3+ years" total, OR "5+ years experience including at least 1 year at a senior level". A real senior bar is 5+ years total with multi-year senior experience. Does NOT trigger when the role is open about being mid-level.
+
+S5. **Comp obscured alongside placement framing** — listing has placement language (S1 or S2) AND no compensation figure, OR uses framings like "Tailored Compensation: Salaries vary by client and candidate preference" / "Comp matched per engagement". Real consultancies disclose comp; placement shops obscure it.
+
+S6. **Cheap-country-only talent pool** — body restricts the candidate pool to a single low-comp region as the listing entity's talent base: "we connect top LATAM engineering talent", "Pakistan-only remote team", "Egypt-only", "South Asia-only". Distinct from the role being open to LATAM candidates among others.
+
+S7. **Low-code automation tools as required/strong-plus** — must-have or "strong-plus" tooling includes n8n, Zapier, Make, Bubble, or "custom automation frameworks" as a primary skill. Signals an internal-ops / RPA shop.
+
+S8. **Contractor placement with foreign client hours** — "Independent Contractor" engagement combined with required overlap to a foreign client's business hours stated in the body (e.g., "U.S. client business hours", "UK working hours required", "EST overlap mandatory"). Distinct from "team is mostly EST" cultural notes.
+
+# DECISION RULE
+
+1. Identify which of S1–S8 clearly apply. Do NOT count signals that are ambiguous or only weakly suggested.
+2. Count distinct signals.
+3. FAIL if the count is **≥ 2**. PASS otherwise.
+4. Your reason MUST start with "Signals: [list]. Count: N." so the decision is auditable.
+5. When in doubt, PASS — this filter only catches stacked patterns, never single signals.
+
+# DISCRIMINATOR
+
+A real consultancy / digital studio / holding company that hires the engineer onto its OWN team passes even when its body uses "our client" language to describe its customers. The candidate becomes an employee of the listing entity. A staffing shop places the candidate AT a separate client; the signals stack accordingly.
+
+# EXAMPLES
+
+PASS (1 signal): "Senior Web3 Software Engineer - MLabs. Our client is a pioneer in the blockchain sector ... Compensation: $170K - $195K. 7+ years experience." → S1 (our client is) only; comp disclosed cancels S5; senior bar real → 1 signal → "Signals: S1. Count: 1. PASS."
+
+PASS (1 signal): "AI Engineer (Contract-to-Hire) at Infinity (holding company). $75/hour for first 4 weeks (contract-to-hire trial). 5+ years engineering, 1+ year applied AI." → contractor-trial framing alone; no recruiter-shop language; comp disclosed; engineer joins Infinity → 0–1 signals → "Signals: none. Count: 0. PASS."
+
+PASS (0 signals): "Senior Backend Engineer at MoonPay. Build high-volume transaction broadcasting pipelines. 5+ years required. Stock options + competitive salary." → "Signals: none. Count: 0. PASS."
+
+PASS (studio framing, 0 signals): "Senior Full-Stack Engineer at Lazer (digital product studio with 180+ senior engineers). Embed with client teams to advise founders. $150-200k + benefits." → studio hires candidate as own employee; no placement framing → "Signals: none. Count: 0. PASS."
+
+FAIL (4 signals): "Full-Stack AI Engineer - Pavago. Our client is seeking ... U.S. client business hours ... 3+ years in software engineering ... Strong Plus: n8n, Zapier, Make, or custom automation frameworks." → "Signals: S1, S4, S7, S8. Count: 4. FAIL."
+
+FAIL (3 signals): "Senior Full-stack Engineer (Node/TS) at South Geeks. At South Geeks, we connect top LATAM engineering talent with innovative companies. Our client is a leading digital asset and cryptocurrency platform." → "Signals: S1, S2, S6. Count: 3. FAIL."
+
+FAIL (2 signals): "Hatch IT - Senior Software Engineer, Cryptography. hatch I.T. is partnering with VIA to find a Senior Software Engineer..." → "Signals: S1, S3. Count: 2. FAIL."
+
+FAIL (3 signals): "Founding Engineer (Fullstack) - Huzzle. At Huzzle, we connect high-performing B2B sales professionals with global companies. Engagement: Independent Contractor. 5+ years engineering, including at least 1 year at a senior level. Tailored Compensation: Salaries vary by client and candidate preference." → "Signals: S2, S4, S5. Count: 3. FAIL."`,
 };
 
 export function getEvaluationFilters(rates?: ExchangeRates): EvaluationFilter[] {
-  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES), ROLE_QUALITY_FILTER];
+  return [
+    REMOTE_FILTER,
+    buildCompensationFilter(rates ?? DEFAULT_RATES),
+    ROLE_QUALITY_FILTER,
+    CHEAP_SHOP_FILTER,
+  ];
 }

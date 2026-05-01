@@ -32,13 +32,24 @@ const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 // FN is locked in at 0.10 to hold the 2.4% achieved rate — any drift
 // upward must be a deliberate change, not noise.
 //
-// FP is *temporarily* loosened to 0.30 to admit known-failing reject
-// fixtures whose prompt fixes are tracked in ROADMAP §5.1 (DevOps/K8s
-// primary), §5.4 (L1/consensus depth), plus the new
-// huzzle-founding-engineer-staffing-framing fixture (staffing-shop
-// pattern with a real product responsibility list). 0.30 is too high —
-// the working target is ≤ 0.15. Ratchet down as each prompt gap closes.
-const FP_RATE_MAX = 0.3; // % of reject fixtures the eval wrongly passes — TEMPORARY; target ≤ 0.15
+// FP was tightened from 0.30 → 0.20 → 0.15 across this session. First
+// pass closed prompt gaps from ROADMAP §5.1 (DevOps/K8s primary, now
+// rule-quality §8 framed as responsibilities-not-skills) and §5.4
+// (L1/consensus depth, now rule-quality §9 framed as "build the chain
+// itself" not "uses chain adjacent skills"); structural filter now
+// rejects careers-index URLs and "general application" framing
+// prefixed by company name. Second pass added the
+// `cheap-shop-placement` filter (4th LLM filter in
+// getEvaluationFilters) that fails when ≥2 cheap-shop signals stack —
+// recruiter-placement framing, junior-bar-as-senior, comp-obscured,
+// LATAM-only talent pool, low-code-required, contractor + foreign
+// client hours. That closed pavago, huzzle, via-hatchit, south-geeks
+// without breaking mlabs or infinity-constellation.
+// Achieved measurement after both passes: FP ≈ 7.5-10%, FN ≈ 5%.
+// 0.15 has 2-fixture headroom for LLM noise and tool_call flakes.
+// Remaining FPs (abacus borderline MLE, wayflyer Python/Django CRUD,
+// tem Senior Staff agent platform) are tracked in ROADMAP §5.8.
+const FP_RATE_MAX = 0.15; // % of reject fixtures the eval wrongly passes
 const FN_RATE_MAX = 0.1; // % of pass fixtures the eval wrongly fails
 
 // Run fixtures in parallel through the LLM. evaluateJob already fans out the

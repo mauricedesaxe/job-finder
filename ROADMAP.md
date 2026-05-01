@@ -5,7 +5,7 @@ Priority: P0 = do first, P1 = do next.
 
 ## Current state
 
-CLI script (`bun src/index.ts`) deployed as a Railway cron job (every 2 days). Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (71 evaluate fixtures: 36 pass / 35 reject; 8 remote fixtures).
+CLI script (`bun src/index.ts`) deployed as a Railway cron job (weekly, Wednesday ~09:00 Romania time). Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (82 evaluate fixtures: 42 pass / 40 reject; 8 remote fixtures + 12 ATS-aware). Latest measurement: FP ≈ 7-10%, FN ≈ 5%.
 
 ---
 
@@ -172,11 +172,11 @@ Run on every commit via lefthook? No — same as the eval integration suite, gat
 
 Surfaced during the 2026-05-01 walk-to-review pass. Each gap has at least one fixture pinned in `src/pipeline/__integration__/fixtures/evaluate/reject/` so a future prompt edit can be validated with the integration suite. Order matches confidence — top entries are clear edits, lower ones need more thought.
 
-### 5.1 DevOps / Kubernetes-primary roles (clear reject)
+### 5.1 DevOps / Kubernetes-primary roles (clear reject) — DONE 2026-05-01
 
-**Evidence:** `reject/boundless-senior-infrastructure-devops.md`. Title was "Senior Software Engineer - Infrastructure" (sounds like SWE) but the body is pure SRE/DevOps — Kubernetes, Docker, Terraform/Ansible/Pulumi, AWS/GCP multi-region, GPU/bare-metal optimization. TS/Go listed only as "scripting language". Crypto-web3-ts profile passed because TS/Go appears anywhere in the stack list; role-quality didn't fail because the existing DevOps-related rule (4) is scoped to data-engineer titles plus a narrow MLOps exclusion in the AI profile.
+**Evidence:** `reject/boundless-senior-infrastructure-devops.md`, `reject/yuno-platform-engineer-ai.md`. The first is "Senior Software Engineer - Infrastructure" (sounds like SWE) with body pure SRE/DevOps. The second has "AI Agent Infrastructure" branding but the responsibility list is pure messaging/IaC/observability ("when something breaks at 3am").
 
-**Direction:** Add a `role-quality` rule that fails when must-have skills are dominated by Kubernetes / IaC / multi-region cloud-ops, regardless of title. "Containers + IaC + cloud-multi-region as primary must-haves" is the shape; Terraform alone in nice-to-have is fine. Alex's bar: "I don't know Kubernetes and I don't want to learn it." Note any Terraform/IaC mention as a *secondary* skill is OK.
+**Resolution:** Added role-quality rule 8 ("INFRA-OPS-AS-PRIMARY-RESPONSIBILITY"). The first attempt keyed on must-have skills (K8s + Docker + Terraform + Datadog) — that broke `pass/clickup-senior-ai-engineer.md` because AI Platform engineers list those same skills. Second attempt keys on the *responsibility verbs*: "operate", "monitor", "own deployments", "tune observability", "manage clusters" → FAIL; "build", "apply", "deploy features" → PASS. Boundless and Yuno-platform now reject; ClickUp AI Platform still passes.
 
 ### 5.2 Any Java requirement (tighten, don't loosen)
 
@@ -190,15 +190,43 @@ Surfaced during the 2026-05-01 walk-to-review pass. Each gap has at least one fi
 
 **Direction:** Change role-quality rule 6 threshold from "4+ synchronous rounds → FAIL" to "5+ synchronous rounds → FAIL". Update the failing example accordingly and add a 4-round pass example. Risk is low since the fail threshold is moving up (rejection rate decreases).
 
-### 5.4 L1 / consensus / microchain protocol depth (deferred)
+### 5.4 L1 / consensus / microchain protocol depth — DONE 2026-05-01
 
-**Evidence:** `reject/linera-software-engineer-rust-l1.md` (microchain L1, Rust-only); `reject/alpen-labs-engineering-lead-l2-systems.md` (Bitcoin L2 / ZK rollups, Rust + EVM + L2 systems programming, lead role). Both passed the crypto-web3-ts profile because Rust is in the polyglot list. Alex's bar: "I am a polyglot. I know Rust, but if they are looking for someone with L1 expertise with Rust, that is well outside of my knowledge."
+**Evidence:** `reject/linera-software-engineer-rust-l1.md` (microchain L1, Rust-only); `reject/alpen-labs-engineering-lead-l2-systems.md` (Bitcoin L2 / ZK rollups, Rust + EVM + L2 systems programming, lead role).
 
-**Direction:** Add a stack-depth signal to the crypto-web3-ts profile (or role-quality, depending on layer) that fails when the work is L1/L2 protocol architecture, consensus, or core node software — even when the listed stack is just Rust. Existing memory `feedback_stack_depth_signals` covers the heuristic; the prompt doesn't yet. Alex deferred this — "we don't necessarily have to fix this right now, as it would entail looking at the prompts and everything." Park until the next prompt-iteration session.
+**Resolution:** Added role-quality rule 9 ("CORE-PROTOCOL CHAIN IMPLEMENTATION"). First attempt keyed on adjacent skills like "consensus algorithms" or "MEV awareness" — that broke `pass/d3-engineer.md` (Solana RWA, mentions consensus algorithms as a 3y experience requirement) and `pass/moonpay-engineer.md` (wallet/payment with MEV awareness desired). Second attempt keys on whether the company itself IS the chain ("first blockchain optimized for...", "scalable Bitcoin ecosystem", "high-performance OS for Ethereum") AND the role builds it ("contribute to architecture of blockchain protocols", "production-grade infrastructure for our protocol"). Application-layer roles on existing chains pass even when consensus/MEV appears in the body. The existing `feedback_stack_depth_signals` memory now matches the prompt.
 
 ### 5.5 Lever single-country with multi-continent operations language (false positive in remote filter)
 
 **Evidence:** `pass/ats/jeeves-mexico-ats-body-multi-continent.md`. Lever metadata is unambiguous (`country=MX`, `locations=["Mexico"]`, `team="Engineering - LatAm"`). The body says "operates across 20+ countries including Brazil, Canada, Colombia, Mexico, the United Kingdom, across Europe, and the United States" — but that is *company operations / customer reach*, not *hiring scope*. The remote filter passed the listing under rule A by reading the operations language as a multi-continent team signal.
 
 **Note:** Alex called this a pass on the basis that the operations language is enough; he's willing to apply even though hiring scope is LatAm-only. The fixture is therefore in `pass/ats/`, NOT `reject/ats/`. The gap in the prompt is whether rule A should distinguish "company operates in X" from "team distributed across X" — currently it doesn't, and the user's call here is that conflating them is acceptable. Track as a *known false-positive shape* worth revisiting if multiple Mexico-only listings start landing in To-Review.
+
+### 5.6 Careers-index pages and "General Application" titles — DONE 2026-05-01
+
+**Evidence:** `reject/ethena-labs-general-application.md` (title "Ethena Labs - Join the Team! General Application" — the existing `^\s*general application\b` pattern was anchored to start and missed the company-prefixed form), `reject/reown-walletconnect-careers-index.md` (URL `apply.workable.com/walletconnect/` — a careers root that lists multiple jobs, no individual posting).
+
+**Resolution:** Extended `structuralFilter` to (a) match "general application" / "join the team" / talent-pool framing anywhere in the title (no longer anchored), and (b) reject root career-index URLs across Workable / Lever / Greenhouse / Ashby (no individual posting segment). Both fixtures now reject before reaching the LLM.
+
+### 5.7 Hybrid buried in benefits — DONE 2026-05-01
+
+**Evidence:** `reject/openup-senior-ai-engineer-hybrid.md`. Body says "Flexible work model (hybrid and options for remote work)" in the perks section; previous prompt missed it because the literal "hybrid" appeared away from the work-model header.
+
+**Resolution:** Strengthened the remote filter to fail when "hybrid" is the framing default and remote is a qualified option ("options for", "with flexibility for"). Soft-pass example added for "Remote / Hybrid (Warsaw)" where hybrid and remote are parallel options — first attempt over-rejected `pass/vecten-ai-native-fullstack.md` which uses that pattern.
+
+### 5.8 Cheap-shop staffing FPs — DONE 2026-05-01
+
+**Evidence:** `reject/pavago-senior-backend.md`, `reject/huzzle-founding-engineer-staffing-framing.md`, `reject/via-hatchit-cryptography-engineer.md`, `reject/south-geeks-latam-staffing.md`. All four shared placement-framing language ("Our client is", "we connect [skill] with companies", "[Recruiter] is partnering with [Client]") that a naive rule would reject. But that naive rule was tried and reverted because it broke `pass/mlabs-engineer.md` and `pass/infinity-constellation-senior-fullstack.md` (legitimate consultancies / holding-cos that use the same framing).
+
+**Resolution:** Added `cheap-shop-placement` as a 4th LLM filter in `getEvaluationFilters()`. The filter defines 8 cheap-shop signals (recruiter-placement framing, recruiter-shop self-description, recruiter-name in title, junior-bar-as-senior, comp-obscured + placement, cheap-country-only talent pool, low-code-required, contractor + foreign client hours) and fails only when ≥ 2 stack. Pavago has 4 signals, Huzzle 3, South Geeks 3, Via-Hatch 2 — all reject. MLabs has only S1 (comp disclosed cancels S5) and Infinity has none — both still pass. The filter prompt asks the LLM to list signals in its reason field for auditability ("Signals: S1, S4. Count: 2. FAIL.").
+
+### 5.9 Remaining FP gaps to chase next (target ≤ 10%)
+
+After the cheap-shop filter landed, FP sits at 7.5–10% across runs. The remaining steady-state FPs are not staffing-shaped:
+
+- `reject/wayflyer-backend-engineer.md` — generic Python/Django CRUD on financial data; LLM passes via fintech-trading-infra-ts because "core financial products" pattern-matches "financial backend services". Fix: stronger negative example contrasting CRUD-on-fintech against real trading/real-time infra.
+- `reject/abacus-insights-ml-engineer.md` — borderline. Healthcare AI Platform with Databricks/PyTorch/TensorFlow training; reads as deep MLE but the body lists RAG/agents/LLMs. Hard to encode without breaking ClickUp/Harvey AI Platform passes.
+- `reject/tem-senior-staff-agent-platform.md` — borderline. Senior Staff Agent Platform at an energy startup; combines product-engineering verbs ("ship flagship agentic capabilities") with operational ones ("runbook/on-call ownership"). Sometimes flips run-to-run.
+
+The errored "no function tool_call in response" cases (e.g. `lazer-engineer`, `vanta-senior-engineer` in some runs) are model-side flakes counted as wrong-direction by the suite. ROADMAP §1 tracks per-fixture flakiness measurement to separate these from real misclassifications.
 
