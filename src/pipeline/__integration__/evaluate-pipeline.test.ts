@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { basename } from "node:path";
 import { Semaphore } from "../../concurrency";
 import type { JobListing } from "../../types";
@@ -38,6 +38,11 @@ const FN_RATE_MAX = 0.15; // % of pass fixtures the eval wrongly fails
 // OpenRouter would throttle. Cap at 12 concurrent fixtures.
 const FIXTURE_CONCURRENCY = 12;
 const PARALLEL_RUN_TIMEOUT_MS = 600_000;
+
+// Bun 1.2.23 rejects the (fn, timeoutMs) shape of `beforeAll` at runtime even
+// though bun-types accepts it. Use the module-scoped default instead — the
+// per-test 5_000ms timeout below still wins because per-test takes precedence.
+setDefaultTimeout(PARALLEL_RUN_TIMEOUT_MS);
 
 type Result = { name: string; expected: boolean; actual: boolean; reason: string };
 
@@ -80,7 +85,7 @@ describe("full evaluation pipeline (integration)", () => {
       ),
     );
     for (const e of evaluations) results.push(e);
-  }, PARALLEL_RUN_TIMEOUT_MS);
+  });
 
   test("FP and FN rates meet thresholds", () => {
     const total = results.length;
