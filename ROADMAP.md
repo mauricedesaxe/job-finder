@@ -5,7 +5,7 @@ Priority: P0 = do first, P1 = do next.
 
 ## Current state
 
-CLI script (`bun src/index.ts`) deployed as a Railway cron job (every 2 days). Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (82 evaluate fixtures: 42 pass / 40 reject; 8 remote fixtures + 12 ATS-aware). Latest measurement: FP ≈ 15-17%, FN ≈ 5%.
+CLI script (`bun src/index.ts`) deployed as a Railway cron job (weekly, Wednesday ~09:00 Romania time). Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (82 evaluate fixtures: 42 pass / 40 reject; 8 remote fixtures + 12 ATS-aware). Latest measurement: FP ≈ 7-10%, FN ≈ 5%.
 
 ---
 
