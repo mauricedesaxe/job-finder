@@ -35,9 +35,9 @@ const remoteFilter = getEvaluationFilters().find(
 const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 
 // FP costs more than FN (false positives flood To-Review). The suite is small
-// (5 reject + 3 pass) so granularity is coarse — adjust as fixtures are added.
+// (5 reject + 4 pass) so granularity is coarse — adjust as fixtures are added.
 const FP_RATE_MAX = 0.2; // ≤ 1 of 5 reject fixtures may leak through
-const FN_RATE_MAX = 0.34; // ≤ 1 of 3 pass fixtures may wrongly fail
+const FN_RATE_MAX = 0.25; // ≤ 1 of 4 pass fixtures may wrongly fail
 
 // Each fixture is one filter call. Cap concurrency so we don't trip
 // OpenRouter rate limits when this suite grows.

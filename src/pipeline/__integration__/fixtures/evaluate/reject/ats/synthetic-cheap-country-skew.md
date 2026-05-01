@@ -1,7 +1,7 @@
 ## ATS Structured Data (from ashby API)
 These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Remote - India
-- All listed locations: Remote - India, Remote - Pakistan, Remote - Egypt, Remote - Philippines, Remote - Bangladesh, Remote - Indonesia, Remote - Vietnam, Remote - Spain
+- All listed locations: Remote - India, Remote - Pakistan, Remote - Egypt, Remote - Philippines, Remote - Bangladesh, Remote - Indonesia, Remote - Vietnam, Remote - Serbia
 - Workplace type: Remote
 - Country (HQ): India
 ---
@@ -13,7 +13,7 @@ URL Source: https://example.com/synthetic-cheap-country-skew
 Markdown Content:
 ## About the Company
 
-We are a fast-growing SaaS platform helping small businesses manage their operations. Our distributed engineering team spans South Asia, Southeast Asia, the Middle East, and Europe.
+We are a fast-growing SaaS platform helping small businesses manage their operations. Our distributed engineering team spans South Asia, Southeast Asia, the Middle East, and the Western Balkans.
 
 ## The Role
 
