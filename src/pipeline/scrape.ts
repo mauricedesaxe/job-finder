@@ -31,11 +31,19 @@ export function detectSource(url: string): string {
 }
 
 export function extractTitle(markdown: string): string {
-  // Look for first # heading
+  // Jina prefixes the page <title> as a "Title:" line at the very top of its
+  // markdown render. That's the canonical job title for any source, and
+  // unlike body H1/bold heuristics it doesn't depend on how the listing
+  // happens to be formatted (Workable bodies often have no H1 and no
+  // near-top bold, leaving "Unknown Position" otherwise).
+  const jinaTitle = markdown.match(/^Title:\s*(.+)$/m);
+  if (jinaTitle?.[1]) return jinaTitle[1].trim();
+
+  // Fallback: first # heading in the body
   const headingMatch = markdown.match(/^#\s+(.+)$/m);
   if (headingMatch?.[1]) return headingMatch[1].trim();
 
-  // Fallback: look for **bold** title near the top
+  // Fallback: first **bold** span near the top
   const boldMatch = markdown.match(/\*\*(.+?)\*\*/);
   if (boldMatch?.[1]) return boldMatch[1].trim();
 

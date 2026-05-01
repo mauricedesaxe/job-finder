@@ -58,14 +58,30 @@ describe("detectSource", () => {
 });
 
 describe("extractTitle", () => {
-  test("extracts from # heading", () => {
+  test("prefers Jina Title: prefix over body heuristics", () => {
+    // Jina prepends a Title: line with the page <title>. It's more reliable
+    // than guessing from body H1 / bold (especially for Workable bodies that
+    // expose neither).
+    const md = "Title: Senior Backend Engineer - Acme\n\nURL Source: ...\n\n# Different H1";
+    expect(extractTitle(md)).toBe("Senior Backend Engineer - Acme");
+  });
+
+  test("falls back to first # heading when no Jina prefix", () => {
     const md = "# Senior Software Engineer\n\nSome description...";
     expect(extractTitle(md)).toBe("Senior Software Engineer");
   });
 
-  test("extracts from bold text as fallback", () => {
+  test("falls back to bold text when no Jina prefix or H1", () => {
     const md = "Welcome to our job page\n\n**Backend Developer** at Acme";
     expect(extractTitle(md)).toBe("Backend Developer");
+  });
+
+  test("recovers from Workable-style body with only H3 headings (real Gridcog shape)", () => {
+    const md =
+      "Title: Senior Software Engineer (Product focus, Full Stack, React, AWS) - Gridcog\n\n## Description\n\n### Senior Software Engineer (Full Stack, React, AWS)\n\n### About Us";
+    expect(extractTitle(md)).toBe(
+      "Senior Software Engineer (Product focus, Full Stack, React, AWS) - Gridcog",
+    );
   });
 
   test("returns Unknown Position when no title found", () => {
