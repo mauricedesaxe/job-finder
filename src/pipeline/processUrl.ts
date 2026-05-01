@@ -16,7 +16,7 @@ import {
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
-import { fetchAtsData, formatAtsBlock } from "../services/ats";
+import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
 import { insertJob } from "../services/notion";
 import type { NotionCacheUpdater } from "../services/notionCache";
 import type { TokenTracker } from "../services/tokenTracker";
@@ -93,6 +93,26 @@ export async function processUrl(
     if (atsData) {
       log.debug({ url, source: atsData.source }, "ats enriched");
       job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
+
+      // ATS hard reject — workplaceType=OnSite is decided deterministically.
+      // The location-eligibility prompt explicitly tells the LLM to discount
+      // ATS metadata in favour of body text, which means OnSite signals leak
+      // through whenever the body is silent about workplace. Catch them here.
+      const atsCheck = atsStructuralFilter(atsData);
+      if (!atsCheck.pass) {
+        log.info(
+          { url, title: job.title, company: job.company, reason: atsCheck.reason },
+          "rejected (ats)",
+        );
+        await notionRateLimiter.run(() =>
+          notionBreaker.run(() =>
+            withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
+              shouldRetry: isRetryableNotion,
+            }),
+          ),
+        );
+        return "rejected";
+      }
     }
   }
 

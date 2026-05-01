@@ -72,3 +72,96 @@ Skip Notion insertion for blocked/applied companies entirely. Saves Notion write
 
 Match company from URL path (e.g. `ashbyhq.com/company-name/`) against known blocked companies before scraping. Maximum savings (skips Jina call too) but least accurate — URL path patterns vary across ATS platforms and don't always contain the company name.
 
+---
+
+## 4. Quick-Eval Summary on Notion Page (P1)
+
+**Problem.** Walking the To-Review pile in Notion is slow because each entry only shows scraped title/company/location — Alex still has to click into the page and read the body to decide. The `/walk-to-review` skill produces a six-bullet summary (stack, senior signal, comp, location/remote, culture flags, one-line read) that he found "useful and powerful" for quick triage. We want the same summary auto-generated and surfaced at the top of every To-Review Notion page.
+
+### Generation point — enrichment, NOT eval
+
+Run the summary as part of `enrichJob` (`src/pipeline/enrich.ts`), AFTER the evaluation pipeline has already passed the job. Critical reasons:
+
+- The LLM that decides pass/reject must NOT see a directional summary — that would compound a single LLM read into both the verdict and the human-facing recap.
+- The summary is for human triage of jobs that already qualified. Auto-Rejected jobs don't get a summary.
+- Folds into the existing enrichment LLM call as one additional tool-call field — no extra round-trip, no extra network cost beyond ~150-200 output tokens.
+
+### Notion rendering
+
+Render the summary as a native Notion **callout block** at the very top of the description, then the ATS block, then the Jina body:
+
+```
+[ Notion callout: quick-eval summary ]
+## ATS Structured Data (from <source> API)
+- Primary location: ...
+- All listed locations: ...
+- Workplace type: ...
+- Country (HQ): ...
+---
+
+<Jina body>
+```
+
+The callout is visually distinct (colored sidebar), signals "this is the bot's read, not part of the listing", and is the first thing Alex sees on opening the page. The ATS block stays as the second block — it's still useful as audit trail and the LLM reading the page in any future reprocess (e.g. reevaluate-to-review.ts) needs it.
+
+`src/services/notion/builders.ts` produces description blocks today via `descriptionToBlocks`. Add a sibling that emits a `callout` block with the summary content (Notion's `callout` block type accepts an icon, color, and rich_text). Front of the description blocks array.
+
+### Summary content shape
+
+Six bullets, fixed order, every page:
+
+1. **Stack** — one short line listing primary languages/frameworks/infra (e.g., "TS + Node, AWS Lambda, DynamoDB, GraphQL/AppSync"). Strip filler.
+2. **Senior signal** — years required vs Alex's 6+ ("5+ years required ✓" / "10+ years required — over the bar" / "not specified").
+3. **Comp** — figure from the body or "not specified". Currency + range as written.
+4. **Location/remote** — what the body says about workplace and geo. ATS facts already live in the ATS block below; this bullet is the body's framing in human language.
+5. **Culture flags** — short comma-separated list of salient signals (agency, internal-platform, architect-only, hybrid-disclosed-in-benefits, AI-tooling-encouraged, etc.). "none observed" if nothing stands out.
+6. **Read** — *factual*, not directional. Names the salient signals; does NOT say "lean pass" / "lean reject". Reason: the human eye should integrate, the LLM should observe. Example: "AI-engineering at a real product company; agency framing absent; comp not in body" — not "lean pass".
+
+The "Read" line being factual is the FP-risk mitigation: a confidently-wrong directional summary would bias Alex toward the wrong verdict; an observation lets him judge.
+
+### Implementation outline
+
+1. **Schema.** Add `summary: z.string()` to the enrichment Zod schema in `src/pipeline/enrich.ts`. Single string with a stable internal format the Notion builder can parse into a callout block (or six structured fields — choose one; six fields gives stricter testing).
+2. **Prompt.** Extend the existing enrichment prompt with the six-bullet contract + N-shot examples drawn from the walkthrough fixtures already in `src/pipeline/__integration__/fixtures/evaluate/`.
+3. **Notion builder.** Add `summaryToCallout(summary): BlockObjectRequest` in `src/services/notion/builders.ts`. Notion API type: `callout` with `icon: { type: "emoji", emoji: "🔍" }` (or similar), `color: "gray_background"`. Front of the blocks list.
+4. **Wire-up.** `processUrl.ts` already calls `enrichJob` and assigns `enriched.description`. Pass `enriched.summary` through to `insertJob` so the builder can prepend the callout.
+5. **Tracker.** `TokenTracker` already wraps the enrichment LLM call — no change needed; cost shows up in the per-run report.
+
+### Failure mode
+
+If the summary field is missing or malformed in the LLM response, log a warning and insert the job without a callout block. Never fail enrichment over a missing summary — the verdict has already been made by that point and the body still gets through.
+
+### Backfill
+
+Standalone script at `scripts/regenerate-summaries.ts`, mirrors the shape of `scripts/reevaluate-to-review.ts`:
+
+- Query all To-Review Notion pages.
+- Skip pages that already have a callout block at the top (idempotent).
+- Re-fetch the body, run summary-only enrichment (no re-eval), prepend the callout.
+- Run after prompt iterations that change the summary contract.
+
+Kept separate from `reevaluate-to-review.ts` because verdict prompts and summary prompts iterate independently; coupling them would force a re-eval whenever you wanted to refresh just the summaries.
+
+### Testing
+
+New `src/pipeline/__integration__/fixtures/summarize/` directory with the same Markdown shape as `evaluate/`, paired with a `evaluate-summarize.test.ts` that runs each fixture through the summarization step and asserts:
+
+- All six fields are present.
+- "Senior signal" mentions a year count or the literal "not specified".
+- "Comp" is either a figure with currency or "not specified".
+- "Read" does not contain directional language ("lean pass", "lean reject", "borderline") — schema-shaped, not text-match.
+- "Culture flags" is a list (possibly empty / "none observed").
+
+Run on every commit via lefthook? No — same as the eval integration suite, gated to `bun run test:integration` because it costs LLM tokens.
+
+### Open questions
+
+- **Should the summary be a single string or six structured fields in the enrichment Zod schema?** Single string is simpler to plumb but harder to validate; six fields lets the Notion builder render each bullet as its own rich_text run and lets the test suite assert per-field. Recommendation: six fields.
+- **Backfill cadence.** Manual-only, or should the auto-pipeline notice a missing summary on existing To-Review entries and refill? Manual-only is simpler; auto-refill creates a "summaries drift quietly" failure mode.
+- **Icon and color.** Visual choice — propose 🔍 with `gray_background`. Rebikeshed cheap.
+
+### Out of scope
+
+- A "Why Match" Notion property update — keep using the existing reason field for now; the callout supersedes it visually for the human.
+- Recomputing the summary on every run — too expensive and it's ephemeral data.
+

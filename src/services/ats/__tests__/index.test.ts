@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { clearAshbyCache, detectAtsSource, fetchAtsData, formatAtsBlock } from "..";
+import {
+  atsStructuralFilter,
+  clearAshbyCache,
+  detectAtsSource,
+  fetchAtsData,
+  formatAtsBlock,
+} from "..";
 import type { AtsJobData, Fetcher } from "../types";
 
 import ledgerFixture from "./fixtures/ashby-ledger-org.json";
@@ -83,7 +89,6 @@ describe("formatAtsBlock", () => {
     expect(block).toContain("- All listed locations: Argentina, Europe, Spain");
     expect(block).toContain("- Workplace type: Remote");
     expect(block).toContain("- Country (HQ): AR");
-    expect(block).toContain("not final eligibility");
     expect(block.endsWith("---")).toBe(true);
   });
 
@@ -103,7 +108,7 @@ describe("formatAtsBlock", () => {
     expect(block).toContain("- Workplace type: unspecified");
   });
 
-  test("preserves the eligibility-disclaimer line so the LLM does not over-index on country", () => {
+  test("contains no preamble — interpretation lives in the eval prompt", () => {
     const data: AtsJobData = {
       source: "lever",
       location: "Argentina",
@@ -112,6 +117,72 @@ describe("formatAtsBlock", () => {
       country: "AR",
     };
     const block = formatAtsBlock(data);
-    expect(block).toContain("primary location may be HQ");
+    expect(block).not.toContain("primary location may be HQ");
+    expect(block).not.toContain("not final eligibility");
+  });
+});
+
+describe("atsStructuralFilter", () => {
+  test("rejects workplaceType=OnSite with location in the reason", () => {
+    const result = atsStructuralFilter({
+      source: "ashby",
+      location: "New York",
+      locations: ["New York"],
+      workplaceType: "OnSite",
+      country: "United States",
+    });
+    expect(result.pass).toBe(false);
+    expect(result.reason).toContain("OnSite");
+    expect(result.reason).toContain("New York");
+  });
+
+  test("falls back to country when location is empty", () => {
+    const result = atsStructuralFilter({
+      source: "ashby",
+      location: "",
+      locations: [],
+      workplaceType: "OnSite",
+      country: "Germany",
+    });
+    expect(result.pass).toBe(false);
+    expect(result.reason).toContain("Germany");
+  });
+
+  test("passes Hybrid — body may override (MONEI case)", () => {
+    const result = atsStructuralFilter({
+      source: "ashby",
+      location: "Barcelona",
+      locations: ["Barcelona", "Málaga"],
+      workplaceType: "Hybrid",
+      country: "Spain",
+    });
+    expect(result.pass).toBe(true);
+  });
+
+  test("passes Remote", () => {
+    const result = atsStructuralFilter({
+      source: "lever",
+      location: "Remote",
+      locations: ["Remote"],
+      workplaceType: "Remote",
+      country: "US",
+    });
+    expect(result.pass).toBe(true);
+  });
+
+  test("passes when workplaceType is null (Greenhouse, no field exposed)", () => {
+    const result = atsStructuralFilter({
+      source: "greenhouse",
+      location: "Amsterdam",
+      locations: ["Amsterdam"],
+      workplaceType: null,
+      country: "Netherlands",
+    });
+    expect(result.pass).toBe(true);
+  });
+
+  test("passes when ATS data is null (enrichment unavailable)", () => {
+    const result = atsStructuralFilter(null);
+    expect(result.pass).toBe(true);
   });
 });
