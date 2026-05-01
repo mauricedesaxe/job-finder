@@ -40,12 +40,53 @@ describe("structuralFilter", () => {
     expect(result.reason).toContain("Generic");
   });
 
+  test("rejects 'General Application' framing prefixed by company name", () => {
+    const result = structuralFilter({
+      ...baseJob,
+      title: "Ethena Labs - Join the Team! General Application",
+    });
+    expect(result.pass).toBe(false);
+    expect(result.reason).toContain("Generic");
+  });
+
   test("rejects talent-pool titles", () => {
     expect(structuralFilter({ ...baseJob, title: "Talent Pool" }).pass).toBe(false);
     expect(structuralFilter({ ...baseJob, title: "Talent Community" }).pass).toBe(false);
     expect(structuralFilter({ ...baseJob, title: "Future Opportunities" }).pass).toBe(false);
     expect(structuralFilter({ ...baseJob, title: "Open Application" }).pass).toBe(false);
     expect(structuralFilter({ ...baseJob, title: "Join Our Talent Network" }).pass).toBe(false);
+    expect(structuralFilter({ ...baseJob, title: "Join the Team" }).pass).toBe(false);
+  });
+
+  test("rejects careers-index URLs (no individual posting segment)", () => {
+    expect(
+      structuralFilter({
+        ...baseJob,
+        title: "WalletConnect",
+        url: "https://apply.workable.com/walletconnect/",
+      }).reason,
+    ).toContain("Careers-index");
+    expect(
+      structuralFilter({
+        ...baseJob,
+        title: "Acme",
+        url: "https://jobs.lever.co/acme",
+      }).reason,
+    ).toContain("Careers-index");
+    expect(
+      structuralFilter({
+        ...baseJob,
+        title: "Acme",
+        url: "https://boards.greenhouse.io/acme/",
+      }).reason,
+    ).toContain("Careers-index");
+    expect(
+      structuralFilter({
+        ...baseJob,
+        title: "Acme",
+        url: "https://jobs.ashbyhq.com/acme",
+      }).reason,
+    ).toContain("Careers-index");
   });
 
   test("does not reject titles that merely contain the word 'general'", () => {
