@@ -1,5 +1,4 @@
 ## ATS Structured Data (from ashby API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Remote - Americas
 - All listed locations: Remote - United States, Remote - Canada, Remote - Mexico, Remote - Brazil
 - Workplace type: Remote

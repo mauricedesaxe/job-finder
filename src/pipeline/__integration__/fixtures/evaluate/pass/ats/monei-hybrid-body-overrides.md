@@ -1,5 +1,4 @@
 ## ATS Structured Data (from ashby API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Barcelona
 - All listed locations: Barcelona, Málaga
 - Workplace type: Hybrid

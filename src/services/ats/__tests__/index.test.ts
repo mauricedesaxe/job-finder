@@ -89,7 +89,6 @@ describe("formatAtsBlock", () => {
     expect(block).toContain("- All listed locations: Argentina, Europe, Spain");
     expect(block).toContain("- Workplace type: Remote");
     expect(block).toContain("- Country (HQ): AR");
-    expect(block).toContain("not final eligibility");
     expect(block.endsWith("---")).toBe(true);
   });
 
@@ -109,7 +108,7 @@ describe("formatAtsBlock", () => {
     expect(block).toContain("- Workplace type: unspecified");
   });
 
-  test("preserves the eligibility-disclaimer line so the LLM does not over-index on country", () => {
+  test("contains no preamble — interpretation lives in the eval prompt", () => {
     const data: AtsJobData = {
       source: "lever",
       location: "Argentina",
@@ -118,7 +117,8 @@ describe("formatAtsBlock", () => {
       country: "AR",
     };
     const block = formatAtsBlock(data);
-    expect(block).toContain("primary location may be HQ");
+    expect(block).not.toContain("primary location may be HQ");
+    expect(block).not.toContain("not final eligibility");
   });
 });
 

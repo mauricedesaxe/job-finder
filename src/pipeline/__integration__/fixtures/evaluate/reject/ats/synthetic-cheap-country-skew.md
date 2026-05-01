@@ -1,5 +1,4 @@
 ## ATS Structured Data (from ashby API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Remote - India
 - All listed locations: Remote - India, Remote - Pakistan, Remote - Egypt, Remote - Philippines, Remote - Bangladesh, Remote - Indonesia, Remote - Vietnam, Remote - Serbia
 - Workplace type: Remote

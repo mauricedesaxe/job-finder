@@ -59,10 +59,7 @@ export function atsStructuralFilter(data: AtsJobData | null): { pass: boolean; r
 }
 
 export function formatAtsBlock(data: AtsJobData): string {
-  const lines = [
-    `## ATS Structured Data (from ${data.source} API)`,
-    "These are signals from the ATS, not final eligibility — primary location may be HQ.",
-  ];
+  const lines = [`## ATS Structured Data (from ${data.source} API)`];
   if (data.location) lines.push(`- Primary location: ${data.location}`);
   if (data.locations.length > 0) lines.push(`- All listed locations: ${data.locations.join(", ")}`);
   lines.push(`- Workplace type: ${data.workplaceType ?? "unspecified"}`);

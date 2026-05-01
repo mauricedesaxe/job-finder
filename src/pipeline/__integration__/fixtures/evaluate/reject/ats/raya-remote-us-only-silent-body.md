@@ -1,5 +1,4 @@
 ## ATS Structured Data (from lever API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Remote
 - All listed locations: Remote
 - Workplace type: Remote

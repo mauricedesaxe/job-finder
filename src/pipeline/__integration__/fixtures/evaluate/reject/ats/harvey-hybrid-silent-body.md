@@ -1,5 +1,4 @@
 ## ATS Structured Data (from ashby API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: San Francisco
 - All listed locations: San Francisco, New York
 - Workplace type: Hybrid

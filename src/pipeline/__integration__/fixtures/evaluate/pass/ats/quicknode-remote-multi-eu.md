@@ -1,5 +1,4 @@
 ## ATS Structured Data (from ashby API)
-These are signals from the ATS, not final eligibility — primary location may be HQ.
 - Primary location: Remote
 - All listed locations: Canada, Remote, Portugal, Japan, Spain, Costa Rica, Mexico , Singapore, South Korea, United Kingdom, UAE, Taiwan, Ireland
 - Workplace type: Remote
