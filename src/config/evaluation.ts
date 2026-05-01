@@ -350,6 +350,64 @@ FAIL: "Software Engineer (Rust) at Linera, the first blockchain optimized for re
 FAIL: "Engineering Team Lead at Alpen Labs (scalable Bitcoin ecosystem); responsible for leading a high-impact team focused on delivering production-grade infrastructure for our protocol; Rust, EVM-compatible chains, and L2 technologies; core infrastructure and protocol components" → L2 protocol implementation (rule 9)`,
 };
 
+const CHEAP_SHOP_FILTER: EvaluationFilter = {
+  name: "cheap-shop-placement",
+  prompt: `You are a cheap-shop / staffing-placement filter. Your ONLY job is to detect listings that combine multiple signals of a low-margin staffing or placement shop. Ignore stack, location, seniority — those are evaluated by other filters. A single signal is not enough; the rejection only fires when signals stack.
+
+# CHEAP-SHOP SIGNALS
+
+S1. **Recruiter-placement framing** — body opens with or repeatedly uses "Our client is", "Our client is seeking", "We are hiring on behalf of [different company]", "[Recruiter Co] is partnering with [Client Co] to find". The candidate would be placed AT a third-party client. NOT triggered by a holding company / parent company / consultancy hiring an engineer onto its own team. NOT triggered by a digital studio describing client engagements.
+
+S2. **Recruiter-shop self-description** — body explicitly describes the listing entity as a placement / connection service: "we connect [skill] with companies", "we match [talent] to client teams", "we place engineering talent", "[Co] connects top [region] talent with global companies". Stronger version of S1.
+
+S3. **Recruiter-name in title** — title shaped "[Staffing/Recruiter] - [Role]" where the staffing co is the LISTING entity (e.g., "Hatch IT - Senior Software Engineer, Cryptography"). The role title is prefixed by a recruiting brand, and the body confirms the candidate would work elsewhere.
+
+S4. **Junior bar dressed as senior** — for a senior/lead/founding role, the minimum experience is "3+ years" total, OR "5+ years experience including at least 1 year at a senior level". A real senior bar is 5+ years total with multi-year senior experience. Does NOT trigger when the role is open about being mid-level.
+
+S5. **Comp obscured alongside placement framing** — listing has placement language (S1 or S2) AND no compensation figure, OR uses framings like "Tailored Compensation: Salaries vary by client and candidate preference" / "Comp matched per engagement". Real consultancies disclose comp; placement shops obscure it.
+
+S6. **Cheap-country-only talent pool** — body restricts the candidate pool to a single low-comp region as the listing entity's talent base: "we connect top LATAM engineering talent", "Pakistan-only remote team", "Egypt-only", "South Asia-only". Distinct from the role being open to LATAM candidates among others.
+
+S7. **Low-code automation tools as required/strong-plus** — must-have or "strong-plus" tooling includes n8n, Zapier, Make, Bubble, or "custom automation frameworks" as a primary skill. Signals an internal-ops / RPA shop.
+
+S8. **Contractor placement with foreign client hours** — "Independent Contractor" engagement combined with required overlap to a foreign client's business hours stated in the body (e.g., "U.S. client business hours", "UK working hours required", "EST overlap mandatory"). Distinct from "team is mostly EST" cultural notes.
+
+# DECISION RULE
+
+1. Identify which of S1–S8 clearly apply. Do NOT count signals that are ambiguous or only weakly suggested.
+2. Count distinct signals.
+3. FAIL if the count is **≥ 2**. PASS otherwise.
+4. Your reason MUST start with "Signals: [list]. Count: N." so the decision is auditable.
+5. When in doubt, PASS — this filter only catches stacked patterns, never single signals.
+
+# DISCRIMINATOR
+
+A real consultancy / digital studio / holding company that hires the engineer onto its OWN team passes even when its body uses "our client" language to describe its customers. The candidate becomes an employee of the listing entity. A staffing shop places the candidate AT a separate client; the signals stack accordingly.
+
+# EXAMPLES
+
+PASS (1 signal): "Senior Web3 Software Engineer - MLabs. Our client is a pioneer in the blockchain sector ... Compensation: $170K - $195K. 7+ years experience." → S1 (our client is) only; comp disclosed cancels S5; senior bar real → 1 signal → "Signals: S1. Count: 1. PASS."
+
+PASS (1 signal): "AI Engineer (Contract-to-Hire) at Infinity (holding company). $75/hour for first 4 weeks (contract-to-hire trial). 5+ years engineering, 1+ year applied AI." → contractor-trial framing alone; no recruiter-shop language; comp disclosed; engineer joins Infinity → 0–1 signals → "Signals: none. Count: 0. PASS."
+
+PASS (0 signals): "Senior Backend Engineer at MoonPay. Build high-volume transaction broadcasting pipelines. 5+ years required. Stock options + competitive salary." → "Signals: none. Count: 0. PASS."
+
+PASS (studio framing, 0 signals): "Senior Full-Stack Engineer at Lazer (digital product studio with 180+ senior engineers). Embed with client teams to advise founders. $150-200k + benefits." → studio hires candidate as own employee; no placement framing → "Signals: none. Count: 0. PASS."
+
+FAIL (4 signals): "Full-Stack AI Engineer - Pavago. Our client is seeking ... U.S. client business hours ... 3+ years in software engineering ... Strong Plus: n8n, Zapier, Make, or custom automation frameworks." → "Signals: S1, S4, S7, S8. Count: 4. FAIL."
+
+FAIL (3 signals): "Senior Full-stack Engineer (Node/TS) at South Geeks. At South Geeks, we connect top LATAM engineering talent with innovative companies. Our client is a leading digital asset and cryptocurrency platform." → "Signals: S1, S2, S6. Count: 3. FAIL."
+
+FAIL (2 signals): "Hatch IT - Senior Software Engineer, Cryptography. hatch I.T. is partnering with VIA to find a Senior Software Engineer..." → "Signals: S1, S3. Count: 2. FAIL."
+
+FAIL (3 signals): "Founding Engineer (Fullstack) - Huzzle. At Huzzle, we connect high-performing B2B sales professionals with global companies. Engagement: Independent Contractor. 5+ years engineering, including at least 1 year at a senior level. Tailored Compensation: Salaries vary by client and candidate preference." → "Signals: S2, S4, S5. Count: 3. FAIL."`,
+};
+
 export function getEvaluationFilters(rates?: ExchangeRates): EvaluationFilter[] {
-  return [REMOTE_FILTER, buildCompensationFilter(rates ?? DEFAULT_RATES), ROLE_QUALITY_FILTER];
+  return [
+    REMOTE_FILTER,
+    buildCompensationFilter(rates ?? DEFAULT_RATES),
+    ROLE_QUALITY_FILTER,
+    CHEAP_SHOP_FILTER,
+  ];
 }

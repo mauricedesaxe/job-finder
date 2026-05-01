@@ -214,11 +214,19 @@ Surfaced during the 2026-05-01 walk-to-review pass. Each gap has at least one fi
 
 **Resolution:** Strengthened the remote filter to fail when "hybrid" is the framing default and remote is a qualified option ("options for", "with flexibility for"). Soft-pass example added for "Remote / Hybrid (Warsaw)" where hybrid and remote are parallel options — first attempt over-rejected `pass/vecten-ai-native-fullstack.md` which uses that pattern.
 
-### 5.8 Remaining FP gaps to chase next (≤ 15% target)
+### 5.8 Cheap-shop staffing FPs — DONE 2026-05-01
 
-Current FP rate sits at 15-17% across runs. The remaining steady-state FPs:
+**Evidence:** `reject/pavago-senior-backend.md`, `reject/huzzle-founding-engineer-staffing-framing.md`, `reject/via-hatchit-cryptography-engineer.md`, `reject/south-geeks-latam-staffing.md`. All four shared placement-framing language ("Our client is", "we connect [skill] with companies", "[Recruiter] is partnering with [Client]") that a naive rule would reject. But that naive rule was tried and reverted because it broke `pass/mlabs-engineer.md` and `pass/infinity-constellation-senior-fullstack.md` (legitimate consultancies / holding-cos that use the same framing).
 
-- `reject/wayflyer-backend-engineer.md` — generic Python/Django CRUD on financial data; LLM passes via fintech-trading-infra-ts because "core financial products" pattern-matches "financial backend services". Fix: stronger negative example contrasting CRUD-on-fintech against real trading infra.
+**Resolution:** Added `cheap-shop-placement` as a 4th LLM filter in `getEvaluationFilters()`. The filter defines 8 cheap-shop signals (recruiter-placement framing, recruiter-shop self-description, recruiter-name in title, junior-bar-as-senior, comp-obscured + placement, cheap-country-only talent pool, low-code-required, contractor + foreign client hours) and fails only when ≥ 2 stack. Pavago has 4 signals, Huzzle 3, South Geeks 3, Via-Hatch 2 — all reject. MLabs has only S1 (comp disclosed cancels S5) and Infinity has none — both still pass. The filter prompt asks the LLM to list signals in its reason field for auditability ("Signals: S1, S4. Count: 2. FAIL.").
+
+### 5.9 Remaining FP gaps to chase next (target ≤ 10%)
+
+After the cheap-shop filter landed, FP sits at 7.5–10% across runs. The remaining steady-state FPs are not staffing-shaped:
+
+- `reject/wayflyer-backend-engineer.md` — generic Python/Django CRUD on financial data; LLM passes via fintech-trading-infra-ts because "core financial products" pattern-matches "financial backend services". Fix: stronger negative example contrasting CRUD-on-fintech against real trading/real-time infra.
 - `reject/abacus-insights-ml-engineer.md` — borderline. Healthcare AI Platform with Databricks/PyTorch/TensorFlow training; reads as deep MLE but the body lists RAG/agents/LLMs. Hard to encode without breaking ClickUp/Harvey AI Platform passes.
-- `reject/pavago-senior-backend.md`, `reject/huzzle-founding-engineer-staffing-framing.md`, `reject/via-hatchit-cryptography-engineer.md`, `reject/south-geeks-latam-staffing.md` — staffing/recruiter framing. A general "Our client is seeking" rule was tried and reverted because it broke `pass/mlabs-engineer.md` and `pass/infinity-constellation-senior-fullstack.md` (legitimate consultancies/holding-cos that use the same framing). Need either (a) cheap-shop signals stacked with placement framing (low comp, 3y bar, n8n/Zapier nice-to-haves, LATAM-only talent pool) or (b) a tighter title-pattern rule for `[Recruiter] - [Role]`.
+- `reject/tem-senior-staff-agent-platform.md` — borderline. Senior Staff Agent Platform at an energy startup; combines product-engineering verbs ("ship flagship agentic capabilities") with operational ones ("runbook/on-call ownership"). Sometimes flips run-to-run.
+
+The errored "no function tool_call in response" cases (e.g. `lazer-engineer`, `vanta-senior-engineer` in some runs) are model-side flakes counted as wrong-direction by the suite. ROADMAP §1 tracks per-fixture flakiness measurement to separate these from real misclassifications.
 
