@@ -53,6 +53,13 @@ Save the fixture when the body has the actual signal:
    - Your read — pass / reject / borderline — in one sentence so he can confirm or correct fast.
 6. **Get the verdict.** Alex says pass / reject / skip / torn. If torn, **skip the fixture** — don't encode an ambiguous decision.
 7. **Save the fixture** to `src/pipeline/__integration__/fixtures/evaluate/{pass|reject}/<slug>.md` using the same Jina output. Naming: `<company-slug>-<role-slug>.md`, all lowercase, hyphenated.
+8. **Reflect the verdict in Notion.** Once Alex confirms a reject, move that page out of "To Review". Otherwise the same job will sit in the pile next session and (worse) get re-presented as if no decision had been made. Run at the end of each batch:
+
+   ```
+   bun scripts/mark-status.ts Rejected <url> [<url> ...]
+   ```
+
+   Pass jobs stay in "To Review" — Alex applies to them himself and updates the status when he does. Skipped/torn jobs also stay in "To Review" by default, unless he asks otherwise.
 
 ## Known signal classes (so you can pattern-match faster)
 
@@ -95,6 +102,7 @@ Alex tires fast on these walkthroughs after ~25-30 jobs. Watch for "I'm getting 
 - `scripts/list-to-review.ts` — pulls all current "To Review" entries from Notion, cross-references against existing fixture URLs, lists what's left.
 - `scripts/inspect-jobs.ts` — generic Notion-status dumper, useful for spot-checking other piles (Skipped, Auto-Rejected).
 - `scripts/find-candidates.ts` — pulls Rejected + Skipped piles with the same URL cross-reference.
+- `scripts/mark-status.ts` — moves one or more Notion pages to a given status (e.g. `bun scripts/mark-status.ts Rejected <url> ...`). Use at the end of a walk to flush the rejects out of "To Review".
 
 ## Roadmap items this skill is connected to
 
