@@ -278,13 +278,14 @@ The candidate is a polyglot whose primary stack is TypeScript/Node.js, with stro
 
 FAIL if ANY of these apply:
 
-1. ENTERPRISE STACK — the must-have/primary backend stack is dominated by enterprise languages with no modern alternative:
+1. ENTERPRISE STACK — the project's primary stack is dominated by enterprise / Microsoft-shop tooling:
    - "Spring Boot", "Spring Cloud", "Java/Spring", "JPA" required as the backend stack
-   - ".NET", "ASP.NET", "ASP.NET Core", "C#" required as the backend stack
+   - ".NET", "ASP.NET", "ASP.NET Core", "C#" required as the backend stack OR listed as a primary technology in the project's tech stack section
    - "Scala" required as the primary backend
    - "C++" in must-have backend skills
+   - "Angular" (any version) or "Kendo" listed as the primary frontend in the project's tech stack — Angular is a strong body-shop / enterprise-Microsoft tell, fire this even when the candidate's named role is backend, Python, or AI-focused
    - Backend language list contains ONLY enterprise languages (e.g., "Java, C#, or Scala") with no TS/Node/Go/Rust/Python as primary alternatives
-   PASS if Java/.NET/C#/Scala appears only as nice-to-have, secondary, or as one of many options that includes TS/Node/Go/Rust/Python.
+   PASS if Java/.NET/C#/Scala/Angular appears ONLY as a nice-to-have or peripheral mention AND the project's primary stack is modern (TS/Node/Go/Rust/Python with React/Vue/Svelte). FAIL if the project tech stack section reads as a Microsoft-shop stack (.NET + Angular + Azure + Kendo etc.) even when the candidate's named requirements are Python/AI — these listings are body-shops dressing up enterprise work as AI/Python roles.
 
 2. PURE ARCHITECT, NO IC — the role is purely architectural with no individual-contributor / hands-on coding work:
    - Title contains "Architect" AND responsibilities are vision/strategy/leadership only
@@ -336,6 +337,7 @@ PASS: "Senior Solana Blockchain Engineer; build the DOMA Protocol that tokenizes
 PASS: "Blockchain Engineer at MoonPay; transaction infrastructure at scale, manage transaction lifecycle; cross-chain integrations; MEV awareness desired" → wallet/payment platform, application-layer; MEV is a nice-to-have skill not core-protocol implementation (rule 9 does not fire) ✓
 FAIL: "Must have: Java 11+, Spring Boot, Spring Cloud" → enterprise Java/Spring stack ✓ enterprise
 FAIL: "10+ years experience; production with Java, Golang, or C++" → 10+ bar AND enterprise language alternatives without modern primary ✓
+FAIL: "Senior Software Engineer (Python, AI). Project Tech Stack: Azure Cloud, .NET 8, ASP.NET Core, Angular 18, Kendo, Python, LangChain, RAG. What You Bring: Python, FastAPI, GenAI/LLMs. Nice to have: .NET" → project stack is Microsoft-shop (.NET + Angular + Kendo + Azure) despite the candidate's named Python/AI role; body-shop placement, rule 1 fires ✓
 FAIL: "Software Engineer, Solutions — be the technical partner for top crypto teams" → Solutions Engineer customer-facing role
 FAIL: "Senior Staff Data Engineer; dbt, Snowflake, Airflow, Debezium primary" → pure data engineering, AI not central
 FAIL: "Senior Backend Developer (Node.js); ... оптимизация под нагрузкой ..." → Russian text in otherwise-English body, non-English-primary team
