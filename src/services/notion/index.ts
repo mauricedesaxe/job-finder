@@ -1,6 +1,6 @@
 export { buildNotionProperties, descriptionToBlocks } from "./builders";
-export { createNotionClient } from "./client";
-export { insertJob, updateJobStatus } from "./mutations";
+export { createNotionClient, type ResilientNotionClient } from "./client";
+export { insertJob, trashJob, updateJobStatus } from "./mutations";
 export {
   checkDuplicateUrl,
   checkRecentApplication,
@@ -9,6 +9,7 @@ export {
   queryJobsByCompany,
   queryJobsByStatus,
   queryJobsByStatusAndCompany,
+  queryJobsScrapedBefore,
   queryJobsWithApplicationDateNotStatus,
   queryRecentJobsByStatus,
 } from "./queries";

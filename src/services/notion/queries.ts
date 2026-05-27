@@ -1,9 +1,11 @@
-import type { Client } from "@notionhq/client";
+import { REAPPLY_WINDOW_MONTHS } from "../../config/recency";
+import { daysAgo, monthsAgo } from "../../dates";
 import type { JobStatus } from "../../types";
+import type { ResilientNotionClient } from "./client";
 import { extractRichText, type RichTextItem, toDateString } from "./helpers";
 
 export async function checkDuplicateUrl(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   url: string,
 ): Promise<boolean> {
@@ -19,12 +21,11 @@ export async function checkDuplicateUrl(
 }
 
 export async function checkRecentApplication(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<{ exists: boolean; pageUrl?: string }> {
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
   const response = await client.databases.query({
     database_id: databaseId,
@@ -36,7 +37,7 @@ export async function checkRecentApplication(
         },
         {
           property: "Application Date",
-          date: { on_or_after: toDateString(sixMonthsAgo) ?? "" },
+          date: { on_or_after: toDateString(reapplyCutoff) },
         },
       ],
     },
@@ -55,11 +56,10 @@ export async function checkRecentApplication(
 }
 
 export async function queryAppliedCompanies(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
 ): Promise<Set<string>> {
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
   const companies = new Set<string>();
   let cursor: string | undefined;
@@ -69,7 +69,7 @@ export async function queryAppliedCompanies(
       database_id: databaseId,
       filter: {
         property: "Application Date",
-        date: { on_or_after: toDateString(sixMonthsAgo) },
+        date: { on_or_after: toDateString(reapplyCutoff) },
       },
       start_cursor: cursor,
     });
@@ -91,7 +91,7 @@ export async function queryAppliedCompanies(
 }
 
 export async function queryJobsByStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
 ): Promise<Array<{ id: string; company: string }>> {
@@ -125,7 +125,7 @@ export async function queryJobsByStatus(
 }
 
 export async function queryJobsByStatusAndCompany(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
   company: string,
@@ -156,7 +156,7 @@ export async function queryJobsByStatusAndCompany(
 }
 
 export async function queryJobsWithApplicationDateNotStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   excludeStatus: JobStatus,
 ): Promise<Array<{ id: string; company: string }>> {
@@ -192,7 +192,7 @@ export async function queryJobsWithApplicationDateNotStatus(
 }
 
 export async function queryJobsByCompany(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<Array<{ title: string; url: string }>> {
@@ -227,7 +227,7 @@ export async function queryJobsByCompany(
 }
 
 export async function queryCompanyBlocked(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<boolean> {
@@ -244,14 +244,53 @@ export async function queryCompanyBlocked(
   return response.results.length > 0;
 }
 
+export async function queryJobsScrapedBefore(
+  client: ResilientNotionClient,
+  databaseId: string,
+  cutoff: Date,
+): Promise<
+  Array<{ id: string; status: string; applicationDate: string | null; dateScraped: string | null }>
+> {
+  const results: Array<{
+    id: string;
+    status: string;
+    applicationDate: string | null;
+    dateScraped: string | null;
+  }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: { property: "Date Scraped", date: { before: toDateString(cutoff) } },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const statusProp = page.properties.Status;
+      const selectVal = statusProp?.type === "select" ? statusProp.select : null;
+      const status = selectVal && "name" in selectVal ? (selectVal.name ?? "") : "";
+      const appProp = page.properties["Application Date"];
+      const applicationDate = appProp?.type === "date" ? (appProp.date?.start ?? null) : null;
+      const scrapedProp = page.properties["Date Scraped"];
+      const dateScraped = scrapedProp?.type === "date" ? (scrapedProp.date?.start ?? null) : null;
+      results.push({ id: page.id, status, applicationDate, dateScraped });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
 export async function queryRecentJobsByStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
   withinDays: number,
 ): Promise<Array<{ id: string; company: string }>> {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - withinDays);
+  const cutoff = daysAgo(withinDays);
 
   const results: Array<{ id: string; company: string }> = [];
   let cursor: string | undefined;

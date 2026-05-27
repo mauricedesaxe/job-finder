@@ -1,4 +1,4 @@
-import type { Client } from "@notionhq/client";
+import { COMPANY_APPLIED_UNSTALE_DAYS } from "../config/recency";
 import { logger } from "../logger";
 import {
   checkRecentApplication,
@@ -7,6 +7,7 @@ import {
   queryJobsByStatusAndCompany,
   queryJobsWithApplicationDateNotStatus,
   queryRecentJobsByStatus,
+  type ResilientNotionClient,
   updateJobStatus,
 } from "../services/notion";
 
@@ -20,7 +21,7 @@ export interface ReconcileStats {
 }
 
 export async function reconcile(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   label?: string,
 ): Promise<ReconcileStats> {
@@ -40,12 +41,12 @@ export async function reconcile(
     stats.applied++;
   }
 
-  // Pass 1: Unstale "Company Applied" (only recent jobs, within 30 days)
+  // Pass 1: Unstale "Company Applied" (only recently-scraped jobs)
   const companyAppliedJobs = await queryRecentJobsByStatus(
     client,
     databaseId,
     "Company Applied",
-    30,
+    COMPANY_APPLIED_UNSTALE_DAYS,
   );
   const companyAppliedCompanies = new Map<string, string[]>();
 

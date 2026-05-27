@@ -1,4 +1,6 @@
-import type { Client } from "@notionhq/client";
+import { REAPPLY_WINDOW_MONTHS } from "../config/recency";
+import { monthsAgo } from "../dates";
+import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
 export interface NotionCache {
@@ -13,7 +15,7 @@ export interface BuildCacheOptions {
 }
 
 export async function buildNotionCache(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   options: BuildCacheOptions = {},
 ): Promise<NotionCache> {
@@ -22,8 +24,7 @@ export async function buildNotionCache(
   const recentAppCompanies = new Set<string>();
   const jobsByCompany = new Map<string, string[]>();
 
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
   let itemsFetched = 0;
   let cursor: string | undefined;
@@ -74,7 +75,7 @@ export async function buildNotionCache(
       // Build recentAppCompanies
       if (company && appDate) {
         const appDateObj = new Date(appDate);
-        if (appDateObj >= sixMonthsAgo) {
+        if (appDateObj >= reapplyCutoff) {
           recentAppCompanies.add(company);
         }
       }

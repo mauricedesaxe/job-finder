@@ -3,6 +3,7 @@ import { config } from "./config";
 import { getEvaluationFilters } from "./config/evaluation";
 import { logger } from "./logger";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
+import { prune } from "./pipeline/prune";
 import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
@@ -32,6 +33,10 @@ async function main() {
   }
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
+
+  // Prune aged-out jobs before the full-table cache scan so the database (and
+  // every startup scan) stays bounded as scrape volume grows.
+  const pruneStats = await prune(notion, config.notionDatabaseId);
 
   // Pre-cache Notion data to avoid per-URL queries
   log.info("building notion cache");
@@ -132,6 +137,7 @@ async function main() {
   log.info({ stats }, "scrape summary");
   log.info({ reconcile: preReconcileStats }, "pre-scrape reconcile summary");
   log.info({ reconcile: postReconcileStats }, "post-scrape reconcile summary");
+  log.info({ prune: pruneStats }, "prune summary");
   log.info({ tokens: tokenSummary }, "token usage summary");
 
   if (config.slackWebhookUrl) {
@@ -139,6 +145,7 @@ async function main() {
       config.slackWebhookUrl,
       stats,
       postReconcileStats,
+      pruneStats,
       {
         urlCount: urlMap.size,
         searchErrors,

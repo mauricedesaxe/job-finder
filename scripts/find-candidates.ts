@@ -1,10 +1,10 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { Client } from "@notionhq/client";
+import { createNotionClient } from "../src/services/notion";
 
 const token = process.env.NOTION_TOKEN;
 const databaseId = process.env.NOTION_DATABASE_ID;
 if (!token || !databaseId) throw new Error("missing env");
-const notion = new Client({ auth: token });
+const notion = createNotionClient(token);
 
 const FIX_DIRS = [
   "src/pipeline/__integration__/fixtures/evaluate/pass",

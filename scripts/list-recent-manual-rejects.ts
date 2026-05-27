@@ -11,11 +11,11 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { Client } from "@notionhq/client";
+import { createNotionClient } from "../src/services/notion";
 
 const token = process.env.NOTION_TOKEN!;
 const databaseId = process.env.NOTION_DATABASE_ID!;
-const notion = new Client({ auth: token });
+const notion = createNotionClient(token);
 
 const limitArg = Number.parseInt(process.argv[2] ?? "", 10);
 const LIMIT = Number.isFinite(limitArg) && limitArg > 0 ? limitArg : 20;

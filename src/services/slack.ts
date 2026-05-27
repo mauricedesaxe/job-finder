@@ -1,5 +1,6 @@
 import { logger } from "../logger";
 import type { ScrapeStats } from "../pipeline/processUrl";
+import type { PruneStats } from "../pipeline/prune";
 import type { ReconcileStats } from "../pipeline/reconcile";
 import type { TokenSummary } from "./tokenTracker";
 
@@ -27,6 +28,7 @@ function formatTokens(n: number): string {
 function buildRunReportBlocks(
   stats: ScrapeStats,
   reconcileStats: ReconcileStats,
+  pruneStats: PruneStats,
   search: SearchMeta,
   durationMs: number,
   tokens?: TokenSummary,
@@ -73,6 +75,24 @@ function buildRunReportBlocks(
           text: `*Company Applied:* ${reconcileStats.companyApplied}`,
         },
         { type: "mrkdwn", text: `*Archived:* ${reconcileStats.archived}` },
+      ],
+    },
+    { type: "divider" },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*Pruning*",
+      },
+    },
+    {
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: `*Trashed:* ${pruneStats.pruned}` },
+        { type: "mrkdwn", text: `*Failed:* ${pruneStats.failed}` },
+        { type: "mrkdwn", text: `*Scanned:* ${pruneStats.scanned}` },
+        { type: "mrkdwn", text: `*Kept (blocked):* ${pruneStats.keptBlocked}` },
+        { type: "mrkdwn", text: `*Kept (locked):* ${pruneStats.keptLocked}` },
       ],
     },
   ];
@@ -166,6 +186,7 @@ export async function sendRunReport(
   webhookUrl: string,
   stats: ScrapeStats,
   reconcileStats: ReconcileStats,
+  pruneStats: PruneStats,
   search: SearchMeta,
   durationMs: number,
   tokens?: TokenSummary,
@@ -175,7 +196,14 @@ export async function sendRunReport(
       attachments: [
         {
           color: getColor(stats),
-          blocks: buildRunReportBlocks(stats, reconcileStats, search, durationMs, tokens),
+          blocks: buildRunReportBlocks(
+            stats,
+            reconcileStats,
+            pruneStats,
+            search,
+            durationMs,
+            tokens,
+          ),
         },
       ],
     });
