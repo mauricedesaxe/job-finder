@@ -35,3 +35,7 @@ export async function insertJob(
 
   return response.id;
 }
+
+export async function trashJob(client: ResilientNotionClient, pageId: string): Promise<void> {
+  await client.pages.update({ page_id: pageId, archived: true });
+}

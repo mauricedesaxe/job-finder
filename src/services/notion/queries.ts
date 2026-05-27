@@ -1,5 +1,5 @@
 import { REAPPLY_WINDOW_MONTHS } from "../../config/recency";
-import { monthsAgo } from "../../dates";
+import { daysAgo, monthsAgo } from "../../dates";
 import type { JobStatus } from "../../types";
 import type { ResilientNotionClient } from "./client";
 import { extractRichText, type RichTextItem, toDateString } from "./helpers";
@@ -244,14 +244,53 @@ export async function queryCompanyBlocked(
   return response.results.length > 0;
 }
 
+export async function queryJobsScrapedBefore(
+  client: ResilientNotionClient,
+  databaseId: string,
+  cutoff: Date,
+): Promise<
+  Array<{ id: string; status: string; applicationDate: string | null; dateScraped: string | null }>
+> {
+  const results: Array<{
+    id: string;
+    status: string;
+    applicationDate: string | null;
+    dateScraped: string | null;
+  }> = [];
+  let cursor: string | undefined;
+
+  do {
+    const response = await client.databases.query({
+      database_id: databaseId,
+      filter: { property: "Date Scraped", date: { before: toDateString(cutoff) } },
+      start_cursor: cursor,
+    });
+
+    for (const page of response.results) {
+      if (!("properties" in page)) continue;
+      const statusProp = page.properties.Status;
+      const selectVal = statusProp?.type === "select" ? statusProp.select : null;
+      const status = selectVal && "name" in selectVal ? (selectVal.name ?? "") : "";
+      const appProp = page.properties["Application Date"];
+      const applicationDate = appProp?.type === "date" ? (appProp.date?.start ?? null) : null;
+      const scrapedProp = page.properties["Date Scraped"];
+      const dateScraped = scrapedProp?.type === "date" ? (scrapedProp.date?.start ?? null) : null;
+      results.push({ id: page.id, status, applicationDate, dateScraped });
+    }
+
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return results;
+}
+
 export async function queryRecentJobsByStatus(
   client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
   withinDays: number,
 ): Promise<Array<{ id: string; company: string }>> {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - withinDays);
+  const cutoff = daysAgo(withinDays);
 
   const results: Array<{ id: string; company: string }> = [];
   let cursor: string | undefined;
