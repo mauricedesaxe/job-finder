@@ -11,9 +11,8 @@
 // Useful as a companion to /walk-to-review: once verdicts are saved as
 // fixtures, use this to reflect them in Notion (To Review → Rejected /
 // Applied / Skipped, etc).
-import { Client } from "@notionhq/client";
+import { createNotionClient, type ResilientNotionClient, updateJobStatus } from "../src/services/notion";
 import { JOB_STATUSES, type JobStatus } from "../src/types";
-import { updateJobStatus } from "../src/services/notion/mutations";
 
 const token = process.env.NOTION_TOKEN;
 const databaseId = process.env.NOTION_DATABASE_ID;
@@ -23,7 +22,7 @@ if (!token || !databaseId) {
 }
 
 async function findPageIdByUrl(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   url: string,
 ): Promise<string | null> {
@@ -48,7 +47,7 @@ if (!(JOB_STATUSES as readonly string[]).includes(statusArg)) {
 }
 const status = statusArg as JobStatus;
 
-const notion = new Client({ auth: token });
+const notion = createNotionClient(token);
 
 let updated = 0;
 let missing = 0;

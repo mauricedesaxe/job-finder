@@ -13,7 +13,6 @@
  * skipped. Re-running is safe.
  */
 
-import { Client } from "@notionhq/client";
 import { atsApiRateLimiter, atsApiSemaphore, Semaphore } from "../src/concurrency";
 import { evaluateJob, type JobEvaluation } from "../src/pipeline/evaluate";
 import { parseJobDetails, scrapeJobPage } from "../src/pipeline/scrape";
@@ -24,7 +23,7 @@ import {
   fetchAtsData,
   formatAtsBlock,
 } from "../src/services/ats";
-import { updateJobStatus } from "../src/services/notion";
+import { createNotionClient, updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
 
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -43,7 +42,7 @@ if (!token || !databaseId || !jinaApiKey || !openrouterApiKey) {
   process.exit(1);
 }
 
-const notion = new Client({ auth: token });
+const notion = createNotionClient(token);
 
 type ToReview = { id: string; title: string; company: string; url: string };
 
