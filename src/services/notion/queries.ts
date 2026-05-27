@@ -1,4 +1,6 @@
 import type { Client } from "@notionhq/client";
+import { REAPPLY_WINDOW_MONTHS } from "../../config/recency";
+import { monthsAgo } from "../../dates";
 import type { JobStatus } from "../../types";
 import { extractRichText, type RichTextItem, toDateString } from "./helpers";
 
@@ -23,8 +25,7 @@ export async function checkRecentApplication(
   databaseId: string,
   company: string,
 ): Promise<{ exists: boolean; pageUrl?: string }> {
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
   const response = await client.databases.query({
     database_id: databaseId,
@@ -36,7 +37,7 @@ export async function checkRecentApplication(
         },
         {
           property: "Application Date",
-          date: { on_or_after: toDateString(sixMonthsAgo) ?? "" },
+          date: { on_or_after: toDateString(reapplyCutoff) },
         },
       ],
     },
@@ -58,8 +59,7 @@ export async function queryAppliedCompanies(
   client: Client,
   databaseId: string,
 ): Promise<Set<string>> {
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
   const companies = new Set<string>();
   let cursor: string | undefined;
@@ -69,7 +69,7 @@ export async function queryAppliedCompanies(
       database_id: databaseId,
       filter: {
         property: "Application Date",
-        date: { on_or_after: toDateString(sixMonthsAgo) },
+        date: { on_or_after: toDateString(reapplyCutoff) },
       },
       start_cursor: cursor,
     });
