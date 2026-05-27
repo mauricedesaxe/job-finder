@@ -1,6 +1,6 @@
-import type { Client } from "@notionhq/client";
 import { REAPPLY_WINDOW_MONTHS } from "../config/recency";
 import { monthsAgo } from "../dates";
+import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
 export interface NotionCache {
@@ -15,7 +15,7 @@ export interface BuildCacheOptions {
 }
 
 export async function buildNotionCache(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   options: BuildCacheOptions = {},
 ): Promise<NotionCache> {

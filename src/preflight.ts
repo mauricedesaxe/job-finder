@@ -1,5 +1,5 @@
-import type { Client } from "@notionhq/client";
 import { logger } from "./logger";
+import type { ResilientNotionClient } from "./services/notion";
 import { JOB_STATUSES } from "./types";
 
 const log = logger.child({ component: "preflight" });
@@ -18,7 +18,10 @@ const EXPECTED_PROPERTIES: Record<string, string> = {
   "Application Date": "date",
 };
 
-export async function runPreflight(notion: Client, databaseId: string): Promise<void> {
+export async function runPreflight(
+  notion: ResilientNotionClient,
+  databaseId: string,
+): Promise<void> {
   log.info("running preflight checks");
 
   // Retrieve database schema (also validates token + database access)

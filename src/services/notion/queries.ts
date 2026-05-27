@@ -1,11 +1,11 @@
-import type { Client } from "@notionhq/client";
 import { REAPPLY_WINDOW_MONTHS } from "../../config/recency";
 import { monthsAgo } from "../../dates";
 import type { JobStatus } from "../../types";
+import type { ResilientNotionClient } from "./client";
 import { extractRichText, type RichTextItem, toDateString } from "./helpers";
 
 export async function checkDuplicateUrl(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   url: string,
 ): Promise<boolean> {
@@ -21,7 +21,7 @@ export async function checkDuplicateUrl(
 }
 
 export async function checkRecentApplication(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<{ exists: boolean; pageUrl?: string }> {
@@ -56,7 +56,7 @@ export async function checkRecentApplication(
 }
 
 export async function queryAppliedCompanies(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
 ): Promise<Set<string>> {
   const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
@@ -91,7 +91,7 @@ export async function queryAppliedCompanies(
 }
 
 export async function queryJobsByStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
 ): Promise<Array<{ id: string; company: string }>> {
@@ -125,7 +125,7 @@ export async function queryJobsByStatus(
 }
 
 export async function queryJobsByStatusAndCompany(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
   company: string,
@@ -156,7 +156,7 @@ export async function queryJobsByStatusAndCompany(
 }
 
 export async function queryJobsWithApplicationDateNotStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   excludeStatus: JobStatus,
 ): Promise<Array<{ id: string; company: string }>> {
@@ -192,7 +192,7 @@ export async function queryJobsWithApplicationDateNotStatus(
 }
 
 export async function queryJobsByCompany(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<Array<{ title: string; url: string }>> {
@@ -227,7 +227,7 @@ export async function queryJobsByCompany(
 }
 
 export async function queryCompanyBlocked(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   company: string,
 ): Promise<boolean> {
@@ -245,7 +245,7 @@ export async function queryCompanyBlocked(
 }
 
 export async function queryRecentJobsByStatus(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   status: JobStatus,
   withinDays: number,

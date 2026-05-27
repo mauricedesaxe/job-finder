@@ -1,23 +1,19 @@
-import type { Client } from "@notionhq/client";
 import {
   atsApiRateLimiter,
   atsApiSemaphore,
   isRetryableJina,
   isRetryableLLM,
-  isRetryableNotion,
   jinaBreaker,
   jinaReaderSemaphore,
   llmBreaker,
   llmSemaphore,
-  notionBreaker,
-  notionRateLimiter,
   withRetry,
 } from "../concurrency";
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
-import { insertJob } from "../services/notion";
+import { insertJob, type ResilientNotionClient } from "../services/notion";
 import type { NotionCacheUpdater } from "../services/notionCache";
 import type { TokenTracker } from "../services/tokenTracker";
 import { checkFuzzyDuplicate } from "./dedup";
@@ -48,7 +44,7 @@ export interface ScrapeStats {
 }
 
 export interface ProcessContext {
-  notion: Client;
+  notion: ResilientNotionClient;
   config: JobFinderConfig;
   syncer: NotionCacheUpdater;
   seenUrls: Set<string>;
@@ -106,13 +102,7 @@ export async function processUrl(
           { url, title: job.title, company: job.company, reason: atsCheck.reason },
           "rejected (ats)",
         );
-        await notionRateLimiter.run(() =>
-          notionBreaker.run(() =>
-            withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
-              shouldRetry: isRetryableNotion,
-            }),
-          ),
-        );
+        await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
         return "rejected";
       }
     }
@@ -125,13 +115,7 @@ export async function processUrl(
       { url, title: job.title, company: job.company, reason: structural.reason },
       "rejected (structural)",
     );
-    await notionRateLimiter.run(() =>
-      notionBreaker.run(() =>
-        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
-          shouldRetry: isRetryableNotion,
-        }),
-      ),
-    );
+    await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
     return "rejected";
   }
 
@@ -162,13 +146,7 @@ export async function processUrl(
       { url, title: job.title, company: job.company, reason: evaluation.reason },
       "rejected",
     );
-    await notionRateLimiter.run(() =>
-      notionBreaker.run(() =>
-        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"), {
-          shouldRetry: isRetryableNotion,
-        }),
-      ),
-    );
+    await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
     return "rejected";
   }
 
@@ -214,39 +192,21 @@ export async function processUrl(
   // Company blocked (cache lookup)
   if (cache.blockedCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
-    await notionRateLimiter.run(() =>
-      notionBreaker.run(() =>
-        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Archived"), {
-          shouldRetry: isRetryableNotion,
-        }),
-      ),
-    );
+    await insertJob(notion, config.notionDatabaseId, job, "Archived");
     return "archived";
   }
 
   // Recent application (cache lookup)
   if (cache.recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
-    await notionRateLimiter.run(() =>
-      notionBreaker.run(() =>
-        withRetry(() => insertJob(notion, config.notionDatabaseId, job, "Company Applied"), {
-          shouldRetry: isRetryableNotion,
-        }),
-      ),
-    );
+    await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
     syncer.addTitle(job.company, job.title);
     syncer.addUrl(url);
     return "companyApplied";
   }
 
   // Insert
-  await notionRateLimiter.run(() =>
-    notionBreaker.run(() =>
-      withRetry(() => insertJob(notion, config.notionDatabaseId, job), {
-        shouldRetry: isRetryableNotion,
-      }),
-    ),
-  );
+  await insertJob(notion, config.notionDatabaseId, job);
   log.info({ url, title: job.title, company: job.company }, "inserted");
 
   // Update cache for within-run dedup

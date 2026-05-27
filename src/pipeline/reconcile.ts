@@ -1,4 +1,3 @@
-import type { Client } from "@notionhq/client";
 import { COMPANY_APPLIED_UNSTALE_DAYS } from "../config/recency";
 import { logger } from "../logger";
 import {
@@ -8,6 +7,7 @@ import {
   queryJobsByStatusAndCompany,
   queryJobsWithApplicationDateNotStatus,
   queryRecentJobsByStatus,
+  type ResilientNotionClient,
   updateJobStatus,
 } from "../services/notion";
 
@@ -21,7 +21,7 @@ export interface ReconcileStats {
 }
 
 export async function reconcile(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   label?: string,
 ): Promise<ReconcileStats> {

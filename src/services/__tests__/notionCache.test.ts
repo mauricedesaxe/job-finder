@@ -42,7 +42,7 @@ function mockClient(pages: ReturnType<typeof makePage>[]) {
         next_cursor: null,
       }),
     },
-  } as unknown as import("@notionhq/client").Client;
+  } as unknown as import("../notion/client").ResilientNotionClient;
 }
 
 describe("buildNotionCache", () => {

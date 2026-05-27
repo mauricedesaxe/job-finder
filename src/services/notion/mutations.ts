@@ -1,10 +1,10 @@
-import type { Client } from "@notionhq/client";
 import type { CreatePageParameters } from "@notionhq/client/build/src/api-endpoints";
 import type { JobListing, JobStatus } from "../../types";
 import { buildNotionProperties, descriptionToBlocks } from "./builders";
+import type { ResilientNotionClient } from "./client";
 
 export async function updateJobStatus(
-  client: Client,
+  client: ResilientNotionClient,
   pageId: string,
   status: JobStatus,
 ): Promise<void> {
@@ -17,7 +17,7 @@ export async function updateJobStatus(
 }
 
 export async function insertJob(
-  client: Client,
+  client: ResilientNotionClient,
   databaseId: string,
   job: JobListing,
   status: JobStatus = "To Review",

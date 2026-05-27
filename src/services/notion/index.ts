@@ -1,5 +1,5 @@
 export { buildNotionProperties, descriptionToBlocks } from "./builders";
-export { createNotionClient } from "./client";
+export { createNotionClient, type ResilientNotionClient } from "./client";
 export { insertJob, updateJobStatus } from "./mutations";
 export {
   checkDuplicateUrl,
