@@ -1,43 +1,42 @@
-export const SEARCH_KEYWORDS = [
-  // Crypto/Web3 - TS/Node
-  "senior backend engineer crypto",
-  "senior fullstack engineer web3",
-  "senior typescript engineer blockchain",
-  "lead backend engineer defi",
-  "senior software engineer defi",
-  "senior software engineer web3",
-  "typescript engineer crypto",
-  "node.js engineer blockchain",
-  "senior engineer solana",
-  "senior engineer ethereum",
-  "fullstack engineer defi",
-  "backend engineer blockchain infrastructure",
-  "distributed systems engineer crypto",
-  "distributed systems engineer web3",
-  // Non-crypto distributed systems - TS/Node
-  "distributed systems engineer typescript",
-  "distributed systems engineer node.js",
-  "backend engineer real-time systems typescript",
-  "senior backend engineer event-driven typescript",
-  "senior backend engineer message queue",
-  // Fintech/trading infra - TS/Node
-  "backend engineer trading platform typescript",
-  "backend engineer market data",
-  "senior engineer fintech typescript",
-  "real-time systems engineer fintech",
-  "backend engineer quantitative finance",
-  // AI engineering
+const EARLY_STAGE_PRODUCT_KEYWORDS = [
+  "senior product engineer",
+  "staff product engineer",
+  "lead product engineer",
+  "founding engineer",
+  "founding full stack engineer",
+  "founding product engineer",
+  "senior full stack engineer startup",
+  "senior fullstack engineer typescript react",
+  "product engineer typescript",
+  "product engineer react",
+  "senior software engineer seed stage",
+  "senior engineer series a startup",
+  "senior full stack engineer next.js",
+  "senior typescript engineer product team",
+  "senior node.js engineer product",
+  "full stack engineer 0 to 1",
+];
+
+const APPLIED_AI_PRODUCT_KEYWORDS = [
   "senior AI engineer",
   "senior engineer LLM",
+  "applied AI engineer",
+  "AI product engineer",
+  "founding AI engineer",
   "senior backend engineer AI",
-  "AI infrastructure engineer",
+  "fullstack engineer AI",
   "senior engineer RAG",
   "senior engineer AI agents",
-  "fullstack engineer AI",
-  "senior engineer vector database",
-  "senior engineer prompt engineering",
   "senior engineer AI platform",
+  "LLM application engineer",
+  "AI engineer typescript",
+  "senior engineer LLM evaluation",
+  "senior engineer agentic workflows",
+  "AI engineer node.js",
+  "senior engineer LLM products",
 ];
+
+export const SEARCH_KEYWORDS = [...EARLY_STAGE_PRODUCT_KEYWORDS, ...APPLIED_AI_PRODUCT_KEYWORDS];
 
 export const SEARCH_DOMAINS = [
   "jobs.ashbyhq.com",
