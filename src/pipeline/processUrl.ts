@@ -13,9 +13,9 @@ import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
+import { traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import type { NotionCacheUpdater } from "../services/notionCache";
-import type { TokenTracker } from "../services/tokenTracker";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -48,8 +48,15 @@ export interface ProcessContext {
   config: JobFinderConfig;
   syncer: NotionCacheUpdater;
   seenUrls: Set<string>;
-  tracker?: TokenTracker;
   filters?: EvaluationFilter[];
+}
+
+interface ProcessResultState {
+  source: string;
+  ats: boolean;
+  retries: number;
+  outcome: ProcessResult;
+  profile: string;
 }
 
 export async function processUrl(
@@ -57,45 +64,74 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { notion, config, syncer, seenUrls, tracker } = ctx;
-  const cache = syncer.cache;
+  const { seenUrls } = ctx;
+  const cache = ctx.syncer.cache;
 
-  // In-run dedup
   if (seenUrls.has(url)) return "skipped";
   seenUrls.add(url);
 
-  // Cache-based URL dedup
   if (cache.existingUrls.has(url)) {
     log.debug({ url }, "skipped (exists in cache)");
     return "skipped";
   }
 
-  // Scrape
+  const state: ProcessResultState = {
+    source: "",
+    ats: false,
+    retries: 0,
+    outcome: "errored",
+    profile: "",
+  };
+
+  return await traced(
+    {
+      name: "process_job",
+      runType: "chain",
+      metadata: { url, discovery_keyword: keyword },
+      finalMeta: () => ({
+        source: state.source,
+        ats_presence: state.ats,
+        outcome: state.outcome,
+        matched_profile: state.profile,
+        retry_count: state.retries,
+      }),
+    },
+    async () => processJobBody(url, keyword, ctx, state),
+  );
+}
+
+async function processJobBody(
+  url: string,
+  keyword: string,
+  ctx: ProcessContext,
+  state: ProcessResultState,
+): Promise<{ data: ProcessResult }> {
+  const { notion, config, syncer } = ctx;
+  const cache = syncer.cache;
+
   const markdown = await jinaReaderSemaphore.run(() =>
     jinaBreaker.run(() =>
       withRetry(() => scrapeJobPage(url, config), {
         shouldRetry: isRetryableJina,
-        onRetry: (a) => log.warn({ url, attempt: a }, "jina scrape retry"),
+        onRetry: (a) => {
+          state.retries++;
+          log.warn({ url, attempt: a }, "jina scrape retry");
+        },
       }),
     ),
   );
   const job = parseJobDetails(markdown, url, keyword);
+  state.source = job.source;
 
-  // ATS-native enrichment — query the ATS public API for clean structured
-  // location/workplaceType/country data and prepend it to the body before the
-  // LLM eval. Failures fall back to Jina-only.
   if (config.enableAtsEnrichment) {
     const atsData = await atsApiSemaphore.run(() =>
       atsApiRateLimiter.run(() => fetchAtsData(url, { title: job.title })),
     );
     if (atsData) {
+      state.ats = true;
       log.debug({ url, source: atsData.source }, "ats enriched");
       job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
 
-      // ATS hard reject — workplaceType=OnSite is decided deterministically.
-      // The location-eligibility prompt explicitly tells the LLM to discount
-      // ATS metadata in favour of body text, which means OnSite signals leak
-      // through whenever the body is silent about workplace. Catch them here.
       const atsCheck = atsStructuralFilter(atsData);
       if (!atsCheck.pass) {
         log.info(
@@ -103,12 +139,12 @@ export async function processUrl(
           "rejected (ats)",
         );
         await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
-        return "rejected";
+        state.outcome = "rejected";
+        return { data: "rejected" };
       }
     }
   }
 
-  // Structural pre-filter — deterministic checks (aggregators, etc.) before paying for LLM eval
   const structural = structuralFilter(job);
   if (!structural.pass) {
     log.info(
@@ -116,22 +152,24 @@ export async function processUrl(
       "rejected (structural)",
     );
     await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
-    return "rejected";
+    state.outcome = "rejected";
+    return { data: "rejected" };
   }
 
-  // Evaluate (profiles run in parallel internally)
   const evaluation = await llmSemaphore.run(() =>
     llmBreaker.run(() =>
       withRetry(
         () =>
           evaluateJob(job, config.openrouterApiKey, {
-            tracker,
             filters: ctx.filters,
             model: config.llmModel,
           }),
         {
           shouldRetry: isRetryableLLM,
-          onRetry: (a) => log.warn({ url, attempt: a }, "llm eval retry"),
+          onRetry: (a) => {
+            state.retries++;
+            log.warn({ url, attempt: a }, "llm eval retry");
+          },
         },
       ),
     ),
@@ -147,15 +185,18 @@ export async function processUrl(
       "rejected",
     );
     await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
-    return "rejected";
+    state.outcome = "rejected";
+    return { data: "rejected" };
   }
 
-  // Enrich
   const enriched = await llmSemaphore.run(() =>
     llmBreaker.run(() =>
-      withRetry(() => enrichJob(job, config.openrouterApiKey, tracker, config.llmModel), {
+      withRetry(() => enrichJob(job, config.openrouterApiKey, config.llmModel), {
         shouldRetry: isRetryableLLM,
-        onRetry: (a) => log.warn({ url, attempt: a }, "llm enrich retry"),
+        onRetry: (a) => {
+          state.retries++;
+          log.warn({ url, attempt: a }, "llm enrich retry");
+        },
       }),
     ),
   );
@@ -164,20 +205,19 @@ export async function processUrl(
   job.description = enriched.description;
   job.location = enriched.location;
 
-  // Fuzzy dedup (cache-based company lookup, LLM for title comparison)
   const existingTitles = cache.jobsByCompany.get(job.company) ?? [];
   if (existingTitles.length > 0) {
     const dedup = await llmSemaphore.run(() =>
       withRetry(
         () =>
-          checkFuzzyDuplicate(
-            job.title,
-            existingTitles,
-            config.openrouterApiKey,
-            tracker,
-            config.llmModel,
-          ),
-        { shouldRetry: isRetryableLLM },
+          checkFuzzyDuplicate(job.title, existingTitles, config.openrouterApiKey, config.llmModel),
+        {
+          shouldRetry: isRetryableLLM,
+          onRetry: (a) => {
+            state.retries++;
+            log.warn({ url, attempt: a }, "llm dedup retry");
+          },
+        },
       ),
     );
     if (dedup.isDuplicate) {
@@ -185,33 +225,34 @@ export async function processUrl(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
-      return "duplicated";
+      state.outcome = "duplicated";
+      return { data: "duplicated" };
     }
   }
 
-  // Company blocked (cache lookup)
   if (cache.blockedCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
     await insertJob(notion, config.notionDatabaseId, job, "Archived");
-    return "archived";
+    state.outcome = "archived";
+    return { data: "archived" };
   }
 
-  // Recent application (cache lookup)
   if (cache.recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
     await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
     syncer.addTitle(job.company, job.title);
     syncer.addUrl(url);
-    return "companyApplied";
+    state.outcome = "companyApplied";
+    return { data: "companyApplied" };
   }
 
-  // Insert
   await insertJob(notion, config.notionDatabaseId, job);
   log.info({ url, title: job.title, company: job.company }, "inserted");
 
-  // Update cache for within-run dedup
   syncer.addTitle(job.company, job.title);
   syncer.addUrl(url);
 
-  return "inserted";
+  state.outcome = "inserted";
+  state.profile = evaluation.profileName ?? "";
+  return { data: "inserted" };
 }

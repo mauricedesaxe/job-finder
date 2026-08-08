@@ -82,7 +82,7 @@ describe("ATS-aware remote-europe-eligible filter (integration)", () => {
             if (!atsCheck.pass) {
               return { name, expected, actual: false, reason: atsCheck.reason };
             }
-            const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
+            const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, {
               temperature: 0,
               model: LLM_MODEL,
             });

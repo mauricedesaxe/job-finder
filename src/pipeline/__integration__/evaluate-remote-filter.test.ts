@@ -22,7 +22,7 @@ describe("remote-europe-eligible filter (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → PASS`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/pass/${file}`);
-      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
+      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, {
         temperature: 0,
         model: LLM_MODEL,
       });
@@ -34,7 +34,7 @@ describe("remote-europe-eligible filter (integration)", () => {
     const name = basename(file, ".md");
     test(`${name} → FAIL`, async () => {
       const job = await loadFixture(`${FIXTURES_DIR}/reject/${file}`);
-      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
+      const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, {
         temperature: 0,
         model: LLM_MODEL,
       });

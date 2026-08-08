@@ -1,7 +1,7 @@
 import type OpenAI from "openai";
 import { logger } from "../logger";
+import { traced } from "../services/langsmith";
 import { getClient } from "../services/llm";
-import type { TokenTracker } from "../services/tokenTracker";
 import type { JobListing } from "../types";
 
 export interface JobEnrichment {
@@ -61,7 +61,6 @@ const ENRICH_TOOL: OpenAI.ChatCompletionTool = {
 export async function enrichJob(
   job: JobListing,
   apiKey: string,
-  tracker?: TokenTracker,
   model?: string,
 ): Promise<JobEnrichment> {
   const client = getClient(apiKey);
@@ -75,36 +74,44 @@ URL: ${job.url}
 Raw Description:
 ${job.description}`;
 
-  const response = await client.chat.completions.create({
-    model: modelName,
-    max_tokens: 1024,
-    messages: [
-      { role: "system", content: ENRICH_PROMPT },
-      { role: "user", content: userMessage },
-    ],
-    tools: [ENRICH_TOOL],
-    tool_choice: { type: "function", function: { name: "enrich_job" } },
-  });
-
-  if (response.usage) {
-    tracker?.add(response.model ?? modelName, "enrichment", {
-      input_tokens: response.usage.prompt_tokens,
-      output_tokens: response.usage.completion_tokens,
+  return traced({ name: "enrich", runType: "llm", model: { name: modelName } }, async () => {
+    const response = await client.chat.completions.create({
+      model: modelName,
+      max_tokens: 1024,
+      messages: [
+        { role: "system", content: ENRICH_PROMPT },
+        { role: "user", content: userMessage },
+      ],
+      tools: [ENRICH_TOOL],
+      tool_choice: { type: "function", function: { name: "enrich_job" } },
     });
-  } else {
-    log.warn({ model: modelName }, "No usage data in response");
-  }
 
-  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  if (!toolCall || toolCall.type !== "function") {
-    throw new Error("Enrichment failed: no function tool_call in response");
-  }
+    const usage = response.usage;
+    if (!usage) {
+      log.warn({ model: modelName }, "No usage data in response");
+    }
 
-  try {
-    return JSON.parse(toolCall.function.arguments) as JobEnrichment;
-  } catch {
-    throw new Error(
-      `Enrichment failed: could not parse tool arguments: ${toolCall.function.arguments}`,
-    );
-  }
+    const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+    if (!toolCall || toolCall.type !== "function") {
+      throw new Error("Enrichment failed: no function tool_call in response");
+    }
+
+    try {
+      const data = JSON.parse(toolCall.function.arguments) as JobEnrichment;
+      return {
+        data,
+        usage: usage
+          ? {
+              input: usage.prompt_tokens,
+              output: usage.completion_tokens,
+              total: usage.total_tokens,
+            }
+          : undefined,
+      };
+    } catch {
+      throw new Error(
+        `Enrichment failed: could not parse tool arguments: ${toolCall.function.arguments}`,
+      );
+    }
+  });
 }

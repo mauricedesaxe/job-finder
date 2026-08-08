@@ -38,8 +38,9 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "openai": "6.33.0",
     "@notionhq/client": "2.3.0",
+    "langsmith": "0.8.8",
+    "openai": "6.33.0",
     "pino": "^10.3.1",
     "zod": "4.3.6"
   }

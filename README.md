@@ -8,6 +8,7 @@ Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever,
 - A [Notion integration](https://www.notion.so/my-integrations) with read/write access to your database — you'll need the **Integration Token** and **Database ID**
 - A [Jina AI](https://jina.ai) API key — used for searching and scraping job pages
 - An [OpenRouter](https://openrouter.ai) API key — used for evaluating, enriching, and deduplicating jobs via LLM (model configurable via `LLM_MODEL` env var, defaults to `google/gemini-2.5-flash`)
+- A [LangSmith](https://smith.langchain.com) API key — every processed job is traced for inspection; usage and cost replace the old in-run token tracker
 
 ## Notion Database Setup
 
@@ -109,6 +110,9 @@ bun run scrape
    - `JINA_API_KEY`
    - `OPENROUTER_API_KEY`
    - `LLM_MODEL` (optional, defaults to `google/gemini-2.5-flash`)
+   - `LANGSMITH_API_KEY` (required — every processed job is traced)
+   - `LANGSMITH_ENDPOINT` (optional, defaults to `https://eu.api.smith.langchain.com`)
+   - `LANGSMITH_PROJECT` (optional, defaults to `job-finder-production`)
 4. In **Settings**, change the service type to **Cron Job**
 5. Set the cron schedule to `0 8 */2 * *` (every 2 days at 8 AM UTC)
 6. Increase the job timeout to **45 minutes** (the scraper can take 10-30+ min depending on results)
