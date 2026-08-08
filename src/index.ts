@@ -10,8 +10,9 @@ import { runPreflight } from "./preflight";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import { flushPending, initLangSmith } from "./services/langsmith";
+import { backfillLedger, createLedger } from "./services/ledger";
 import { createNotionClient } from "./services/notion";
-import { buildNotionCache, NotionCacheUpdater } from "./services/notionCache";
+import { buildNotionCache } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
 
 const log = logger.child({ component: "main" });
@@ -40,22 +41,23 @@ async function main() {
 
   const pruneStats = await prune(notion, config.notionDatabaseId);
 
-  log.info("building notion cache");
-  const cache = await buildNotionCache(notion, config.notionDatabaseId);
+  log.info("building notion state");
+  const { cache, identities } = await buildNotionCache(notion, config.notionDatabaseId);
   log.info(
-    {
-      urls: cache.existingUrls.size,
-      blocked: cache.blockedCompanies.size,
-      recentApps: cache.recentAppCompanies.size,
-      companies: cache.jobsByCompany.size,
-    },
-    "notion cache built",
+    { urls: identities.filter((i) => i.url).length, recentApps: cache.recentAppCompanies.size },
+    "notion state loaded",
   );
 
   const rates = await fetchExchangeRates();
   const filters = getEvaluationFilters(rates);
 
-  const syncer = new NotionCacheUpdater(cache);
+  const ledger = createLedger(config.ledgerPath);
+  const backfill = backfillLedger(ledger, identities);
+  const ledgerCounts = ledger.counts();
+  if (backfill.urls !== ledgerCounts.urls) {
+    log.warn({ backfill, ledgerCounts }, "ledger url count differs from notion");
+  }
+  log.info({ backfill, ledgerCounts }, "ledger backfilled from notion");
 
   const searchPairs = config.keywords.flatMap((keyword) =>
     config.domains.map((domain) => ({ keyword, domain })),
@@ -102,7 +104,7 @@ async function main() {
 
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, syncer, seenUrls, filters }),
+      processUrl(url, keyword, { notion, config, cache, ledger, seenUrls, filters }),
     ),
   );
 
@@ -135,6 +137,8 @@ async function main() {
   log.info({ prune: pruneStats }, "prune summary");
 
   await flushPending();
+
+  ledger.close();
 
   if (config.slackWebhookUrl) {
     await sendRunReport(

@@ -1,28 +1,33 @@
 import { REAPPLY_WINDOW_MONTHS } from "../config/recency";
 import { monthsAgo } from "../dates";
 import type { ResilientNotionClient } from "./notion/client";
-import { extractRichText, type RichTextItem } from "./notion/helpers";
+import { extractPageIdentity, type PageIdentity } from "./notion/helpers";
 
 export interface NotionCache {
-  existingUrls: Set<string>;
-  blockedCompanies: Set<string>;
   recentAppCompanies: Set<string>;
-  jobsByCompany: Map<string, string[]>;
 }
 
 export interface BuildCacheOptions {
   onProgress?: (itemsFetched: number) => void;
 }
 
+export interface NotionScan {
+  cache: NotionCache;
+  identities: PageIdentity[];
+}
+
+/**
+ * One paginated pass over the database. Collects the companies that have an
+ * application inside the reapply window (recent-application suppression) and
+ * the raw identities used to backfill the processed-job ledger.
+ */
 export async function buildNotionCache(
   client: ResilientNotionClient,
   databaseId: string,
   options: BuildCacheOptions = {},
-): Promise<NotionCache> {
-  const existingUrls = new Set<string>();
-  const blockedCompanies = new Set<string>();
+): Promise<NotionScan> {
   const recentAppCompanies = new Set<string>();
-  const jobsByCompany = new Map<string, string[]>();
+  const identities: PageIdentity[] = [];
 
   const reapplyCutoff = monthsAgo(REAPPLY_WINDOW_MONTHS);
 
@@ -40,74 +45,19 @@ export async function buildNotionCache(
       options.onProgress?.(itemsFetched);
       if (!("properties" in page)) continue;
 
-      // Extract URL
-      const urlProp = page.properties.URL;
-      const rawUrl = urlProp?.type === "url" ? urlProp.url : null;
-      const url = typeof rawUrl === "string" ? rawUrl : "";
-      if (url) existingUrls.add(url);
+      const identity = extractPageIdentity(page);
+      identities.push(identity);
 
-      // Extract company
-      const companyProp = page.properties.Company;
-      const company =
-        companyProp?.type === "rich_text"
-          ? extractRichText(companyProp.rich_text as RichTextItem[])
-          : "";
-
-      // Extract title
-      const titleProp = page.properties["Job Title"];
-      const title =
-        titleProp?.type === "title" ? extractRichText(titleProp.title as RichTextItem[]) : "";
-
-      // Extract status
-      const statusProp = page.properties.Status;
-      const selectVal = statusProp?.type === "select" ? statusProp.select : null;
-      const status = selectVal && "name" in selectVal ? (selectVal.name ?? "") : "";
-
-      // Extract application date
-      const appDateProp = page.properties["Application Date"];
-      const appDate = appDateProp?.type === "date" ? (appDateProp.date?.start ?? null) : null;
-
-      // Build blockedCompanies
-      if (company && status === "Company Blocked") {
-        blockedCompanies.add(company);
-      }
-
-      // Build recentAppCompanies
-      if (company && appDate) {
-        const appDateObj = new Date(appDate);
+      if (identity.company && identity.appDate) {
+        const appDateObj = new Date(identity.appDate);
         if (appDateObj >= reapplyCutoff) {
-          recentAppCompanies.add(company);
+          recentAppCompanies.add(identity.company);
         }
-      }
-
-      // Build jobsByCompany (title index)
-      if (company && title) {
-        const titles = jobsByCompany.get(company) ?? [];
-        titles.push(title);
-        jobsByCompany.set(company, titles);
       }
     }
 
     cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
   } while (cursor);
 
-  return { existingUrls, blockedCompanies, recentAppCompanies, jobsByCompany };
-}
-
-export class NotionCacheUpdater {
-  cache: NotionCache;
-
-  constructor(initialCache: NotionCache) {
-    this.cache = initialCache;
-  }
-
-  addUrl(url: string): void {
-    this.cache.existingUrls.add(url);
-  }
-
-  addTitle(company: string, title: string): void {
-    const titles = this.cache.jobsByCompany.get(company) ?? [];
-    titles.push(title);
-    this.cache.jobsByCompany.set(company, titles);
-  }
+  return { cache: { recentAppCompanies }, identities };
 }

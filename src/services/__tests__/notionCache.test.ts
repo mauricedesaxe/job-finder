@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { NotionCache } from "../notionCache";
-import { buildNotionCache, NotionCacheUpdater } from "../notionCache";
+import { buildNotionCache } from "../notionCache";
 
 function makePage(opts: {
   url?: string;
@@ -46,88 +45,38 @@ function mockClient(pages: ReturnType<typeof makePage>[]) {
 }
 
 describe("buildNotionCache", () => {
-  test("collects existing URLs", async () => {
-    const client = mockClient([
-      makePage({ url: "https://example.com/job1" }),
-      makePage({ url: "https://example.com/job2" }),
-    ]);
-    const cache = await buildNotionCache(client, "db-id");
-    expect(cache.existingUrls.size).toBe(2);
-    expect(cache.existingUrls.has("https://example.com/job1")).toBe(true);
-  });
-
-  test("collects blocked companies", async () => {
-    const client = mockClient([
-      makePage({ company: "BadCorp", status: "Company Blocked" }),
-      makePage({ company: "GoodCorp", status: "To Review" }),
-    ]);
-    const cache = await buildNotionCache(client, "db-id");
-    expect(cache.blockedCompanies.has("BadCorp")).toBe(true);
-    expect(cache.blockedCompanies.has("GoodCorp")).toBe(false);
-  });
-
-  test("collects recent application companies", async () => {
+  test("collects recent application companies within the window", async () => {
     const recentDate = new Date();
     recentDate.setMonth(recentDate.getMonth() - 1);
     const oldDate = new Date();
     oldDate.setMonth(oldDate.getMonth() - 8);
 
     const client = mockClient([
-      makePage({
-        company: "RecentCo",
-        appDate: recentDate.toISOString().split("T")[0] ?? "",
-      }),
-      makePage({
-        company: "OldCo",
-        appDate: oldDate.toISOString().split("T")[0] ?? "",
-      }),
+      makePage({ company: "RecentCo", appDate: recentDate.toISOString().split("T")[0] }),
+      makePage({ company: "OldCo", appDate: oldDate.toISOString().split("T")[0] }),
     ]);
-    const cache = await buildNotionCache(client, "db-id");
+    const { cache } = await buildNotionCache(client, "db-id");
     expect(cache.recentAppCompanies.has("RecentCo")).toBe(true);
     expect(cache.recentAppCompanies.has("OldCo")).toBe(false);
   });
 
-  test("builds jobs by company index", async () => {
+  test("collects every page's identity for the ledger backfill", async () => {
     const client = mockClient([
-      makePage({ company: "Acme", title: "Senior Engineer" }),
-      makePage({ company: "Acme", title: "Staff Engineer" }),
-      makePage({ company: "Other", title: "Designer" }),
+      makePage({ url: "https://e.com/a", company: "Acme", title: "Engineer", status: "To Review" }),
+      makePage({ url: "https://e.com/b", company: "Acme", title: "Staff", status: "Rejected" }),
+      makePage({ company: "NoUrl", title: "Engineer" }),
     ]);
-    const cache = await buildNotionCache(client, "db-id");
-    expect(cache.jobsByCompany.get("Acme")).toEqual(["Senior Engineer", "Staff Engineer"]);
-    expect(cache.jobsByCompany.get("Other")).toEqual(["Designer"]);
+    const { identities } = await buildNotionCache(client, "db-id");
+    expect(identities).toHaveLength(3);
+    expect(identities[0]?.url).toBe("https://e.com/a");
+    expect(identities[1]?.title).toBe("Staff");
+    expect(identities[2]?.url).toBe("");
   });
 
-  test("handles empty database", async () => {
+  test("handles an empty database", async () => {
     const client = mockClient([]);
-    const cache = await buildNotionCache(client, "db-id");
-    expect(cache.existingUrls.size).toBe(0);
-    expect(cache.blockedCompanies.size).toBe(0);
+    const { cache, identities } = await buildNotionCache(client, "db-id");
     expect(cache.recentAppCompanies.size).toBe(0);
-    expect(cache.jobsByCompany.size).toBe(0);
-  });
-});
-
-function emptyCache(): NotionCache {
-  return {
-    existingUrls: new Set(),
-    blockedCompanies: new Set(),
-    recentAppCompanies: new Set(),
-    jobsByCompany: new Map(),
-  };
-}
-
-describe("NotionCacheUpdater", () => {
-  test("addUrl updates cache", () => {
-    const updater = new NotionCacheUpdater(emptyCache());
-    updater.addUrl("https://example.com/job1");
-    expect(updater.cache.existingUrls.has("https://example.com/job1")).toBe(true);
-  });
-
-  test("addTitle updates cache", () => {
-    const updater = new NotionCacheUpdater(emptyCache());
-    updater.addTitle("Acme", "Senior Engineer");
-    updater.addTitle("Acme", "Staff Engineer");
-    expect(updater.cache.jobsByCompany.get("Acme")).toEqual(["Senior Engineer", "Staff Engineer"]);
+    expect(identities).toHaveLength(0);
   });
 });

@@ -14,8 +14,9 @@ import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
 import { traced } from "../services/langsmith";
+import type { ProcessLedger } from "../services/ledger";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
-import type { NotionCacheUpdater } from "../services/notionCache";
+import type { NotionCache } from "../services/notionCache";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -46,7 +47,8 @@ export interface ScrapeStats {
 export interface ProcessContext {
   notion: ResilientNotionClient;
   config: JobFinderConfig;
-  syncer: NotionCacheUpdater;
+  cache: NotionCache;
+  ledger: ProcessLedger;
   seenUrls: Set<string>;
   filters?: EvaluationFilter[];
 }
@@ -57,6 +59,7 @@ interface ProcessResultState {
   retries: number;
   outcome: ProcessResult;
   profile: string;
+  traceId: string;
 }
 
 export async function processUrl(
@@ -65,13 +68,13 @@ export async function processUrl(
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
   const { seenUrls } = ctx;
-  const cache = ctx.syncer.cache;
+  const ledger = ctx.ledger;
 
   if (seenUrls.has(url)) return "skipped";
   seenUrls.add(url);
 
-  if (cache.existingUrls.has(url)) {
-    log.debug({ url }, "skipped (exists in cache)");
+  if (ledger.hasUrl(url)) {
+    log.debug({ url }, "skipped (exists in ledger)");
     return "skipped";
   }
 
@@ -81,6 +84,7 @@ export async function processUrl(
     retries: 0,
     outcome: "errored",
     profile: "",
+    traceId: "",
   };
 
   return await traced(
@@ -88,6 +92,9 @@ export async function processUrl(
       name: "process_job",
       runType: "chain",
       metadata: { url, discovery_keyword: keyword },
+      onRunId: (id) => {
+        state.traceId = id;
+      },
       finalMeta: () => ({
         source: state.source,
         ats_presence: state.ats,
@@ -106,8 +113,7 @@ async function processJobBody(
   ctx: ProcessContext,
   state: ProcessResultState,
 ): Promise<{ data: ProcessResult }> {
-  const { notion, config, syncer } = ctx;
-  const cache = syncer.cache;
+  const { notion, config, cache, ledger } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
     jinaBreaker.run(() =>
@@ -122,6 +128,18 @@ async function processJobBody(
   );
   const job = parseJobDetails(markdown, url, keyword);
   state.source = job.source;
+
+  const record = (
+    outcome: Extract<ProcessResult, "inserted" | "rejected" | "archived" | "companyApplied">,
+  ): void => {
+    ledger.record({
+      url,
+      company: job.company,
+      title: job.title,
+      outcome,
+      traceId: state.traceId || undefined,
+    });
+  };
 
   if (config.enableAtsEnrichment) {
     const atsData = await atsApiSemaphore.run(() =>
@@ -140,6 +158,7 @@ async function processJobBody(
         );
         await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
         state.outcome = "rejected";
+        record("rejected");
         return { data: "rejected" };
       }
     }
@@ -153,6 +172,7 @@ async function processJobBody(
     );
     await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
     state.outcome = "rejected";
+    record("rejected");
     return { data: "rejected" };
   }
 
@@ -186,6 +206,7 @@ async function processJobBody(
     );
     await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
     state.outcome = "rejected";
+    record("rejected");
     return { data: "rejected" };
   }
 
@@ -205,7 +226,7 @@ async function processJobBody(
   job.description = enriched.description;
   job.location = enriched.location;
 
-  const existingTitles = cache.jobsByCompany.get(job.company) ?? [];
+  const existingTitles = ledger.titlesForCompany(job.company);
   if (existingTitles.length > 0) {
     const dedup = await llmSemaphore.run(() =>
       withRetry(
@@ -230,29 +251,27 @@ async function processJobBody(
     }
   }
 
-  if (cache.blockedCompanies.has(job.company)) {
-    log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
+  if (ledger.isExcluded(job.company)) {
+    log.info({ url, title: job.title, company: job.company }, "archived (company excluded)");
     await insertJob(notion, config.notionDatabaseId, job, "Archived");
     state.outcome = "archived";
+    record("archived");
     return { data: "archived" };
   }
 
   if (cache.recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
     await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
-    syncer.addTitle(job.company, job.title);
-    syncer.addUrl(url);
     state.outcome = "companyApplied";
+    record("companyApplied");
     return { data: "companyApplied" };
   }
 
   await insertJob(notion, config.notionDatabaseId, job);
   log.info({ url, title: job.title, company: job.company }, "inserted");
 
-  syncer.addTitle(job.company, job.title);
-  syncer.addUrl(url);
-
   state.outcome = "inserted";
   state.profile = evaluation.profileName ?? "";
+  record("inserted");
   return { data: "inserted" };
 }
