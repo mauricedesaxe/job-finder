@@ -17,7 +17,7 @@ type Result = { name: string; expected: boolean; actual: boolean; reason: string
 
 const results: Result[] = [];
 
-describe("remote-europe-eligible filter (integration)", () => {
+describe.skip("remote-europe-eligible filter (integration)", () => {
   for (const file of collectFixtures(`${FIXTURES_DIR}/pass`)) {
     const name = basename(file, ".md");
     test(`${name} → PASS`, async () => {

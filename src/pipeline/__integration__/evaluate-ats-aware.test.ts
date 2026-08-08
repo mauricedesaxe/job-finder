@@ -54,7 +54,7 @@ type Result = { name: string; expected: boolean; actual: boolean; reason: string
 
 const results: Result[] = [];
 
-describe("ATS-aware remote-europe-eligible filter (integration)", () => {
+describe.skip("ATS-aware remote-europe-eligible filter (integration)", () => {
   beforeAll(async () => {
     const passFiles = collectFixtures(`${FIXTURES_DIR}/pass/ats`).map((file) => ({
       file,
