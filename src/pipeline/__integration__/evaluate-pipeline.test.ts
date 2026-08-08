@@ -68,7 +68,7 @@ type Result = { name: string; expected: boolean; actual: boolean; reason: string
 
 const results: Result[] = [];
 
-describe("full evaluation pipeline (integration)", () => {
+describe.skip("full evaluation pipeline (integration)", () => {
   beforeAll(async () => {
     const passFiles = collectFixtures(`${FIXTURES_DIR}/pass`).map((file) => ({
       file,

@@ -5,8 +5,8 @@ import {
   getEvaluationFilters,
 } from "../config/evaluation";
 import { logger } from "../logger";
+import { traced } from "../services/langsmith";
 import { getClient } from "../services/llm";
-import type { TokenTracker } from "../services/tokenTracker";
 import type { JobListing } from "../types";
 
 export interface JobEvaluation {
@@ -43,7 +43,6 @@ export async function evaluateSingle(
   job: JobListing,
   criteria: EvaluationCriteria,
   apiKey: string,
-  tracker?: TokenTracker,
   options?: { temperature?: number; model?: string },
 ): Promise<JobEvaluation> {
   const client = getClient(apiKey);
@@ -57,39 +56,55 @@ URL: ${job.url}
 Description:
 ${job.description}`;
 
-  const response = await client.chat.completions.create({
-    model,
-    max_tokens: 256,
-    temperature: options?.temperature,
-    messages: [
-      { role: "system", content: criteria.prompt },
-      { role: "user", content: userMessage },
-    ],
-    tools: [EVALUATE_TOOL],
-    tool_choice: { type: "function", function: { name: "evaluate_job" } },
-  });
+  return traced(
+    {
+      name: "evaluate",
+      runType: "llm",
+      metadata: { name: criteria.name },
+      model: { name: model, temperature: options?.temperature },
+    },
+    async () => {
+      const response = await client.chat.completions.create({
+        model,
+        max_tokens: 256,
+        temperature: options?.temperature,
+        messages: [
+          { role: "system", content: criteria.prompt },
+          { role: "user", content: userMessage },
+        ],
+        tools: [EVALUATE_TOOL],
+        tool_choice: { type: "function", function: { name: "evaluate_job" } },
+      });
 
-  if (response.usage) {
-    tracker?.add(response.model ?? model, "evaluation", {
-      input_tokens: response.usage.prompt_tokens,
-      output_tokens: response.usage.completion_tokens,
-    });
-  } else {
-    log.warn({ model }, "No usage data in response");
-  }
+      const usage = response.usage;
+      if (!usage) {
+        log.warn({ model }, "No usage data in response");
+      }
 
-  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  if (!toolCall || toolCall.type !== "function") {
-    throw new Error("Evaluation failed: no function tool_call in response");
-  }
+      const toolCall = response.choices[0]?.message?.tool_calls?.[0];
+      if (!toolCall || toolCall.type !== "function") {
+        throw new Error("Evaluation failed: no function tool_call in response");
+      }
 
-  try {
-    return JSON.parse(toolCall.function.arguments) as JobEvaluation;
-  } catch {
-    throw new Error(
-      `Evaluation failed: could not parse tool arguments: ${toolCall.function.arguments}`,
-    );
-  }
+      try {
+        const data = JSON.parse(toolCall.function.arguments) as JobEvaluation;
+        return {
+          data,
+          usage: usage
+            ? {
+                input: usage.prompt_tokens,
+                output: usage.completion_tokens,
+                total: usage.total_tokens,
+              }
+            : undefined,
+        };
+      } catch {
+        throw new Error(
+          `Evaluation failed: could not parse tool arguments: ${toolCall.function.arguments}`,
+        );
+      }
+    },
+  );
 }
 
 export async function evaluateJob(
@@ -99,7 +114,6 @@ export async function evaluateJob(
     filters?: EvaluationCriteria[];
     profiles?: EvaluationCriteria[];
     evaluate?: typeof evaluateSingle;
-    tracker?: TokenTracker;
     temperature?: number;
     model?: string;
   },
@@ -107,7 +121,6 @@ export async function evaluateJob(
   const filters = deps?.filters ?? getEvaluationFilters();
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;
-  const tracker = deps?.tracker;
   const tempOpts =
     deps?.temperature !== undefined || deps?.model !== undefined
       ? { temperature: deps.temperature, model: deps.model }
@@ -116,7 +129,7 @@ export async function evaluateJob(
   // Phase 1: AND filters — run in parallel, reject on first failure in results
   if (filters.length > 0) {
     const filterResults = await Promise.allSettled(
-      filters.map((filter) => evaluate(job, filter, apiKey, tracker, tempOpts)),
+      filters.map((filter) => evaluate(job, filter, apiKey, tempOpts)),
     );
     for (const result of filterResults) {
       if (result.status === "rejected") {
@@ -137,7 +150,7 @@ export async function evaluateJob(
   }
 
   const results = await Promise.allSettled(
-    profiles.map((profile) => evaluate(job, profile, apiKey, tracker, tempOpts)),
+    profiles.map((profile) => evaluate(job, profile, apiKey, tempOpts)),
   );
 
   let lastRejection: JobEvaluation = { pass: false, reason: "No profiles matched" };

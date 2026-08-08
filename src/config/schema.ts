@@ -10,6 +10,9 @@ const ConfigSchema = z.object({
   jinaBaseUrl: z.string(),
   openrouterApiKey: z.string().min(1, "OPENROUTER_API_KEY is required"),
   llmModel: z.string().default("google/gemini-2.5-flash"),
+  langsmithApiKey: z.string().min(1, "LANGSMITH_API_KEY is required"),
+  langsmithEndpoint: z.string().url().default("https://eu.api.smith.langchain.com"),
+  langsmithProject: z.string().default("job-finder-production"),
   slackWebhookUrl: z.string().url().optional(),
   enableAtsEnrichment: z.boolean().default(true),
 });
@@ -26,6 +29,9 @@ export const config: Readonly<JobFinderConfig> = Object.freeze(
     jinaBaseUrl: "https://r.jina.ai",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
     llmModel: process.env.LLM_MODEL,
+    langsmithApiKey: process.env.LANGSMITH_API_KEY,
+    langsmithEndpoint: process.env.LANGSMITH_ENDPOINT,
+    langsmithProject: process.env.LANGSMITH_PROJECT,
     slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
     enableAtsEnrichment: process.env.ENABLE_ATS_ENRICHMENT
       ? process.env.ENABLE_ATS_ENRICHMENT === "true"

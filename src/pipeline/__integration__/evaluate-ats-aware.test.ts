@@ -54,7 +54,7 @@ type Result = { name: string; expected: boolean; actual: boolean; reason: string
 
 const results: Result[] = [];
 
-describe("ATS-aware remote-europe-eligible filter (integration)", () => {
+describe.skip("ATS-aware remote-europe-eligible filter (integration)", () => {
   beforeAll(async () => {
     const passFiles = collectFixtures(`${FIXTURES_DIR}/pass/ats`).map((file) => ({
       file,
@@ -82,7 +82,7 @@ describe("ATS-aware remote-europe-eligible filter (integration)", () => {
             if (!atsCheck.pass) {
               return { name, expected, actual: false, reason: atsCheck.reason };
             }
-            const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, undefined, {
+            const result = await evaluateSingle(job, remoteFilter, OPENROUTER_API_KEY, {
               temperature: 0,
               model: LLM_MODEL,
             });

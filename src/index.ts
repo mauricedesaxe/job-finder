@@ -9,10 +9,10 @@ import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
+import { flushPending, initLangSmith } from "./services/langsmith";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache, NotionCacheUpdater } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
-import { TokenTracker } from "./services/tokenTracker";
 
 const log = logger.child({ component: "main" });
 const reconcileOnly = process.argv.includes("--reconcile-only");
@@ -22,8 +22,12 @@ async function main() {
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
-  // Reset per-run ATS caches (Ashby returns whole-org listings; we cache them
-  // for the run, but stale entries between runs would mask updates).
+  initLangSmith({
+    apiKey: config.langsmithApiKey,
+    endpoint: config.langsmithEndpoint,
+    project: config.langsmithProject,
+  });
+
   clearAshbyCache();
 
   if (reconcileOnly) {
@@ -34,11 +38,8 @@ async function main() {
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
 
-  // Prune aged-out jobs before the full-table cache scan so the database (and
-  // every startup scan) stays bounded as scrape volume grows.
   const pruneStats = await prune(notion, config.notionDatabaseId);
 
-  // Pre-cache Notion data to avoid per-URL queries
   log.info("building notion cache");
   const cache = await buildNotionCache(notion, config.notionDatabaseId);
   log.info(
@@ -55,16 +56,14 @@ async function main() {
   const filters = getEvaluationFilters(rates);
 
   const syncer = new NotionCacheUpdater(cache);
-  const tracker = new TokenTracker();
 
-  // Phase 1: Parallel search — collect all URLs
   const searchPairs = config.keywords.flatMap((keyword) =>
     config.domains.map((domain) => ({ keyword, domain })),
   );
 
   log.info({ pairs: searchPairs.length }, "phase 1: searching");
 
-  const urlMap = new Map<string, string>(); // url → keyword
+  const urlMap = new Map<string, string>();
 
   const searchResults = await Promise.allSettled(
     searchPairs.map(({ keyword, domain }) =>
@@ -97,18 +96,16 @@ async function main() {
 
   log.info({ uniqueUrls: urlMap.size, searchErrors }, "all searches complete");
 
-  // Phase 2: Parallel URL processing
   const seenUrls = new Set<string>();
 
   log.info({ urls: urlMap.size }, "phase 2: processing urls");
 
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, syncer, seenUrls, tracker, filters }),
+      processUrl(url, keyword, { notion, config, syncer, seenUrls, filters }),
     ),
   );
 
-  // Aggregate stats
   const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
@@ -132,13 +129,12 @@ async function main() {
 
   const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
-  const tokenSummary = tracker.summary();
-
   log.info({ stats }, "scrape summary");
   log.info({ reconcile: preReconcileStats }, "pre-scrape reconcile summary");
   log.info({ reconcile: postReconcileStats }, "post-scrape reconcile summary");
   log.info({ prune: pruneStats }, "prune summary");
-  log.info({ tokens: tokenSummary }, "token usage summary");
+
+  await flushPending();
 
   if (config.slackWebhookUrl) {
     await sendRunReport(
@@ -151,13 +147,13 @@ async function main() {
         searchErrors,
       },
       Date.now() - startTime,
-      tokenSummary,
     );
   }
 }
 
 main().catch(async (err) => {
   log.fatal({ err }, "fatal error");
+  await flushPending();
   if (config.slackWebhookUrl) {
     await sendFatalError(config.slackWebhookUrl, err);
   }
