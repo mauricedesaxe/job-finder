@@ -15,6 +15,8 @@ export interface TraceOptions {
   finalMeta?: () => Record<string, unknown>;
   /** Attach model identity so LangSmith can price cost from token usage. */
   model?: { name: string; temperature?: number };
+  /** Fired when the span starts so callers can persist the run id. */
+  onRunId?: (id: string) => void;
 }
 
 export interface TraceResult<T> {
@@ -83,7 +85,7 @@ function attachUsage<T>(
  * so the pipeline stays testable without a LangSmith workspace.
  */
 export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResult<T>>): Promise<T> {
-  const { name, runType, metadata, finalMeta, model } = opts;
+  const { name, runType, metadata, finalMeta, model, onRunId } = opts;
   if (!state) {
     const result = await fn();
     return result.data;
@@ -102,6 +104,7 @@ export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResul
       project_name: state.project,
       tracingEnabled: true,
       metadata,
+      on_start: onRunId ? (runTree) => onRunId(runTree?.id ?? "") : undefined,
       getInvocationParams: model
         ? () => ({
             ls_model_type: "chat",
