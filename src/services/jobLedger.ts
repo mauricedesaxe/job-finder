@@ -1,4 +1,6 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 export const PROCESSED_JOB_OUTCOMES = [
   "historical",
@@ -80,6 +82,9 @@ export interface JobLedger {
 }
 
 export function createJobLedger(databasePath: string): JobLedger {
+  if (databasePath !== ":memory:") {
+    mkdirSync(dirname(databasePath), { recursive: true });
+  }
   const database = new Database(databasePath);
   database.run("PRAGMA journal_mode = WAL");
   database.run("PRAGMA foreign_keys = ON");
@@ -152,7 +157,7 @@ export function createJobLedger(databasePath: string): JobLedger {
   const titlesForCompany = database.query<{ title: string }, [string]>(`
     SELECT DISTINCT title
     FROM processed_jobs
-    WHERE normalized_company = ?
+    WHERE normalized_company = ? AND outcome <> 'duplicated'
     ORDER BY normalized_title, title
   `);
   const findCompanyExclusion = database.query<CompanyExclusionRow, [string]>(`
