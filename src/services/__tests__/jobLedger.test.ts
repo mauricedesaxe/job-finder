@@ -51,6 +51,18 @@ describe("job ledger", () => {
     expect(ledger.titlesForCompany("acme labs")).toEqual(["Product Engineer", "Senior Engineer"]);
   });
 
+  test("excludes duplicate outcomes from title candidates", () => {
+    ledger = createJobLedger(":memory:");
+    ledger.recordProcessedJob({
+      rawUrl: "https://jobs.example.com/duplicate",
+      company: "Acme",
+      title: "Duplicate Engineer",
+      outcome: "duplicated",
+    });
+
+    expect(ledger.titlesForCompany("Acme")).toEqual([]);
+  });
+
   test("updates an existing source key instead of creating another record", () => {
     ledger = createJobLedger(":memory:");
     ledger.recordProcessedJob({

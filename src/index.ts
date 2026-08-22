@@ -13,6 +13,7 @@ import { createJobLedger, type JobLedger } from "./services/jobLedger";
 import { flushPending, initLangSmith } from "./services/langsmith";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
+import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./services/notionLedgerBackfill";
 import { sendFatalError, sendRunReport } from "./services/slack";
 
 const log = logger.child({ component: "main" });
@@ -44,6 +45,10 @@ async function mainWithLedger(ledger: JobLedger) {
     const stats = await reconcile(notion, config.notionDatabaseId);
     log.info({ stats, durationMs: Date.now() - startTime }, "reconciliation complete");
     return;
+  }
+
+  if (!ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION)) {
+    throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
   }
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");

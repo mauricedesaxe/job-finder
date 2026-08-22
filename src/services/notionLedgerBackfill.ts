@@ -2,7 +2,7 @@ import type { JobLedger, NotionBackfillStats } from "./jobLedger";
 import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
-const MIGRATION_NAME = "notion-job-ledger-backfill-v1";
+export const NOTION_JOB_LEDGER_BACKFILL_MIGRATION = "notion-job-ledger-backfill-v1";
 
 interface NotionJobRecord {
   sourceKey: string;
@@ -61,9 +61,9 @@ export async function backfillJobLedger({
 
   const actualStats = ledger.notionBackfillStats();
   verifyBackfill(snapshot.stats, actualStats);
-  ledger.markMigration(MIGRATION_NAME, completedAt);
+  ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, completedAt);
 
-  return { stats: actualStats, migrationName: MIGRATION_NAME };
+  return { stats: actualStats, migrationName: NOTION_JOB_LEDGER_BACKFILL_MIGRATION };
 }
 
 async function scanNotionJobs(
