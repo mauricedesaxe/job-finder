@@ -39,7 +39,10 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@langchain/core": "1.2.3",
+    "@langchain/openai": "1.5.5",
     "@notionhq/client": "2.3.0",
+    "langchain": "1.5.4",
     "langsmith": "0.8.8",
     "openai": "6.33.0",
     "pino": "^10.3.1",
