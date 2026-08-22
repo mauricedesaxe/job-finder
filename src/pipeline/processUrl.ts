@@ -13,12 +13,13 @@ import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
+import type { JobLedger } from "../services/jobLedger";
 import { traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
-import type { NotionCacheUpdater } from "../services/notionCache";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
+import { recordTerminalResult } from "./recordTerminalResult";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
 import { structuralFilter } from "./structuralFilter";
 
@@ -46,7 +47,8 @@ export interface ScrapeStats {
 export interface ProcessContext {
   notion: ResilientNotionClient;
   config: JobFinderConfig;
-  syncer: NotionCacheUpdater;
+  ledger: JobLedger;
+  recentAppCompanies: ReadonlySet<string>;
   seenUrls: Set<string>;
   filters?: EvaluationFilter[];
 }
@@ -64,14 +66,13 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { seenUrls } = ctx;
-  const cache = ctx.syncer.cache;
+  const { ledger, seenUrls } = ctx;
 
   if (seenUrls.has(url)) return "skipped";
   seenUrls.add(url);
 
-  if (cache.existingUrls.has(url)) {
-    log.debug({ url }, "skipped (exists in cache)");
+  if (ledger.findByRawUrl(url)) {
+    log.debug({ url }, "skipped (exists in ledger)");
     return "skipped";
   }
 
@@ -106,8 +107,7 @@ async function processJobBody(
   ctx: ProcessContext,
   state: ProcessResultState,
 ): Promise<{ data: ProcessResult }> {
-  const { notion, config, syncer } = ctx;
-  const cache = syncer.cache;
+  const { config, ledger, notion, recentAppCompanies } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
     jinaBreaker.run(() =>
@@ -138,7 +138,13 @@ async function processJobBody(
           { url, title: job.title, company: job.company, reason: atsCheck.reason },
           "rejected (ats)",
         );
-        await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
+        await recordTerminalResult({
+          ledger,
+          url,
+          job,
+          outcome: "rejected",
+          project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+        });
         state.outcome = "rejected";
         return { data: "rejected" };
       }
@@ -151,7 +157,13 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: structural.reason },
       "rejected (structural)",
     );
-    await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
+    await recordTerminalResult({
+      ledger,
+      url,
+      job,
+      outcome: "rejected",
+      project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+    });
     state.outcome = "rejected";
     return { data: "rejected" };
   }
@@ -184,7 +196,13 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: evaluation.reason },
       "rejected",
     );
-    await insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected");
+    await recordTerminalResult({
+      ledger,
+      url,
+      job,
+      outcome: "rejected",
+      project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+    });
     state.outcome = "rejected";
     return { data: "rejected" };
   }
@@ -205,7 +223,7 @@ async function processJobBody(
   job.description = enriched.description;
   job.location = enriched.location;
 
-  const existingTitles = cache.jobsByCompany.get(job.company) ?? [];
+  const existingTitles = ledger.titlesForCompany(job.company);
   if (existingTitles.length > 0) {
     const dedup = await llmSemaphore.run(() =>
       withRetry(
@@ -225,32 +243,46 @@ async function processJobBody(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
+      await recordTerminalResult({ ledger, url, job, outcome: "duplicated" });
       state.outcome = "duplicated";
       return { data: "duplicated" };
     }
   }
 
-  if (cache.blockedCompanies.has(job.company)) {
+  if (ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
-    await insertJob(notion, config.notionDatabaseId, job, "Archived");
+    await recordTerminalResult({
+      ledger,
+      url,
+      job,
+      outcome: "archived",
+      project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
+    });
     state.outcome = "archived";
     return { data: "archived" };
   }
 
-  if (cache.recentAppCompanies.has(job.company)) {
+  if (recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
-    await insertJob(notion, config.notionDatabaseId, job, "Company Applied");
-    syncer.addTitle(job.company, job.title);
-    syncer.addUrl(url);
+    await recordTerminalResult({
+      ledger,
+      url,
+      job,
+      outcome: "companyApplied",
+      project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
+    });
     state.outcome = "companyApplied";
     return { data: "companyApplied" };
   }
 
-  await insertJob(notion, config.notionDatabaseId, job);
+  await recordTerminalResult({
+    ledger,
+    url,
+    job,
+    outcome: "inserted",
+    project: () => insertJob(notion, config.notionDatabaseId, job),
+  });
   log.info({ url, title: job.title, company: job.company }, "inserted");
-
-  syncer.addTitle(job.company, job.title);
-  syncer.addUrl(url);
 
   state.outcome = "inserted";
   state.profile = evaluation.profileName ?? "";

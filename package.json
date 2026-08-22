@@ -23,6 +23,7 @@
   "scripts": {
     "scrape": "bun src/index.ts",
     "reconcile": "bun src/index.ts --reconcile-only",
+    "backfill:job-ledger": "bun scripts/backfill-job-ledger.ts",
     "test": "bun test __tests__",
     "test:integration": "bun test src/**/__integration__/",
     "lint": "biome check .",

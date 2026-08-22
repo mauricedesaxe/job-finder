@@ -9,15 +9,25 @@ import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
+import { createJobLedger, type JobLedger } from "./services/jobLedger";
 import { flushPending, initLangSmith } from "./services/langsmith";
 import { createNotionClient } from "./services/notion";
-import { buildNotionCache, NotionCacheUpdater } from "./services/notionCache";
+import { buildNotionCache } from "./services/notionCache";
 import { sendFatalError, sendRunReport } from "./services/slack";
 
 const log = logger.child({ component: "main" });
 const reconcileOnly = process.argv.includes("--reconcile-only");
 
 async function main() {
+  const ledger = createJobLedger(config.jobLedgerPath);
+  try {
+    await mainWithLedger(ledger);
+  } finally {
+    ledger.close();
+  }
+}
+
+async function mainWithLedger(ledger: JobLedger) {
   const startTime = Date.now();
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
@@ -42,20 +52,10 @@ async function main() {
 
   log.info("building notion cache");
   const cache = await buildNotionCache(notion, config.notionDatabaseId);
-  log.info(
-    {
-      urls: cache.existingUrls.size,
-      blocked: cache.blockedCompanies.size,
-      recentApps: cache.recentAppCompanies.size,
-      companies: cache.jobsByCompany.size,
-    },
-    "notion cache built",
-  );
+  log.info({ recentApps: cache.recentAppCompanies.size }, "notion cache built");
 
   const rates = await fetchExchangeRates();
   const filters = getEvaluationFilters(rates);
-
-  const syncer = new NotionCacheUpdater(cache);
 
   const searchPairs = config.keywords.flatMap((keyword) =>
     config.domains.map((domain) => ({ keyword, domain })),
@@ -102,7 +102,14 @@ async function main() {
 
   const processResults = await Promise.allSettled(
     Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, { notion, config, syncer, seenUrls, filters }),
+      processUrl(url, keyword, {
+        notion,
+        config,
+        ledger,
+        recentAppCompanies: cache.recentAppCompanies,
+        seenUrls,
+        filters,
+      }),
     ),
   );
 

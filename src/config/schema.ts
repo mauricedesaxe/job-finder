@@ -13,6 +13,7 @@ const ConfigSchema = z.object({
   langsmithApiKey: z.string().min(1, "LANGSMITH_API_KEY is required"),
   langsmithEndpoint: z.string().url().default("https://eu.api.smith.langchain.com"),
   langsmithProject: z.string().default("job-finder-production"),
+  jobLedgerPath: z.string().min(1, "JOB_LEDGER_PATH is required"),
   slackWebhookUrl: z.string().url().optional(),
   enableAtsEnrichment: z.boolean().default(true),
 });
@@ -32,6 +33,7 @@ export const config: Readonly<JobFinderConfig> = Object.freeze(
     langsmithApiKey: process.env.LANGSMITH_API_KEY,
     langsmithEndpoint: process.env.LANGSMITH_ENDPOINT,
     langsmithProject: process.env.LANGSMITH_PROJECT,
+    jobLedgerPath: process.env.JOB_LEDGER_PATH,
     slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
     enableAtsEnrichment: process.env.ENABLE_ATS_ENRICHMENT
       ? process.env.ENABLE_ATS_ENRICHMENT === "true"
