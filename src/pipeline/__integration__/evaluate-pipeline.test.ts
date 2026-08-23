@@ -1,23 +1,31 @@
-import { beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { basename } from "node:path";
+import { z } from "zod/v4";
 import { Semaphore } from "../../concurrency";
+import { initLangSmith, shutdownLangSmith } from "../../services/langsmith";
 import type { JobListing } from "../../types";
 import { evaluateJob, type JobEvaluation } from "../evaluate";
 import { structuralFilter } from "../structuralFilter";
 import { collectFixtures, loadFixture } from "./helpers";
 
-async function evaluateFullPipeline(
-  job: JobListing,
-  _apiKey: string,
-  _options: { temperature?: number; model?: string },
-): Promise<JobEvaluation> {
+async function evaluateFullPipeline(job: JobListing): Promise<JobEvaluation> {
   const structural = structuralFilter(job);
   if (!structural.pass) return { pass: false, reason: structural.reason };
   return evaluateJob(job);
 }
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY as string;
-const LLM_MODEL = process.env.LLM_MODEL ?? "google/gemini-2.5-flash";
+const IntegrationConfigSchema = z.object({
+  langsmithApiKey: z.string().min(1, "LANGSMITH_API_KEY is required"),
+  langsmithEndpoint: z.string().url().default("https://eu.api.smith.langchain.com"),
+  langsmithProject: z.string().default("job-finder-integration-tests"),
+  openrouterApiKey: z.string().min(1, "OPENROUTER_API_KEY is required"),
+});
+const integrationConfig = IntegrationConfigSchema.parse({
+  langsmithApiKey: process.env.LANGSMITH_API_KEY,
+  langsmithEndpoint: process.env.LANGSMITH_ENDPOINT,
+  langsmithProject: process.env.LANGSMITH_PROJECT,
+  openrouterApiKey: process.env.OPENROUTER_API_KEY,
+});
 
 const FIXTURES_DIR = `${import.meta.dir}/fixtures/evaluate`;
 
@@ -68,8 +76,15 @@ type Result = { name: string; expected: boolean; actual: boolean; reason: string
 
 const results: Result[] = [];
 
-describe.skip("full evaluation pipeline (integration)", () => {
+describe("full evaluation pipeline (integration)", () => {
   beforeAll(async () => {
+    await initLangSmith({
+      apiKey: integrationConfig.langsmithApiKey,
+      endpoint: integrationConfig.langsmithEndpoint,
+      project: integrationConfig.langsmithProject,
+      openrouterApiKey: integrationConfig.openrouterApiKey,
+    });
+
     const passFiles = collectFixtures(`${FIXTURES_DIR}/pass`).map((file) => ({
       file,
       dir: "pass" as const,
@@ -89,10 +104,7 @@ describe.skip("full evaluation pipeline (integration)", () => {
           const name = basename(file, ".md");
           try {
             const job = await loadFixture(`${FIXTURES_DIR}/${dir}/${file}`);
-            const result = await evaluateFullPipeline(job, OPENROUTER_API_KEY, {
-              temperature: 0,
-              model: LLM_MODEL,
-            });
+            const result = await evaluateFullPipeline(job);
             return { name, expected, actual: result.pass, reason: result.reason };
           } catch (err) {
             // A single bad LLM response or transient API error must not kill
@@ -106,6 +118,8 @@ describe.skip("full evaluation pipeline (integration)", () => {
     );
     for (const e of evaluations) results.push(e);
   });
+
+  afterAll(shutdownLangSmith);
 
   test("FP and FN rates meet thresholds", () => {
     const total = results.length;
