@@ -15,7 +15,7 @@ describe("dedup module exports", () => {
 
 describe("checkFuzzyDuplicate short-circuit", () => {
   test("returns not duplicate for empty existing titles", async () => {
-    const result = await checkFuzzyDuplicate("Senior Engineer", [], "fake-key");
+    const result = await checkFuzzyDuplicate("Senior Engineer", []);
     expect(result.isDuplicate).toBe(false);
   });
 

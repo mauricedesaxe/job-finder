@@ -1,13 +1,10 @@
 import type { AIMessage } from "@langchain/core/messages";
-import type { Runnable } from "@langchain/core/runnables";
+import { type Runnable, RunnableBinding, type RunnableConfig } from "@langchain/core/runnables";
 import { pull } from "langchain/hub/node";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
-
-export const LOCATION_ELIGIBILITY_PROMPT_NAME = "job-finder-filter-location-eligibility";
-export const LOCATION_ELIGIBILITY_PROMPT_REF = `${LOCATION_ELIGIBILITY_PROMPT_NAME}:production`;
-
-export type LocationEligibilityRunnable = Runnable<{ job: string }, AIMessage>;
+import { z } from "zod/v4";
+import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -16,13 +13,17 @@ export interface LangSmithConfig {
   openrouterApiKey: string;
 }
 
+export interface PromptTool<T> {
+  name: string;
+  description: string;
+  schema: z.ZodType<T>;
+}
+
 export interface TraceOptions {
   name: string;
   runType?: "chain" | "llm";
   metadata?: Record<string, unknown>;
-  /** Metadata resolved after the traced work completes (outcome, retries, ...). */
   finalMeta?: () => Record<string, unknown>;
-  /** Attach model identity so LangSmith can price cost from token usage. */
   model?: { name: string; temperature?: number };
 }
 
@@ -31,50 +32,75 @@ export interface TraceResult<T> {
   usage?: { input: number; output: number; total: number };
 }
 
+type PromptRunnable = Runnable<Record<string, string>, AIMessage>;
+
+interface ResolvedPrompt {
+  commitHash: string;
+  releaseTag: string;
+  runnable: PromptRunnable;
+}
+
 interface TraceConfigState {
   client: Client;
   project: string;
-  locationEligibilityCommitHash: string;
-  locationEligibilityRunnable: LocationEligibilityRunnable;
+  prompts: Map<PromptName, ResolvedPrompt>;
 }
 
 export interface LangSmithDependencies {
-  resolveLocationEligibilityCommit?: (input: {
+  resolvePrompt?: (input: {
     client: Client;
-    promptRef: string;
-  }) => Promise<string>;
-  pullLocationEligibilityPrompt?: (input: {
+    config: LangSmithConfig;
+    name: PromptName;
+  }) => Promise<{ commitHash: string; releaseTag: string }>;
+  pullPrompt?: (input: {
     client: Client;
-    apiKey: string;
-    endpoint: string;
-    openrouterApiKey: string;
-    promptRef: string;
-  }) => Promise<LocationEligibilityRunnable>;
+    config: LangSmithConfig;
+    name: PromptName;
+    commitHash: string;
+  }) => Promise<PromptRunnable>;
 }
 
 let state: TraceConfigState | undefined;
 
-async function resolveLocationEligibilityCommit(input: {
+const ReleaseTagsSchema = z.object({
+  tags: z.array(z.object({ tag_name: z.string() })),
+});
+
+async function resolvePrompt(input: {
   client: Client;
-  promptRef: string;
-}): Promise<string> {
-  const prompt = await input.client.pullPromptCommit(input.promptRef);
-  return prompt.commit_hash;
+  config: LangSmithConfig;
+  name: PromptName;
+}): Promise<{ commitHash: string; releaseTag: string }> {
+  const commit = await input.client.pullPromptCommit(promptRef(input.name));
+  const response = await fetch(`${input.config.endpoint}/repos/-/${input.name}/tags`, {
+    headers: { "x-api-key": input.config.apiKey },
+  });
+  if (!response.ok)
+    throw new Error(`Could not read LangSmith tags for ${input.name}: ${response.status}`);
+  const tags = ReleaseTagsSchema.parse(await response.json()).tags;
+  const releaseTags = tags
+    .map((tag) => tag.tag_name)
+    .filter((tag) => /^release-\d{4}-\d{2}-\d{2}-\d+$/.test(tag));
+  for (const releaseTag of releaseTags) {
+    const taggedCommit = await input.client.pullPromptCommit(promptRef(input.name, releaseTag));
+    if (taggedCommit.commit_hash === commit.commit_hash)
+      return { commitHash: commit.commit_hash, releaseTag };
+  }
+  throw new Error(`Production prompt ${input.name} is not tagged with an immutable release`);
 }
 
-async function pullLocationEligibilityPrompt(input: {
+async function pullPrompt(input: {
   client: Client;
-  apiKey: string;
-  endpoint: string;
-  openrouterApiKey: string;
-  promptRef: string;
-}): Promise<LocationEligibilityRunnable> {
-  return pull<LocationEligibilityRunnable>(input.promptRef, {
+  config: LangSmithConfig;
+  name: PromptName;
+  commitHash: string;
+}): Promise<PromptRunnable> {
+  return pull<PromptRunnable>(promptRef(input.name, input.commitHash), {
     client: input.client,
-    apiKey: input.apiKey,
-    apiUrl: input.endpoint,
+    apiKey: input.config.apiKey,
+    apiUrl: input.config.endpoint,
     includeModel: true,
-    secrets: { OPENAI_API_KEY: input.openrouterApiKey },
+    secrets: { OPENAI_API_KEY: input.config.openrouterApiKey },
     secretsFromEnv: false,
   });
 }
@@ -84,52 +110,91 @@ export async function initLangSmith(
   deps: LangSmithDependencies = {},
 ): Promise<void> {
   const client = new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
-  const resolveCommit = deps.resolveLocationEligibilityCommit ?? resolveLocationEligibilityCommit;
-  const loadPrompt = deps.pullLocationEligibilityPrompt ?? pullLocationEligibilityPrompt;
-  const locationEligibilityCommitHash = await resolveCommit({
-    client,
-    promptRef: LOCATION_ELIGIBILITY_PROMPT_REF,
-  });
-  const locationEligibilityRunnable = await loadPrompt({
-    client,
-    apiKey: cfg.apiKey,
-    endpoint: cfg.endpoint,
-    openrouterApiKey: cfg.openrouterApiKey,
-    promptRef: `${LOCATION_ELIGIBILITY_PROMPT_NAME}:${locationEligibilityCommitHash}`,
-  });
+  const resolve = deps.resolvePrompt ?? resolvePrompt;
+  const load = deps.pullPrompt ?? pullPrompt;
+  const resolved = await Promise.all(
+    PROMPT_NAMES.map(async (name) => {
+      const version = await resolve({ client, config: cfg, name });
+      const runnable = await load({ client, config: cfg, name, commitHash: version.commitHash });
+      return [name, { ...version, runnable }] as const;
+    }),
+  );
+  const releaseTags = new Set(resolved.map(([, prompt]) => prompt.releaseTag));
+  if (releaseTags.size !== 1)
+    throw new Error(`Production prompts have mixed releases: ${[...releaseTags].join(", ")}`);
+  state = { client, project: cfg.project, prompts: new Map(resolved) };
+}
 
-  state = {
-    client,
-    project: cfg.project,
-    locationEligibilityCommitHash,
-    locationEligibilityRunnable,
+function configuredPrompt(name: PromptName): ResolvedPrompt {
+  const prompt = state?.prompts.get(name);
+  if (!prompt) throw new Error("LangSmith is not initialized");
+  return prompt;
+}
+
+export function getPromptCommitHash(name: PromptName): string {
+  return configuredPrompt(name).commitHash;
+}
+
+export function getPromptReleaseTag(): string {
+  const prompt = state?.prompts.values().next().value as ResolvedPrompt | undefined;
+  if (!prompt) throw new Error("LangSmith is not initialized");
+  return prompt.releaseTag;
+}
+
+export async function invokePrompt<T>(input: {
+  name: PromptName;
+  values: Record<string, string>;
+  tool: PromptTool<T>;
+}): Promise<TraceResult<T>> {
+  const prompt = configuredPrompt(input.name);
+  interface ToolOptions extends RunnableConfig {
+    tools: Array<{
+      type: "function";
+      function: { name: string; description: string; parameters: object };
+    }>;
+    tool_choice: { type: "function"; function: { name: string } };
+  }
+
+  const options: ToolOptions = {
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: input.tool.name,
+          description: input.tool.description,
+          parameters: z.toJSONSchema(input.tool.schema),
+        },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: input.tool.name } },
   };
-}
-
-export function getLocationEligibilityRunnable(): LocationEligibilityRunnable {
-  if (!state) throw new Error("LangSmith is not initialized");
-  return state.locationEligibilityRunnable;
-}
-
-export function getLocationEligibilityCommitHash(): string {
-  if (!state) throw new Error("LangSmith is not initialized");
-  return state.locationEligibilityCommitHash;
+  const response = await new RunnableBinding({
+    bound: prompt.runnable,
+    config: {},
+    kwargs: options,
+  }).invoke(input.values);
+  const toolCall = response.tool_calls?.[0];
+  if (!toolCall || toolCall.name !== input.tool.name)
+    throw new Error(`Prompt ${input.name} returned no ${input.tool.name} tool call`);
+  const usage = response.usage_metadata;
+  return {
+    data: input.tool.schema.parse(toolCall.args),
+    usage: usage
+      ? { input: usage.input_tokens, output: usage.output_tokens, total: usage.total_tokens }
+      : undefined,
+  };
 }
 
 export function isTracingEnabled(): boolean {
   return state !== undefined;
 }
-
 export function shutdownLangSmith(): void {
   state?.client.cleanup();
   state = undefined;
 }
 
-function attachUsage<T>(
-  data: T,
-  usage: { input: number; output: number; total: number } | undefined,
-): Record<string, unknown> {
-  if (typeof data === "object" && data !== null) {
+function attachUsage<T>(data: T, usage: TraceResult<T>["usage"]): Record<string, unknown> {
+  if (typeof data === "object" && data !== null)
     return usage
       ? {
           ...(data as Record<string, unknown>),
@@ -140,7 +205,6 @@ function attachUsage<T>(
           },
         }
       : (data as Record<string, unknown>);
-  }
   return usage
     ? {
         output: data,
@@ -153,19 +217,8 @@ function attachUsage<T>(
     : { output: data };
 }
 
-/**
- * Run `fn` inside a LangSmith span named `opts.name`, nesting under any active
- * span. Token usage returned by `fn` is attached to the span so it rolls up to
- * the root. A no-op (calls `fn`, returns `.data`) until `initLangSmith` runs,
- * so the pipeline stays testable without a LangSmith workspace.
- */
 export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResult<T>>): Promise<T> {
-  const { name, runType, metadata, finalMeta, model } = opts;
-  if (!state) {
-    const result = await fn();
-    return result.data;
-  }
-
+  if (!state) return (await fn()).data;
   let result: TraceResult<T> | undefined;
   const wrapped = traceable(
     async (): Promise<Record<string, unknown>> => {
@@ -173,39 +226,33 @@ export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResul
       return attachUsage(result.data, result.usage);
     },
     {
-      name,
-      run_type: runType ?? "chain",
+      name: opts.name,
+      run_type: opts.runType ?? "chain",
       client: state.client,
       project_name: state.project,
       tracingEnabled: true,
-      metadata,
-      getInvocationParams: model
+      metadata: opts.metadata,
+      getInvocationParams: opts.model
         ? () => ({
             ls_model_type: "chat",
-            ls_model_name: model.name,
-            ls_temperature: model.temperature,
+            ls_model_name: opts.model?.name ?? "",
+            ls_temperature: opts.model?.temperature,
             ls_provider: "openai",
           })
         : undefined,
-      on_end: finalMeta
+      on_end: opts.finalMeta
         ? (runTree) => {
-            if (runTree) {
-              runTree.extra.metadata = { ...runTree.extra.metadata, ...finalMeta() };
-            }
+            if (runTree)
+              runTree.extra.metadata = { ...runTree.extra.metadata, ...opts.finalMeta?.() };
           }
         : undefined,
     },
   );
-
   await wrapped();
-  if (result === undefined) {
-    throw new Error("tracing returned without a result");
-  }
+  if (!result) throw new Error("tracing returned without a result");
   return result.data;
 }
 
-/** Drain every pending trace batch so runs reach LangSmith before exit. */
 export async function flushPending(): Promise<void> {
-  if (!state) return;
-  await state.client.flush();
+  if (state) await state.client.flush();
 }

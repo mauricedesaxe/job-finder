@@ -36,7 +36,6 @@ const token = process.env.NOTION_TOKEN;
 const databaseId = process.env.NOTION_DATABASE_ID;
 const jinaApiKey = process.env.JINA_API_KEY;
 const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-const llmModel = process.env.LLM_MODEL ?? "google/gemini-2.5-flash";
 if (!token || !databaseId || !jinaApiKey || !openrouterApiKey) {
   console.error("Missing one of: NOTION_TOKEN, NOTION_DATABASE_ID, JINA_API_KEY, OPENROUTER_API_KEY");
   process.exit(1);
@@ -116,10 +115,7 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
     return { pass: false, reason: structural.reason, stage: "structural", atsSource };
   }
 
-  const evaluation: JobEvaluation = await evaluateJob(job, openrouterApiKey!, {
-    temperature: 0,
-    model: llmModel,
-  });
+  const evaluation: JobEvaluation = await evaluateJob(job);
   return {
     pass: evaluation.pass,
     reason: evaluation.reason,

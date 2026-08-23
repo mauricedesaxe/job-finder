@@ -8,12 +8,12 @@ import { collectFixtures, loadFixture } from "./helpers";
 
 async function evaluateFullPipeline(
   job: JobListing,
-  apiKey: string,
-  options: { temperature?: number; model?: string },
+  _apiKey: string,
+  _options: { temperature?: number; model?: string },
 ): Promise<JobEvaluation> {
   const structural = structuralFilter(job);
   if (!structural.pass) return { pass: false, reason: structural.reason };
-  return evaluateJob(job, apiKey, options);
+  return evaluateJob(job);
 }
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY as string;
