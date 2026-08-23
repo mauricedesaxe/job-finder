@@ -22,7 +22,7 @@ describe("LangSmith prompt resolution", () => {
       {
         resolvePrompt: async ({ name }) => ({
           commitHash: `${name}-commit`,
-          releaseTag: "release-2026-08-23-1",
+          releaseTags: ["release-2026-08-23-1"],
         }),
         pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
       },
@@ -42,11 +42,36 @@ describe("LangSmith prompt resolution", () => {
         {
           resolvePrompt: async ({ name }) => ({
             commitHash: `${name}-commit`,
-            releaseTag: name === PROMPT_NAMES[0] ? "release-2026-08-23-1" : "release-2026-08-22-1",
+            releaseTags: [
+              name === PROMPT_NAMES[0] ? "release-2026-08-23-1" : "release-2026-08-22-1",
+            ],
           }),
           pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
         },
       ),
     ).rejects.toThrow("mixed releases");
+  });
+
+  test("selects the common release when unchanged prompts retain older tags", async () => {
+    await initLangSmith(
+      {
+        apiKey: "key",
+        endpoint: "https://example.test",
+        project: "test",
+        openrouterApiKey: "router",
+      },
+      {
+        resolvePrompt: async ({ name }) => ({
+          commitHash: `${name}-commit`,
+          releaseTags:
+            name === PROMPT_NAMES[0]
+              ? ["release-2026-08-22-1", "release-2026-08-23-1"]
+              : ["release-2026-08-23-1"],
+        }),
+        pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
+      },
+    );
+
+    expect(getPromptReleaseTag()).toBe("release-2026-08-23-1");
   });
 });

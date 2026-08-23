@@ -14,6 +14,7 @@
  */
 
 import { atsApiRateLimiter, atsApiSemaphore, Semaphore } from "../src/concurrency";
+import { config } from "../src/config";
 import { evaluateJob, type JobEvaluation } from "../src/pipeline/evaluate";
 import { parseJobDetails, scrapeJobPage } from "../src/pipeline/scrape";
 import { structuralFilter } from "../src/pipeline/structuralFilter";
@@ -23,6 +24,11 @@ import {
   fetchAtsData,
   formatAtsBlock,
 } from "../src/services/ats";
+import {
+  flushPending,
+  initLangSmith,
+  shutdownLangSmith,
+} from "../src/services/langsmith";
 import { createNotionClient, updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
 
@@ -32,16 +38,7 @@ const LIMIT = limitArg ? Number.parseInt(limitArg.split("=")[1] ?? process.argv[
 
 const FIXTURE_CONCURRENCY = 8;
 
-const token = process.env.NOTION_TOKEN;
-const databaseId = process.env.NOTION_DATABASE_ID;
-const jinaApiKey = process.env.JINA_API_KEY;
-const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-if (!token || !databaseId || !jinaApiKey || !openrouterApiKey) {
-  console.error("Missing one of: NOTION_TOKEN, NOTION_DATABASE_ID, JINA_API_KEY, OPENROUTER_API_KEY");
-  process.exit(1);
-}
-
-const notion = createNotionClient(token);
+const notion = createNotionClient(config.notionToken);
 
 type ToReview = { id: string; title: string; company: string; url: string };
 
@@ -50,7 +47,7 @@ async function fetchToReview(): Promise<ToReview[]> {
   let cursor: string | undefined;
   do {
     const resp = await notion.databases.query({
-      database_id: databaseId!,
+      database_id: config.notionDatabaseId,
       filter: { property: "Status", select: { equals: "To Review" } },
       sorts: [{ property: "Date Scraped", direction: "descending" }],
       start_cursor: cursor,
@@ -83,7 +80,7 @@ async function fetchToReview(): Promise<ToReview[]> {
 async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: string; stage: string; atsSource: string | null }> {
   // Re-fetch markdown via Jina so we evaluate against the same input
   // shape the production pipeline sees.
-  const markdown = await scrapeJobPage(item.url, { jinaBaseUrl: "https://r.jina.ai", jinaApiKey: jinaApiKey! });
+  const markdown = await scrapeJobPage(item.url, config);
   const job: JobListing = parseJobDetails(markdown, item.url, "");
   // Do NOT overwrite job.title / job.company with the Notion-stored values:
   // those are post-enrich (the enrich LLM step rewrites them after evaluation).
@@ -204,4 +201,19 @@ async function main() {
   console.log(`\nDone. Updated ${updated}/${rejects.length} jobs to Auto-Rejected.`);
 }
 
-await main();
+async function run() {
+  await initLangSmith({
+    apiKey: config.langsmithApiKey,
+    endpoint: config.langsmithEndpoint,
+    project: config.langsmithProject,
+    openrouterApiKey: config.openrouterApiKey,
+  });
+  try {
+    await main();
+  } finally {
+    await flushPending();
+    shutdownLangSmith();
+  }
+}
+
+await run();
