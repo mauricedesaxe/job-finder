@@ -33,10 +33,11 @@ async function mainWithLedger(ledger: JobLedger) {
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
-  initLangSmith({
+  await initLangSmith({
     apiKey: config.langsmithApiKey,
     endpoint: config.langsmithEndpoint,
     project: config.langsmithProject,
+    openrouterApiKey: config.openrouterApiKey,
   });
 
   clearAshbyCache();

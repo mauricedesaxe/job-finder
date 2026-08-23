@@ -1,10 +1,15 @@
+import type { ChatPromptTemplate } from "@langchain/core/prompts";
+import { pull } from "langchain/hub/node";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
+
+export const LOCATION_ELIGIBILITY_PROMPT_REF = "job-finder-filter-location-eligibility:690ccba4";
 
 export interface LangSmithConfig {
   apiKey: string;
   endpoint: string;
   project: string;
+  openrouterApiKey: string;
 }
 
 export interface TraceOptions {
@@ -25,18 +30,56 @@ export interface TraceResult<T> {
 interface TraceConfigState {
   client: Client;
   project: string;
+  locationEligibilityPrompt: ChatPromptTemplate;
+}
+
+export interface LangSmithDependencies {
+  pullLocationEligibilityPrompt?: (input: {
+    client: Client;
+    apiKey: string;
+    endpoint: string;
+    openrouterApiKey: string;
+  }) => Promise<ChatPromptTemplate>;
 }
 
 let state: TraceConfigState | undefined;
 
-export function initLangSmith(cfg: LangSmithConfig): void {
-  state = {
-    client: new Client({
-      apiUrl: cfg.endpoint,
-      apiKey: cfg.apiKey,
-    }),
-    project: cfg.project,
-  };
+async function pullLocationEligibilityPrompt(input: {
+  client: Client;
+  apiKey: string;
+  endpoint: string;
+  openrouterApiKey: string;
+}): Promise<ChatPromptTemplate> {
+  return pull<ChatPromptTemplate>(LOCATION_ELIGIBILITY_PROMPT_REF, {
+    client: input.client,
+    apiKey: input.apiKey,
+    apiUrl: input.endpoint,
+    secrets: { OPENROUTER_API_KEY: input.openrouterApiKey },
+    secretsFromEnv: false,
+  });
+}
+
+export async function initLangSmith(
+  cfg: LangSmithConfig,
+  deps: LangSmithDependencies = {},
+): Promise<void> {
+  const client = new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
+  const loadPrompt = deps.pullLocationEligibilityPrompt ?? pullLocationEligibilityPrompt;
+  const locationEligibilityPrompt = await loadPrompt({
+    client,
+    apiKey: cfg.apiKey,
+    endpoint: cfg.endpoint,
+    openrouterApiKey: cfg.openrouterApiKey,
+  });
+
+  state = { client, project: cfg.project, locationEligibilityPrompt };
+}
+
+export function getLocationEligibilityPrompt(): ChatPromptTemplate {
+  if (!state) {
+    throw new Error("LangSmith is not initialized");
+  }
+  return state.locationEligibilityPrompt;
 }
 
 export function isTracingEnabled(): boolean {
