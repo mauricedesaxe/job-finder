@@ -1,9 +1,13 @@
-import type { ChatPromptTemplate } from "@langchain/core/prompts";
+import type { AIMessage } from "@langchain/core/messages";
+import type { Runnable } from "@langchain/core/runnables";
 import { pull } from "langchain/hub/node";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 
-export const LOCATION_ELIGIBILITY_PROMPT_REF = "job-finder-filter-location-eligibility:690ccba4";
+export const LOCATION_ELIGIBILITY_PROMPT_NAME = "job-finder-filter-location-eligibility";
+export const LOCATION_ELIGIBILITY_PROMPT_REF = `${LOCATION_ELIGIBILITY_PROMPT_NAME}:production`;
+
+export type LocationEligibilityRunnable = Runnable<{ job: string }, AIMessage>;
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -30,31 +34,47 @@ export interface TraceResult<T> {
 interface TraceConfigState {
   client: Client;
   project: string;
-  locationEligibilityPrompt: ChatPromptTemplate;
+  locationEligibilityCommitHash: string;
+  locationEligibilityRunnable: LocationEligibilityRunnable;
 }
 
 export interface LangSmithDependencies {
+  resolveLocationEligibilityCommit?: (input: {
+    client: Client;
+    promptRef: string;
+  }) => Promise<string>;
   pullLocationEligibilityPrompt?: (input: {
     client: Client;
     apiKey: string;
     endpoint: string;
     openrouterApiKey: string;
-  }) => Promise<ChatPromptTemplate>;
+    promptRef: string;
+  }) => Promise<LocationEligibilityRunnable>;
 }
 
 let state: TraceConfigState | undefined;
+
+async function resolveLocationEligibilityCommit(input: {
+  client: Client;
+  promptRef: string;
+}): Promise<string> {
+  const prompt = await input.client.pullPromptCommit(input.promptRef);
+  return prompt.commit_hash;
+}
 
 async function pullLocationEligibilityPrompt(input: {
   client: Client;
   apiKey: string;
   endpoint: string;
   openrouterApiKey: string;
-}): Promise<ChatPromptTemplate> {
-  return pull<ChatPromptTemplate>(LOCATION_ELIGIBILITY_PROMPT_REF, {
+  promptRef: string;
+}): Promise<LocationEligibilityRunnable> {
+  return pull<LocationEligibilityRunnable>(input.promptRef, {
     client: input.client,
     apiKey: input.apiKey,
     apiUrl: input.endpoint,
-    secrets: { OPENROUTER_API_KEY: input.openrouterApiKey },
+    includeModel: true,
+    secrets: { OPENAI_API_KEY: input.openrouterApiKey },
     secretsFromEnv: false,
   });
 }
@@ -64,22 +84,36 @@ export async function initLangSmith(
   deps: LangSmithDependencies = {},
 ): Promise<void> {
   const client = new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
+  const resolveCommit = deps.resolveLocationEligibilityCommit ?? resolveLocationEligibilityCommit;
   const loadPrompt = deps.pullLocationEligibilityPrompt ?? pullLocationEligibilityPrompt;
-  const locationEligibilityPrompt = await loadPrompt({
+  const locationEligibilityCommitHash = await resolveCommit({
+    client,
+    promptRef: LOCATION_ELIGIBILITY_PROMPT_REF,
+  });
+  const locationEligibilityRunnable = await loadPrompt({
     client,
     apiKey: cfg.apiKey,
     endpoint: cfg.endpoint,
     openrouterApiKey: cfg.openrouterApiKey,
+    promptRef: `${LOCATION_ELIGIBILITY_PROMPT_NAME}:${locationEligibilityCommitHash}`,
   });
 
-  state = { client, project: cfg.project, locationEligibilityPrompt };
+  state = {
+    client,
+    project: cfg.project,
+    locationEligibilityCommitHash,
+    locationEligibilityRunnable,
+  };
 }
 
-export function getLocationEligibilityPrompt(): ChatPromptTemplate {
-  if (!state) {
-    throw new Error("LangSmith is not initialized");
-  }
-  return state.locationEligibilityPrompt;
+export function getLocationEligibilityRunnable(): LocationEligibilityRunnable {
+  if (!state) throw new Error("LangSmith is not initialized");
+  return state.locationEligibilityRunnable;
+}
+
+export function getLocationEligibilityCommitHash(): string {
+  if (!state) throw new Error("LangSmith is not initialized");
+  return state.locationEligibilityCommitHash;
 }
 
 export function isTracingEnabled(): boolean {

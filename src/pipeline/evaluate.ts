@@ -1,4 +1,5 @@
-import { ChatOpenAI } from "@langchain/openai";
+import type { AIMessage } from "@langchain/core/messages";
+import { RunnableBinding, type RunnableConfig } from "@langchain/core/runnables";
 import { z } from "zod/v4";
 import {
   EVALUATION_PROFILES,
@@ -6,7 +7,12 @@ import {
   getEvaluationFilters,
 } from "../config/evaluation";
 import { logger } from "../logger";
-import { getLocationEligibilityPrompt, traced } from "../services/langsmith";
+import {
+  getLocationEligibilityCommitHash,
+  getLocationEligibilityRunnable,
+  type LocationEligibilityRunnable,
+  traced,
+} from "../services/langsmith";
 import { getClient } from "../services/llm";
 import type { JobListing } from "../types";
 
@@ -23,11 +29,43 @@ export const JobEvaluationSchema = z.object({
   reason: z.string(),
 });
 
-const EVALUATE_TOOL = {
+export const EVALUATE_TOOL = {
   name: "evaluate_job",
   description: "Submit the evaluation result for a job listing",
   schema: JobEvaluationSchema,
 };
+
+interface LocationEligibilityToolOptions extends RunnableConfig {
+  tools: Array<{
+    type: "function";
+    function: {
+      name: string;
+      description: string;
+      parameters: object;
+    };
+  }>;
+  tool_choice: { type: "function"; function: { name: string } };
+}
+
+const EVALUATE_TOOL_BINDING: LocationEligibilityToolOptions = {
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: EVALUATE_TOOL.name,
+        description: EVALUATE_TOOL.description,
+        parameters: z.toJSONSchema(EVALUATE_TOOL.schema),
+      },
+    },
+  ],
+  tool_choice: { type: "function", function: { name: EVALUATE_TOOL.name } },
+};
+
+export function bindLocationEligibilityTool(
+  runnable: LocationEligibilityRunnable,
+): RunnableBinding<{ job: string }, AIMessage, LocationEligibilityToolOptions> {
+  return new RunnableBinding({ bound: runnable, config: {}, kwargs: EVALUATE_TOOL_BINDING });
+}
 
 export async function evaluateSingle(
   job: JobListing,
@@ -49,25 +87,20 @@ ${job.description}`;
     {
       name: "evaluate",
       runType: "llm",
-      metadata: { name: criteria.name },
-      model: { name: model, temperature: options?.temperature },
+      metadata:
+        "promptSource" in criteria
+          ? { name: criteria.name, prompt_commit: getLocationEligibilityCommitHash() }
+          : { name: criteria.name },
+      model:
+        "promptSource" in criteria ? undefined : { name: model, temperature: options?.temperature },
     },
     async () => {
       if ("promptSource" in criteria) {
-        const response = await getLocationEligibilityPrompt()
-          .pipe(
-            new ChatOpenAI({
-              apiKey,
-              configuration: { baseURL: "https://openrouter.ai/api/v1" },
-              maxRetries: 0,
-              maxTokens: 256,
-              model,
-              temperature: options?.temperature,
-            }).bindTools([EVALUATE_TOOL], {
-              tool_choice: { type: "function", function: { name: EVALUATE_TOOL.name } },
-            }),
-          )
-          .invoke({ job: userMessage });
+        const response = await bindLocationEligibilityTool(getLocationEligibilityRunnable()).invoke(
+          {
+            job: userMessage,
+          },
+        );
         const toolCall = response.tool_calls?.[0];
         if (!toolCall || toolCall.name !== EVALUATE_TOOL.name) {
           throw new Error("Evaluation failed: no evaluate_job tool call in response");

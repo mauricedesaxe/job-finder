@@ -33,13 +33,6 @@ async function mainWithLedger(ledger: JobLedger) {
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
 
-  await initLangSmith({
-    apiKey: config.langsmithApiKey,
-    endpoint: config.langsmithEndpoint,
-    project: config.langsmithProject,
-    openrouterApiKey: config.openrouterApiKey,
-  });
-
   clearAshbyCache();
 
   if (reconcileOnly) {
@@ -47,6 +40,13 @@ async function mainWithLedger(ledger: JobLedger) {
     log.info({ stats, durationMs: Date.now() - startTime }, "reconciliation complete");
     return;
   }
+
+  await initLangSmith({
+    apiKey: config.langsmithApiKey,
+    endpoint: config.langsmithEndpoint,
+    project: config.langsmithProject,
+    openrouterApiKey: config.openrouterApiKey,
+  });
 
   if (!ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION)) {
     throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");

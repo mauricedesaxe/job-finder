@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { AIMessage } from "@langchain/core/messages";
+import { RunnableLambda } from "@langchain/core/runnables";
 import {
   EVALUATION_PROFILES,
   type EvaluationCriteria,
@@ -7,8 +9,15 @@ import {
   getEvaluationFilters,
   type LocalEvaluationCriteria,
 } from "../../config/evaluation";
+import { initLangSmith, shutdownLangSmith } from "../../services/langsmith";
 import type { JobListing } from "../../types";
-import { evaluateJob, evaluateSingle, type JobEvaluation, JobEvaluationSchema } from "../evaluate";
+import {
+  bindLocationEligibilityTool,
+  evaluateJob,
+  evaluateSingle,
+  type JobEvaluation,
+  JobEvaluationSchema,
+} from "../evaluate";
 
 const DUMMY_JOB: JobListing = {
   title: "Senior Engineer",
@@ -30,8 +39,11 @@ function makeFilter(name: string): LocalEvaluationCriteria {
 function makeProfile(name: string): LocalEvaluationCriteria {
   return { name, prompt: `profile: ${name}` };
 }
-
 describe("evaluate module exports", () => {
+  afterEach(() => {
+    shutdownLangSmith();
+  });
+
   test("exports evaluateJob function", () => {
     expect(typeof evaluateJob).toBe("function");
   });
@@ -47,6 +59,51 @@ describe("evaluate module exports", () => {
 
   test("rejects malformed evaluation tool output", () => {
     expect(() => JobEvaluationSchema.parse({ pass: true })).toThrow();
+  });
+
+  test("binds the Git-owned evaluation tool to the pulled runnable", async () => {
+    let options: unknown;
+    const runnable = RunnableLambda.from(async (_input: { job: string }, inputOptions) => {
+      options = inputOptions;
+      return new AIMessage({ content: "" });
+    });
+
+    await bindLocationEligibilityTool(runnable).invoke({ job: "test job" });
+
+    expect(options).toMatchObject({
+      tool_choice: { type: "function", function: { name: "evaluate_job" } },
+      tools: [{ type: "function", function: { name: "evaluate_job" } }],
+    });
+  });
+
+  test("rejects malformed tool output from the pulled runnable", async () => {
+    await initLangSmith(
+      {
+        apiKey: "dummy",
+        endpoint: "https://127.0.0.1:9",
+        project: "test",
+        openrouterApiKey: "openrouter-dummy",
+      },
+      {
+        resolveLocationEligibilityCommit: async () => "immutable-commit",
+        pullLocationEligibilityPrompt: async () =>
+          RunnableLambda.from(
+            async () =>
+              new AIMessage({
+                content: "",
+                tool_calls: [{ name: "evaluate_job", args: { pass: true }, id: "call_1" }],
+              }),
+          ),
+      },
+    );
+
+    await expect(
+      evaluateSingle(
+        DUMMY_JOB,
+        { name: "remote-europe-eligible", promptSource: "langsmith" },
+        "key",
+      ),
+    ).rejects.toThrow();
   });
 });
 
