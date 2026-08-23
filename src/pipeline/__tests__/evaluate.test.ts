@@ -5,9 +5,10 @@ import {
   type EvaluationFilter,
   type EvaluationProfile,
   getEvaluationFilters,
+  type LocalEvaluationCriteria,
 } from "../../config/evaluation";
 import type { JobListing } from "../../types";
-import { evaluateJob, evaluateSingle, type JobEvaluation } from "../evaluate";
+import { evaluateJob, evaluateSingle, type JobEvaluation, JobEvaluationSchema } from "../evaluate";
 
 const DUMMY_JOB: JobListing = {
   title: "Senior Engineer",
@@ -22,11 +23,11 @@ const DUMMY_JOB: JobListing = {
   profile: "",
 };
 
-function makeFilter(name: string): EvaluationCriteria {
+function makeFilter(name: string): LocalEvaluationCriteria {
   return { name, prompt: `filter: ${name}` };
 }
 
-function makeProfile(name: string): EvaluationCriteria {
+function makeProfile(name: string): LocalEvaluationCriteria {
   return { name, prompt: `profile: ${name}` };
 }
 
@@ -39,11 +40,13 @@ describe("evaluate module exports", () => {
     expect(typeof evaluateSingle).toBe("function");
   });
 
-  test("JobEvaluation interface shape is correct", () => {
-    const evaluation: JobEvaluation = { pass: true, reason: "test", profileName: "crypto-web3" };
-    expect(evaluation.pass).toBe(true);
-    expect(evaluation.reason).toBe("test");
-    expect(evaluation.profileName).toBe("crypto-web3");
+  test("parses the evaluation tool output", () => {
+    const evaluation: JobEvaluation = JobEvaluationSchema.parse({ pass: true, reason: "test" });
+    expect(evaluation).toEqual({ pass: true, reason: "test" });
+  });
+
+  test("rejects malformed evaluation tool output", () => {
+    expect(() => JobEvaluationSchema.parse({ pass: true })).toThrow();
   });
 });
 
@@ -51,6 +54,18 @@ describe("profile and filter types", () => {
   test("EVALUATION_PROFILES is an array", () => {
     expect(Array.isArray(EVALUATION_PROFILES)).toBe(true);
     expect(EVALUATION_PROFILES.length).toBeGreaterThan(0);
+  });
+
+  test("gets the location filter from LangSmith", () => {
+    const remoteFilter = getEvaluationFilters().find(
+      (filter) => filter.name === "remote-europe-eligible",
+    );
+
+    expect(remoteFilter).toEqual({
+      name: "remote-europe-eligible",
+      promptSource: "langsmith",
+    });
+    expect(remoteFilter && "prompt" in remoteFilter).toBe(false);
   });
 
   test("getEvaluationFilters returns an array", () => {
@@ -85,8 +100,8 @@ describe("evaluateJob two-phase flow", () => {
       _job: JobListing,
       criteria: EvaluationCriteria,
     ): Promise<JobEvaluation> => {
-      if (criteria.prompt.startsWith("profile:")) profileCalled = true;
-      if (criteria.prompt.startsWith("filter:"))
+      if ("prompt" in criteria && criteria.prompt.startsWith("profile:")) profileCalled = true;
+      if ("prompt" in criteria && criteria.prompt.startsWith("filter:"))
         return { pass: false, reason: "Location mismatch" };
       return { pass: true, reason: "ok" };
     };
@@ -159,7 +174,8 @@ describe("evaluateJob two-phase flow", () => {
       _job: JobListing,
       criteria: EvaluationCriteria,
     ): Promise<JobEvaluation> => {
-      if (criteria.prompt.startsWith("filter:")) return { pass: true, reason: "ok" };
+      if ("prompt" in criteria && criteria.prompt.startsWith("filter:"))
+        return { pass: true, reason: "ok" };
       return { pass: false, reason: "Not a match" };
     };
 

@@ -1,11 +1,12 @@
-import type OpenAI from "openai";
+import { ChatOpenAI } from "@langchain/openai";
+import { z } from "zod/v4";
 import {
   EVALUATION_PROFILES,
   type EvaluationCriteria,
   getEvaluationFilters,
 } from "../config/evaluation";
 import { logger } from "../logger";
-import { traced } from "../services/langsmith";
+import { getLocationEligibilityPrompt, traced } from "../services/langsmith";
 import { getClient } from "../services/llm";
 import type { JobListing } from "../types";
 
@@ -17,26 +18,15 @@ export interface JobEvaluation {
 
 const log = logger.child({ component: "evaluate" });
 
-const EVALUATE_TOOL: OpenAI.ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "evaluate_job",
-    description: "Submit the evaluation result for a job listing",
-    parameters: {
-      type: "object" as const,
-      properties: {
-        pass: {
-          type: "boolean",
-          description: "Whether the job passes all criteria",
-        },
-        reason: {
-          type: "string",
-          description: "Brief explanation for the decision",
-        },
-      },
-      required: ["pass", "reason"],
-    },
-  },
+export const JobEvaluationSchema = z.object({
+  pass: z.boolean(),
+  reason: z.string(),
+});
+
+const EVALUATE_TOOL = {
+  name: "evaluate_job",
+  description: "Submit the evaluation result for a job listing",
+  schema: JobEvaluationSchema,
 };
 
 export async function evaluateSingle(
@@ -45,7 +35,6 @@ export async function evaluateSingle(
   apiKey: string,
   options?: { temperature?: number; model?: string },
 ): Promise<JobEvaluation> {
-  const client = getClient(apiKey);
   const model = options?.model ?? "google/gemini-2.5-flash";
 
   const userMessage = `Job Title: ${job.title}
@@ -64,6 +53,40 @@ ${job.description}`;
       model: { name: model, temperature: options?.temperature },
     },
     async () => {
+      if ("promptSource" in criteria) {
+        const response = await getLocationEligibilityPrompt()
+          .pipe(
+            new ChatOpenAI({
+              apiKey,
+              configuration: { baseURL: "https://openrouter.ai/api/v1" },
+              maxRetries: 0,
+              maxTokens: 256,
+              model,
+              temperature: options?.temperature,
+            }).bindTools([EVALUATE_TOOL], {
+              tool_choice: { type: "function", function: { name: EVALUATE_TOOL.name } },
+            }),
+          )
+          .invoke({ job: userMessage });
+        const toolCall = response.tool_calls?.[0];
+        if (!toolCall || toolCall.name !== EVALUATE_TOOL.name) {
+          throw new Error("Evaluation failed: no evaluate_job tool call in response");
+        }
+
+        const usage = response.usage_metadata;
+        return {
+          data: JobEvaluationSchema.parse(toolCall.args),
+          usage: usage
+            ? {
+                input: usage.input_tokens,
+                output: usage.output_tokens,
+                total: usage.total_tokens,
+              }
+            : undefined,
+        };
+      }
+
+      const client = getClient(apiKey);
       const response = await client.chat.completions.create({
         model,
         max_tokens: 256,
@@ -72,8 +95,17 @@ ${job.description}`;
           { role: "system", content: criteria.prompt },
           { role: "user", content: userMessage },
         ],
-        tools: [EVALUATE_TOOL],
-        tool_choice: { type: "function", function: { name: "evaluate_job" } },
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: EVALUATE_TOOL.name,
+              description: EVALUATE_TOOL.description,
+              parameters: z.toJSONSchema(EVALUATE_TOOL.schema),
+            },
+          },
+        ],
+        tool_choice: { type: "function", function: { name: EVALUATE_TOOL.name } },
       });
 
       const usage = response.usage;
@@ -87,9 +119,8 @@ ${job.description}`;
       }
 
       try {
-        const data = JSON.parse(toolCall.function.arguments) as JobEvaluation;
         return {
-          data,
+          data: JobEvaluationSchema.parse(JSON.parse(toolCall.function.arguments)),
           usage: usage
             ? {
                 input: usage.prompt_tokens,
