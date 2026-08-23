@@ -170,20 +170,13 @@ async function processJobBody(
 
   const evaluation = await llmSemaphore.run(() =>
     llmBreaker.run(() =>
-      withRetry(
-        () =>
-          evaluateJob(job, config.openrouterApiKey, {
-            filters: ctx.filters,
-            model: config.llmModel,
-          }),
-        {
-          shouldRetry: isRetryableLLM,
-          onRetry: (a) => {
-            state.retries++;
-            log.warn({ url, attempt: a }, "llm eval retry");
-          },
+      withRetry(() => evaluateJob(job, { filters: ctx.filters }), {
+        shouldRetry: isRetryableLLM,
+        onRetry: (a) => {
+          state.retries++;
+          log.warn({ url, attempt: a }, "llm eval retry");
         },
-      ),
+      }),
     ),
   );
 
@@ -209,7 +202,7 @@ async function processJobBody(
 
   const enriched = await llmSemaphore.run(() =>
     llmBreaker.run(() =>
-      withRetry(() => enrichJob(job, config.openrouterApiKey, config.llmModel), {
+      withRetry(() => enrichJob(job), {
         shouldRetry: isRetryableLLM,
         onRetry: (a) => {
           state.retries++;
@@ -226,17 +219,13 @@ async function processJobBody(
   const existingTitles = ledger.titlesForCompany(job.company);
   if (existingTitles.length > 0) {
     const dedup = await llmSemaphore.run(() =>
-      withRetry(
-        () =>
-          checkFuzzyDuplicate(job.title, existingTitles, config.openrouterApiKey, config.llmModel),
-        {
-          shouldRetry: isRetryableLLM,
-          onRetry: (a) => {
-            state.retries++;
-            log.warn({ url, attempt: a }, "llm dedup retry");
-          },
+      withRetry(() => checkFuzzyDuplicate(job.title, existingTitles), {
+        shouldRetry: isRetryableLLM,
+        onRetry: (a) => {
+          state.retries++;
+          log.warn({ url, attempt: a }, "llm dedup retry");
         },
-      ),
+      }),
     );
     if (dedup.isDuplicate) {
       log.info(

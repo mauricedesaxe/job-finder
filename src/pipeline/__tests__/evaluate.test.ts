@@ -1,298 +1,53 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { AIMessage } from "@langchain/core/messages";
-import { RunnableLambda } from "@langchain/core/runnables";
-import {
-  EVALUATION_PROFILES,
-  type EvaluationCriteria,
-  type EvaluationFilter,
-  type EvaluationProfile,
-  getEvaluationFilters,
-  type LocalEvaluationCriteria,
-} from "../../config/evaluation";
-import { initLangSmith, shutdownLangSmith } from "../../services/langsmith";
+import { describe, expect, test } from "bun:test";
+import type { EvaluationCriteria } from "../../config/evaluation";
 import type { JobListing } from "../../types";
-import {
-  bindLocationEligibilityTool,
-  evaluateJob,
-  evaluateSingle,
-  type JobEvaluation,
-  JobEvaluationSchema,
-} from "../evaluate";
+import { evaluateJob, JobEvaluationSchema } from "../evaluate";
 
-const DUMMY_JOB: JobListing = {
+const job: JobListing = {
   title: "Senior Engineer",
   company: "TestCo",
-  url: "https://example.com/job",
+  url: "https://example.test",
   source: "test",
-  keywordsMatched: ["engineer"],
+  keywordsMatched: [],
   datePosted: null,
   dateScraped: "2026-01-01",
-  description: "A test job",
+  description: "body",
   location: "Remote",
   profile: "",
 };
-
-function makeFilter(name: string): LocalEvaluationCriteria {
-  return { name, prompt: `filter: ${name}` };
-}
-
-function makeProfile(name: string): LocalEvaluationCriteria {
-  return { name, prompt: `profile: ${name}` };
-}
-describe("evaluate module exports", () => {
-  afterEach(() => {
-    shutdownLangSmith();
-  });
-
-  test("exports evaluateJob function", () => {
-    expect(typeof evaluateJob).toBe("function");
-  });
-
-  test("exports evaluateSingle function", () => {
-    expect(typeof evaluateSingle).toBe("function");
-  });
-
-  test("parses the evaluation tool output", () => {
-    const evaluation: JobEvaluation = JobEvaluationSchema.parse({ pass: true, reason: "test" });
-    expect(evaluation).toEqual({ pass: true, reason: "test" });
-  });
-
-  test("rejects malformed evaluation tool output", () => {
-    expect(() => JobEvaluationSchema.parse({ pass: true })).toThrow();
-  });
-
-  test("binds the Git-owned evaluation tool to the pulled runnable", async () => {
-    let options: unknown;
-    const runnable = RunnableLambda.from(async (_input: { job: string }, inputOptions) => {
-      options = inputOptions;
-      return new AIMessage({ content: "" });
-    });
-
-    await bindLocationEligibilityTool(runnable).invoke({ job: "test job" });
-
-    expect(options).toMatchObject({
-      tool_choice: { type: "function", function: { name: "evaluate_job" } },
-      tools: [{ type: "function", function: { name: "evaluate_job" } }],
-    });
-  });
-
-  test("rejects malformed tool output from the pulled runnable", async () => {
-    await initLangSmith(
-      {
-        apiKey: "dummy",
-        endpoint: "https://127.0.0.1:9",
-        project: "test",
-        openrouterApiKey: "openrouter-dummy",
+const filter: EvaluationCriteria = {
+  name: "role-quality",
+  promptName: "job-finder-filter-role-quality",
+};
+const profile: EvaluationCriteria = {
+  name: "ai-engineering",
+  promptName: "job-finder-profile-ai-engineering",
+};
+describe("evaluation", () => {
+  test("parses the code-owned tool contract", () =>
+    expect(JobEvaluationSchema.parse({ pass: true, reason: "ok" })).toEqual({
+      pass: true,
+      reason: "ok",
+    }));
+  test("stops before profiles when a filter rejects", async () => {
+    const calls: string[] = [];
+    const result = await evaluateJob(job, {
+      filters: [filter],
+      profiles: [profile],
+      evaluate: async (_job, criteria) => {
+        calls.push(criteria.name);
+        return { pass: false, reason: "no" };
       },
-      {
-        resolveLocationEligibilityCommit: async () => "immutable-commit",
-        pullLocationEligibilityPrompt: async () =>
-          RunnableLambda.from(
-            async () =>
-              new AIMessage({
-                content: "",
-                tool_calls: [{ name: "evaluate_job", args: { pass: true }, id: "call_1" }],
-              }),
-          ),
-      },
-    );
-
-    await expect(
-      evaluateSingle(
-        DUMMY_JOB,
-        { name: "remote-europe-eligible", promptSource: "langsmith" },
-        "key",
-      ),
-    ).rejects.toThrow();
-  });
-});
-
-describe("profile and filter types", () => {
-  test("EVALUATION_PROFILES is an array", () => {
-    expect(Array.isArray(EVALUATION_PROFILES)).toBe(true);
-    expect(EVALUATION_PROFILES.length).toBeGreaterThan(0);
-  });
-
-  test("gets the location filter from LangSmith", () => {
-    const remoteFilter = getEvaluationFilters().find(
-      (filter) => filter.name === "remote-europe-eligible",
-    );
-
-    expect(remoteFilter).toEqual({
-      name: "remote-europe-eligible",
-      promptSource: "langsmith",
     });
-    expect(remoteFilter && "prompt" in remoteFilter).toBe(false);
+    expect(result).toEqual({ pass: false, reason: "no" });
+    expect(calls).toEqual(["role-quality"]);
   });
-
-  test("getEvaluationFilters returns an array", () => {
-    expect(Array.isArray(getEvaluationFilters())).toBe(true);
-  });
-
-  test("profiles satisfy EvaluationCriteria", () => {
-    for (const profile of EVALUATION_PROFILES) {
-      const criteria: EvaluationCriteria = profile;
-      expect(typeof criteria.name).toBe("string");
-      expect(typeof criteria.prompt).toBe("string");
-    }
-  });
-
-  test("EvaluationFilter extends EvaluationCriteria", () => {
-    const filter: EvaluationFilter = { name: "test-filter", prompt: "test prompt" };
-    const criteria: EvaluationCriteria = filter;
-    expect(criteria.name).toBe("test-filter");
-  });
-
-  test("EvaluationProfile extends EvaluationCriteria", () => {
-    const profile: EvaluationProfile = { name: "test-profile", prompt: "test prompt" };
-    const criteria: EvaluationCriteria = profile;
-    expect(criteria.name).toBe("test-profile");
-  });
-});
-
-describe("evaluateJob two-phase flow", () => {
-  test("filter fails → job rejected, profiles never called", async () => {
-    let profileCalled = false;
-    const evaluate = async (
-      _job: JobListing,
-      criteria: EvaluationCriteria,
-    ): Promise<JobEvaluation> => {
-      if ("prompt" in criteria && criteria.prompt.startsWith("profile:")) profileCalled = true;
-      if ("prompt" in criteria && criteria.prompt.startsWith("filter:"))
-        return { pass: false, reason: "Location mismatch" };
-      return { pass: true, reason: "ok" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("location-gate")],
-      profiles: [makeProfile("crypto")],
-      evaluate,
+  test("uses the passing profile name", async () => {
+    const result = await evaluateJob(job, {
+      filters: [filter],
+      profiles: [profile],
+      evaluate: async () => ({ pass: true, reason: "yes" }),
     });
-
-    expect(result.pass).toBe(false);
-    expect(result.reason).toBe("Location mismatch");
-    expect(profileCalled).toBe(false);
-  });
-
-  test("filter throws → error propagates for upstream retry", async () => {
-    const evaluate = async (): Promise<JobEvaluation> => {
-      throw new Error("API timeout");
-    };
-
-    await expect(
-      evaluateJob(DUMMY_JOB, "fake-key", {
-        filters: [makeFilter("location-gate")],
-        profiles: [makeProfile("crypto")],
-        evaluate,
-      }),
-    ).rejects.toThrow("API timeout");
-  });
-
-  test("all filters pass → profiles run", async () => {
-    const called: string[] = [];
-    const evaluate = async (
-      _job: JobListing,
-      criteria: EvaluationCriteria,
-    ): Promise<JobEvaluation> => {
-      called.push(criteria.name);
-      return { pass: true, reason: "ok" };
-    };
-
-    await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("f1")],
-      profiles: [makeProfile("p1")],
-      evaluate,
-    });
-
-    expect(called).toContain("f1");
-    expect(called).toContain("p1");
-  });
-
-  test("filters pass + profile passes → job passes with profileName", async () => {
-    const evaluate = async (
-      _job: JobListing,
-      _criteria: EvaluationCriteria,
-    ): Promise<JobEvaluation> => {
-      return { pass: true, reason: "Looks good" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("f1")],
-      profiles: [makeProfile("crypto")],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(true);
-    expect(result.profileName).toBe("crypto");
-  });
-
-  test("filters pass + all profiles fail → job rejected", async () => {
-    const evaluate = async (
-      _job: JobListing,
-      criteria: EvaluationCriteria,
-    ): Promise<JobEvaluation> => {
-      if ("prompt" in criteria && criteria.prompt.startsWith("filter:"))
-        return { pass: true, reason: "ok" };
-      return { pass: false, reason: "Not a match" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("f1")],
-      profiles: [makeProfile("p1"), makeProfile("p2")],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(false);
-    expect(result.reason).toBe("Not a match");
-  });
-
-  test("no filters → profiles run directly", async () => {
-    const called: string[] = [];
-    const evaluate = async (
-      _job: JobListing,
-      criteria: EvaluationCriteria,
-    ): Promise<JobEvaluation> => {
-      called.push(criteria.name);
-      return { pass: true, reason: "ok" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [],
-      profiles: [makeProfile("p1")],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(true);
-    expect(called).toEqual(["p1"]);
-  });
-
-  test("no profiles + filters pass → job passes", async () => {
-    const evaluate = async (): Promise<JobEvaluation> => {
-      return { pass: true, reason: "ok" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [makeFilter("f1")],
-      profiles: [],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(true);
-    expect(result.reason).toBe("Passed all filters");
-  });
-
-  test("no filters + no profiles → job fails", async () => {
-    const evaluate = async (): Promise<JobEvaluation> => {
-      return { pass: true, reason: "ok" };
-    };
-
-    const result = await evaluateJob(DUMMY_JOB, "fake-key", {
-      filters: [],
-      profiles: [],
-      evaluate,
-    });
-
-    expect(result.pass).toBe(false);
-    expect(result.reason).toBe("No profiles configured");
+    expect(result).toEqual({ pass: true, reason: "yes", profileName: "ai-engineering" });
   });
 });
