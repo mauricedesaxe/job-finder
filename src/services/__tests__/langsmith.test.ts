@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { AIMessage } from "@langchain/core/messages";
 import { RunnableLambda } from "@langchain/core/runnables";
 import {
@@ -11,6 +11,37 @@ import { PROMPT_NAMES } from "../promptRegistry";
 
 describe("LangSmith prompt resolution", () => {
   afterEach(shutdownLangSmith);
+
+  test("resolves release tags from the repository tag array", async () => {
+    const fetch = spyOn(globalThis, "fetch");
+    for (const _ of PROMPT_NAMES) {
+      fetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ tag_name: "release-2026-08-23-1", commit_hash: "release-commit" }]),
+        ),
+      );
+    }
+
+    try {
+      await initLangSmith(
+        {
+          apiKey: "key",
+          endpoint: "https://example.test",
+          project: "test",
+          openrouterApiKey: "router",
+        },
+        {
+          pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
+        },
+      );
+
+      expect(getPromptReleaseTag()).toBe("release-2026-08-23-1");
+      expect(getPromptCommitHash(PROMPT_NAMES[0])).toBe("release-commit");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   test("freezes every production prompt at one release", async () => {
     await initLangSmith(
       {
@@ -21,8 +52,7 @@ describe("LangSmith prompt resolution", () => {
       },
       {
         resolvePrompt: async ({ name }) => ({
-          commitHash: `${name}-commit`,
-          releaseTags: ["release-2026-08-23-1"],
+          releaseTags: [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
         }),
         pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
       },
@@ -41,9 +71,11 @@ describe("LangSmith prompt resolution", () => {
         },
         {
           resolvePrompt: async ({ name }) => ({
-            commitHash: `${name}-commit`,
             releaseTags: [
-              name === PROMPT_NAMES[0] ? "release-2026-08-23-1" : "release-2026-08-22-1",
+              {
+                name: name === PROMPT_NAMES[0] ? "release-2026-08-23-1" : "release-2026-08-22-1",
+                commitHash: `${name}-commit`,
+              },
             ],
           }),
           pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
@@ -62,11 +94,13 @@ describe("LangSmith prompt resolution", () => {
       },
       {
         resolvePrompt: async ({ name }) => ({
-          commitHash: `${name}-commit`,
           releaseTags:
             name === PROMPT_NAMES[0]
-              ? ["release-2026-08-22-1", "release-2026-08-23-1"]
-              : ["release-2026-08-23-1"],
+              ? [
+                  { name: "release-2026-08-22-1", commitHash: `${name}-old-commit` },
+                  { name: "release-2026-08-23-1", commitHash: `${name}-commit` },
+                ]
+              : [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
         }),
         pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
       },

@@ -24,6 +24,7 @@ describe("prompt administration", () => {
         moves.push(`${name}:${commitId}`);
         if (name === second && commitId === "new-second") throw new Error("network");
       },
+      deleteTag: async () => {},
     };
     await expect(
       moveProductionAtomically({
@@ -44,5 +45,55 @@ describe("prompt administration", () => {
       `${first}:old-first`,
       `${second}:old-second`,
     ]);
+  });
+  test("removes production tags created during a failed first release", async () => {
+    const calls: string[] = [];
+    const client: PromptTagClient = {
+      moveTag: async ({ name, commitId }) => {
+        calls.push(`move:${name}:${commitId}`);
+        if (name === second) throw new Error("network");
+      },
+      deleteTag: async ({ name, tag }) => {
+        calls.push(`delete:${name}:${tag}`);
+      },
+    };
+    await expect(
+      moveProductionAtomically({
+        client,
+        targets: new Map([
+          [first, "new-first"],
+          [second, "new-second"],
+        ]),
+        previous: new Map(),
+      }),
+    ).rejects.toThrow("network");
+    expect(calls).toEqual([
+      `move:${first}:new-first`,
+      `move:${second}:new-second`,
+      `delete:${first}:production`,
+      `delete:${second}:production`,
+    ]);
+  });
+  test("rejects mixed production history before moving a tag", async () => {
+    const calls: string[] = [];
+    const client: PromptTagClient = {
+      moveTag: async ({ name }) => {
+        calls.push(`move:${name}`);
+      },
+      deleteTag: async ({ name }) => {
+        calls.push(`delete:${name}`);
+      },
+    };
+    await expect(
+      moveProductionAtomically({
+        client,
+        targets: new Map([
+          [first, "new-first"],
+          [second, "new-second"],
+        ]),
+        previous: new Map([[first, "old-first"]]),
+      }),
+    ).rejects.toThrow("partial prior production history");
+    expect(calls).toEqual([]);
   });
 });
