@@ -3,7 +3,7 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { Client } from "langsmith";
 import { z } from "zod/v4";
 import { isUnchangedPromptConflict } from "../src/services/promptAdmin";
-import { PROMPT_NAMES, type PromptName } from "../src/services/promptRegistry";
+import { PROMPT_NAMES, PROMPT_REGISTRY, type PromptName } from "../src/services/promptRegistry";
 
 const legacyRef = "a702deef57526a024df4b4e29ab4279ecddbaaac";
 const BootstrapConfigSchema = z.object({
@@ -74,11 +74,17 @@ const client = new Client({
   apiKey: bootstrapConfig.langsmithApiKey,
   workspaceId: await currentTenantId(),
 });
-const model = new ChatOpenAI({ apiKey: bootstrapConfig.openrouterApiKey, configuration: { baseURL: "https://openrouter.ai/api/v1" }, model: "google/gemini-2.5-flash", temperature: 0, maxTokens: 256 });
 const importedTemplates = await templates();
 for (const name of PROMPT_NAMES) {
   const template = importedTemplates.get(name);
   if (!template) throw new Error(`Missing bootstrap template for ${name}`);
+  const model = new ChatOpenAI({
+    apiKey: bootstrapConfig.openrouterApiKey,
+    configuration: { baseURL: "https://openrouter.ai/api/v1" },
+    model: "google/gemini-2.5-flash",
+    temperature: 0,
+    maxTokens: PROMPT_REGISTRY[name].maxTokens,
+  });
   try {
     await client.pushPrompt(name, { object: template.pipe(model) });
   } catch (error) {

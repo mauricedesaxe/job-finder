@@ -27,17 +27,17 @@ export const EVALUATION_PROMPTS = [
 export type EvaluationPromptName = (typeof EVALUATION_PROMPTS)[number];
 
 export const PROMPT_REGISTRY = {
-  "job-finder-filter-location-eligibility": { input: ["job"] },
-  "job-finder-filter-compensation": { input: ["job", "rates"] },
-  "job-finder-filter-role-quality": { input: ["job"] },
-  "job-finder-filter-company-quality": { input: ["job"] },
-  "job-finder-profile-crypto-web3-ts": { input: ["job"] },
-  "job-finder-profile-fintech-trading-infra-ts": { input: ["job"] },
-  "job-finder-profile-senior-fullstack-react": { input: ["job"] },
-  "job-finder-profile-ai-engineering": { input: ["job"] },
-  "job-finder-enrichment": { input: ["job"] },
-  "job-finder-title-deduplication": { input: ["newTitle", "existingTitles"] },
-} as const satisfies Record<PromptName, { input: readonly string[] }>;
+  "job-finder-filter-location-eligibility": { input: ["job"], maxTokens: 256 },
+  "job-finder-filter-compensation": { input: ["job", "rates"], maxTokens: 256 },
+  "job-finder-filter-role-quality": { input: ["job"], maxTokens: 256 },
+  "job-finder-filter-company-quality": { input: ["job"], maxTokens: 256 },
+  "job-finder-profile-crypto-web3-ts": { input: ["job"], maxTokens: 256 },
+  "job-finder-profile-fintech-trading-infra-ts": { input: ["job"], maxTokens: 256 },
+  "job-finder-profile-senior-fullstack-react": { input: ["job"], maxTokens: 256 },
+  "job-finder-profile-ai-engineering": { input: ["job"], maxTokens: 256 },
+  "job-finder-enrichment": { input: ["job"], maxTokens: 1024 },
+  "job-finder-title-deduplication": { input: ["newTitle", "existingTitles"], maxTokens: 128 },
+} as const satisfies Record<PromptName, { input: readonly string[]; maxTokens: number }>;
 
 export function promptRef(name: PromptName, version = "production"): string {
   return `${name}:${version}`;

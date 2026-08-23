@@ -34,6 +34,11 @@ export interface TraceResult<T> {
 
 type PromptRunnable = Runnable<Record<string, string>, AIMessage>;
 
+interface ResolvedPromptVersion {
+  commitHash: string;
+  releaseTags: string[];
+}
+
 interface ResolvedPrompt {
   commitHash: string;
   releaseTag: string;
@@ -51,7 +56,7 @@ export interface LangSmithDependencies {
     client: Client;
     config: LangSmithConfig;
     name: PromptName;
-  }) => Promise<{ commitHash: string; releaseTag: string }>;
+  }) => Promise<ResolvedPromptVersion>;
   pullPrompt?: (input: {
     client: Client;
     config: LangSmithConfig;
@@ -70,7 +75,7 @@ async function resolvePrompt(input: {
   client: Client;
   config: LangSmithConfig;
   name: PromptName;
-}): Promise<{ commitHash: string; releaseTag: string }> {
+}): Promise<ResolvedPromptVersion> {
   const commit = await input.client.pullPromptCommit(promptRef(input.name));
   const response = await fetch(`${input.config.endpoint}/repos/-/${input.name}/tags`, {
     headers: { "x-api-key": input.config.apiKey },
@@ -81,12 +86,19 @@ async function resolvePrompt(input: {
   const releaseTags = tags
     .map((tag) => tag.tag_name)
     .filter((tag) => /^release-\d{4}-\d{2}-\d{2}-\d+$/.test(tag));
-  for (const releaseTag of releaseTags) {
-    const taggedCommit = await input.client.pullPromptCommit(promptRef(input.name, releaseTag));
-    if (taggedCommit.commit_hash === commit.commit_hash)
-      return { commitHash: commit.commit_hash, releaseTag };
-  }
-  throw new Error(`Production prompt ${input.name} is not tagged with an immutable release`);
+  const taggedCommits = await Promise.all(
+    releaseTags.map(async (releaseTag) => ({
+      releaseTag,
+      commitHash: (await input.client.pullPromptCommit(promptRef(input.name, releaseTag)))
+        .commit_hash,
+    })),
+  );
+  const matchingReleaseTags = taggedCommits
+    .filter((tagged) => tagged.commitHash === commit.commit_hash)
+    .map((tagged) => tagged.releaseTag);
+  if (!matchingReleaseTags.length)
+    throw new Error(`Production prompt ${input.name} is not tagged with an immutable release`);
+  return { commitHash: commit.commit_hash, releaseTags: matchingReleaseTags };
 }
 
 async function pullPrompt(input: {
@@ -112,16 +124,28 @@ export async function initLangSmith(
   const client = new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
   const resolve = deps.resolvePrompt ?? resolvePrompt;
   const load = deps.pullPrompt ?? pullPrompt;
-  const resolved = await Promise.all(
+  const versions = await Promise.all(
     PROMPT_NAMES.map(async (name) => {
       const version = await resolve({ client, config: cfg, name });
-      const runnable = await load({ client, config: cfg, name, commitHash: version.commitHash });
-      return [name, { ...version, runnable }] as const;
+      return [name, version] as const;
     }),
   );
-  const releaseTags = new Set(resolved.map(([, prompt]) => prompt.releaseTag));
-  if (releaseTags.size !== 1)
-    throw new Error(`Production prompts have mixed releases: ${[...releaseTags].join(", ")}`);
+  const commonReleaseTags = versions.reduce((common, [, version]) => {
+    for (const releaseTag of common) {
+      if (!version.releaseTags.includes(releaseTag)) {
+        common.delete(releaseTag);
+      }
+    }
+    return common;
+  }, new Set(versions[0]?.[1].releaseTags));
+  const releaseTag = [...commonReleaseTags].sort().at(-1);
+  if (!releaseTag) throw new Error("Production prompts have mixed releases");
+  const resolved = await Promise.all(
+    versions.map(async ([name, version]) => {
+      const runnable = await load({ client, config: cfg, name, commitHash: version.commitHash });
+      return [name, { commitHash: version.commitHash, releaseTag, runnable }] as const;
+    }),
+  );
   state = { client, project: cfg.project, prompts: new Map(resolved) };
 }
 
