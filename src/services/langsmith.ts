@@ -5,7 +5,9 @@ import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
 import { withRetry } from "../concurrency";
+import type { ReviewSnapshot } from "../review";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
+import { createReviewQueue } from "./reviewQueue";
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -58,6 +60,7 @@ interface TraceConfigState {
   client: Client;
   project: string;
   prompts: Map<PromptName, ResolvedPrompt>;
+  reviewQueue: ReturnType<typeof createReviewQueue>;
 }
 
 export interface LangSmithDependencies {
@@ -147,7 +150,12 @@ export async function initLangSmith(
       return [name, { commitHash: release.commitHash, releaseTag, runnable }] as const;
     }),
   );
-  state = { client, project: cfg.project, prompts: new Map(resolved) };
+  state = {
+    client,
+    project: cfg.project,
+    prompts: new Map(resolved),
+    reviewQueue: createReviewQueue(client),
+  };
 }
 
 function configuredPrompt(name: PromptName): ResolvedPrompt {
@@ -164,6 +172,12 @@ export function getPromptReleaseTag(): string {
   const prompt = state?.prompts.values().next().value as ResolvedPrompt | undefined;
   if (!prompt) throw new Error("LangSmith is not initialized");
   return prompt.releaseTag;
+}
+
+export async function enqueueReviewSnapshot(snapshot: ReviewSnapshot): Promise<void> {
+  if (!state) throw new Error("LangSmith is not initialized");
+  await state.client.flush();
+  await state.reviewQueue.enqueue(snapshot);
 }
 
 export async function invokePrompt<T>(input: {

@@ -12,9 +12,15 @@ import {
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
-import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
+import { type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
+import {
+  type AtsJobData,
+  atsStructuralFilter,
+  fetchAtsData,
+  formatAtsBlock,
+} from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
-import { traced } from "../services/langsmith";
+import { enqueueReviewSnapshot, getPromptReleaseTag, traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
@@ -59,6 +65,8 @@ interface ProcessResultState {
   retries: number;
   outcome: ProcessResult;
   profile: string;
+  atsData: AtsJobData | null;
+  reviewSnapshot: ReviewSnapshot | undefined;
 }
 
 interface ProcessJobResult {
@@ -89,6 +97,8 @@ export async function processUrl(
     retries: 0,
     outcome: "errored",
     profile: "",
+    atsData: null,
+    reviewSnapshot: undefined,
   };
 
   return traced(
@@ -102,6 +112,7 @@ export async function processUrl(
         outcome: state.outcome,
         matched_profile: state.profile,
         retry_count: state.retries,
+        ...(state.reviewSnapshot ? { review_snapshot: state.reviewSnapshot } : {}),
       }),
     },
     async ({ requireAccepted }) => {
@@ -141,6 +152,7 @@ async function processJobBody(
     );
     if (atsData) {
       state.ats = true;
+      state.atsData = atsData;
       log.debug({ url, source: atsData.source }, "ats enriched");
       job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
 
@@ -270,13 +282,37 @@ async function processJobBody(
     });
   }
 
-  return terminalResult(state, {
-    ledger,
-    url,
-    job,
-    outcome: "inserted",
-    project: () => insertJob(notion, config.notionDatabaseId, job),
-  });
+  const outcome = "inserted";
+  return {
+    data: {
+      outcome,
+      record: async (traceId) => {
+        const snapshot = ReviewSnapshotSchema.parse({
+          traceId,
+          promptRelease: getPromptReleaseTag(),
+          job,
+          ats: state.atsData,
+          compensationRates:
+            ctx.filters?.find((filter) => filter.name === "compensation-minimum")?.rates ?? null,
+          evaluation: {
+            profile: evaluation.profileName,
+            reason: evaluation.reason,
+          },
+        });
+        state.outcome = outcome;
+        state.reviewSnapshot = snapshot;
+        await enqueueReviewSnapshot(snapshot);
+        await recordTerminalResult({
+          ledger,
+          url,
+          job,
+          outcome,
+          traceId,
+          project: () => insertJob(notion, config.notionDatabaseId, job),
+        });
+      },
+    },
+  };
 }
 
 function terminalResult(
