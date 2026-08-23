@@ -1,15 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { AIMessage } from "@langchain/core/messages";
+import { RunnableLambda } from "@langchain/core/runnables";
 import {
   flushPending,
-  getLocationEligibilityPrompt,
+  getLocationEligibilityCommitHash,
+  getLocationEligibilityRunnable,
   initLangSmith,
   LOCATION_ELIGIBILITY_PROMPT_REF,
   shutdownLangSmith,
   traced,
 } from "../langsmith.ts";
 
-const locationPrompt = ChatPromptTemplate.fromMessages([["human", "{job}"]]);
+const locationRunnable = RunnableLambda.from(
+  async () => new AIMessage({ content: "location eligibility" }),
+);
 
 async function enableTracing() {
   await initLangSmith(
@@ -19,7 +23,10 @@ async function enableTracing() {
       project: "test",
       openrouterApiKey: "openrouter-dummy",
     },
-    { pullLocationEligibilityPrompt: async () => locationPrompt },
+    {
+      resolveLocationEligibilityCommit: async () => "immutable-commit",
+      pullLocationEligibilityPrompt: async () => locationRunnable,
+    },
   );
 }
 
@@ -44,8 +51,10 @@ describe("langsmith adapter", () => {
     expect(result).toBe("inserted");
   });
 
-  test("loads the frozen location prompt with explicit credentials", async () => {
-    let received: { endpoint: string; openrouterApiKey: string } | undefined;
+  test("resolves production once and loads its immutable location runnable", async () => {
+    let resolveCount = 0;
+    let resolvedPromptRef: string | undefined;
+    let received: { endpoint: string; openrouterApiKey: string; promptRef: string } | undefined;
     await initLangSmith(
       {
         apiKey: "langsmith-dummy",
@@ -54,19 +63,30 @@ describe("langsmith adapter", () => {
         openrouterApiKey: "openrouter-dummy",
       },
       {
+        resolveLocationEligibilityCommit: async ({ promptRef }) => {
+          resolveCount++;
+          resolvedPromptRef = promptRef;
+          return "immutable-commit";
+        },
         pullLocationEligibilityPrompt: async (input) => {
           received = input;
-          return locationPrompt;
+          return locationRunnable;
         },
       },
     );
 
-    expect(LOCATION_ELIGIBILITY_PROMPT_REF).toBe("job-finder-filter-location-eligibility:690ccba4");
+    expect(LOCATION_ELIGIBILITY_PROMPT_REF).toBe(
+      "job-finder-filter-location-eligibility:production",
+    );
+    expect(resolveCount).toBe(1);
+    expect(resolvedPromptRef).toBe(LOCATION_ELIGIBILITY_PROMPT_REF);
     expect(received).toMatchObject({
       endpoint: "https://eu.api.smith.langchain.com",
+      promptRef: "job-finder-filter-location-eligibility:immutable-commit",
       openrouterApiKey: "openrouter-dummy",
     });
-    expect(getLocationEligibilityPrompt()).toBe(locationPrompt);
+    expect(getLocationEligibilityRunnable()).toBe(locationRunnable);
+    expect(getLocationEligibilityCommitHash()).toBe("immutable-commit");
   });
 
   test("flushPending resolves when uninitialized", async () => {
