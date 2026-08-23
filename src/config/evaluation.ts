@@ -11,10 +11,14 @@ export type EvaluationFilter = EvaluationCriteria;
 export type LocalEvaluationCriteria = EvaluationCriteria;
 
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
-  { name: "crypto-web3-ts", promptName: "job-finder-profile-crypto-web3-ts" },
-  { name: "fintech-trading-infra-ts", promptName: "job-finder-profile-fintech-trading-infra-ts" },
-  { name: "senior-fullstack-react", promptName: "job-finder-profile-senior-fullstack-react" },
-  { name: "ai-engineering", promptName: "job-finder-profile-ai-engineering" },
+  {
+    name: "early-stage-product-engineer",
+    promptName: "job-finder-profile-early-stage-product-engineer",
+  },
+  {
+    name: "applied-ai-product-engineer",
+    promptName: "job-finder-profile-applied-ai-product-engineer",
+  },
 ];
 const PROMPT_CURRENCIES = [
   "EUR",

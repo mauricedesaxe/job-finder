@@ -53,7 +53,7 @@ const FP_RATE_MAX = 0.15; // % of reject fixtures the eval wrongly passes
 const FN_RATE_MAX = 0.1; // % of pass fixtures the eval wrongly fails
 
 // Run fixtures in parallel through the LLM. evaluateJob already fans out the
-// 3 filters + 4 profiles in parallel, so each fixture is ~7 LLM calls. With
+// 4 filters + 2 profiles in parallel, so each fixture is ~6 LLM calls. With
 // 70+ fixtures that's 500+ in-flight calls if we go fully unbounded —
 // OpenRouter would throttle. Cap at 12 concurrent fixtures.
 const FIXTURE_CONCURRENCY = 12;

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { EvaluationCriteria } from "../../config/evaluation";
+import {
+  EVALUATION_PROFILES,
+  type EvaluationCriteria,
+  getEvaluationFilters,
+} from "../../config/evaluation";
 import type { JobListing } from "../../types";
 import { evaluateJob, JobEvaluationSchema } from "../evaluate";
 
@@ -20,8 +24,8 @@ const filter: EvaluationCriteria = {
   promptName: "job-finder-filter-role-quality",
 };
 const profile: EvaluationCriteria = {
-  name: "ai-engineering",
-  promptName: "job-finder-profile-ai-engineering",
+  name: "applied-ai-product-engineer",
+  promptName: "job-finder-profile-applied-ai-product-engineer",
 };
 describe("evaluation", () => {
   test("parses the code-owned tool contract", () =>
@@ -29,6 +33,35 @@ describe("evaluation", () => {
       pass: true,
       reason: "ok",
     }));
+  test("keeps filters AND-ed and profiles OR-ed", async () => {
+    const filterCalls: string[] = [];
+    const profileCalls: string[] = [];
+    const result = await evaluateJob(job, {
+      filters: getEvaluationFilters(),
+      profiles: EVALUATION_PROFILES,
+      evaluate: async (_job, criteria) => {
+        if (criteria.name.includes("product-engineer")) {
+          profileCalls.push(criteria.name);
+          return {
+            pass: criteria.name === "applied-ai-product-engineer",
+            reason: criteria.name,
+          };
+        }
+        filterCalls.push(criteria.name);
+        return { pass: true, reason: criteria.name };
+      },
+    });
+
+    expect(filterCalls).toEqual([
+      "remote-europe-eligible",
+      "compensation-minimum",
+      "role-quality",
+      "cheap-shop-placement",
+    ]);
+    expect(profileCalls).toEqual(["early-stage-product-engineer", "applied-ai-product-engineer"]);
+    expect(result.profileName).toBe("applied-ai-product-engineer");
+  });
+
   test("stops before profiles when a filter rejects", async () => {
     const calls: string[] = [];
     const result = await evaluateJob(job, {
@@ -48,6 +81,10 @@ describe("evaluation", () => {
       profiles: [profile],
       evaluate: async () => ({ pass: true, reason: "yes" }),
     });
-    expect(result).toEqual({ pass: true, reason: "yes", profileName: "ai-engineering" });
+    expect(result).toEqual({
+      pass: true,
+      reason: "yes",
+      profileName: "applied-ai-product-engineer",
+    });
   });
 });

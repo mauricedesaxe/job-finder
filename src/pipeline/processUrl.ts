@@ -182,6 +182,7 @@ async function processJobBody(
 
   if (evaluation.profileName) {
     job.profile = evaluation.profileName;
+    state.profile = evaluation.profileName;
   }
 
   if (!evaluation.pass) {
@@ -274,6 +275,5 @@ async function processJobBody(
   log.info({ url, title: job.title, company: job.company }, "inserted");
 
   state.outcome = "inserted";
-  state.profile = evaluation.profileName ?? "";
   return { data: "inserted" };
 }
