@@ -56,4 +56,5 @@ jobs:
       - name: Integration tests
         run: bun run test:integration
         env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
