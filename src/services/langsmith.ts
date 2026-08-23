@@ -23,6 +23,7 @@ export interface TraceOptions {
   name: string;
   runType?: "chain" | "llm";
   metadata?: Record<string, unknown>;
+  onStart?: (traceId: string) => void;
   finalMeta?: () => Record<string, unknown>;
   model?: { name: string; temperature?: number };
 }
@@ -251,6 +252,9 @@ export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResul
       project_name: state.project,
       tracingEnabled: true,
       metadata: opts.metadata,
+      on_start: (runTree) => {
+        if (runTree) opts.onStart?.(runTree.id);
+      },
       getInvocationParams: opts.model
         ? () => ({
             ls_model_type: "chat",

@@ -59,6 +59,7 @@ interface ProcessResultState {
   retries: number;
   outcome: ProcessResult;
   profile: string;
+  traceId: string | undefined;
 }
 
 export async function processUrl(
@@ -82,6 +83,7 @@ export async function processUrl(
     retries: 0,
     outcome: "errored",
     profile: "",
+    traceId: undefined,
   };
 
   return await traced(
@@ -89,6 +91,9 @@ export async function processUrl(
       name: "process_job",
       runType: "chain",
       metadata: { url, discovery_keyword: keyword },
+      onStart: (traceId) => {
+        state.traceId = traceId;
+      },
       finalMeta: () => ({
         source: state.source,
         ats_presence: state.ats,
@@ -143,6 +148,7 @@ async function processJobBody(
           url,
           job,
           outcome: "rejected",
+          traceId: state.traceId,
           project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
         });
         state.outcome = "rejected";
@@ -162,6 +168,7 @@ async function processJobBody(
       url,
       job,
       outcome: "rejected",
+      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
     state.outcome = "rejected";
@@ -195,6 +202,7 @@ async function processJobBody(
       url,
       job,
       outcome: "rejected",
+      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
     state.outcome = "rejected";
@@ -233,7 +241,13 @@ async function processJobBody(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
-      await recordTerminalResult({ ledger, url, job, outcome: "duplicated" });
+      await recordTerminalResult({
+        ledger,
+        url,
+        job,
+        outcome: "duplicated",
+        traceId: state.traceId,
+      });
       state.outcome = "duplicated";
       return { data: "duplicated" };
     }
@@ -246,6 +260,7 @@ async function processJobBody(
       url,
       job,
       outcome: "archived",
+      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
     });
     state.outcome = "archived";
@@ -259,6 +274,7 @@ async function processJobBody(
       url,
       job,
       outcome: "companyApplied",
+      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
     });
     state.outcome = "companyApplied";
@@ -270,6 +286,7 @@ async function processJobBody(
     url,
     job,
     outcome: "inserted",
+    traceId: state.traceId,
     project: () => insertJob(notion, config.notionDatabaseId, job),
   });
   log.info({ url, title: job.title, company: job.company }, "inserted");
