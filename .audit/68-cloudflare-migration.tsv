@@ -20,3 +20,4 @@ ts	phase	decision	why	evidence	result
 2026-08-24T13:13:06Z	review	made the D1 migration the canonical ledger schema	one schema now initializes both local SQLite and future D1 databases	migrations/0001_job_ledger.sql; src/services/jobLedger.ts	green
 2026-08-24T13:13:06Z	review	removed the unused run summary	no current caller consumed it and a Container process cannot return it directly	src/jobFinder.ts	green
 2026-08-24T13:13:06Z	review	stored the sanitized Container access failure in the repository	the earlier sandbox-local Wrangler log was not available to reviewers	.audit/68-cloudflare-containers-403.txt	supersedes the evidence in the 2026-08-24T12:49:18Z audit row
+2026-08-24T13:20:47Z	review	shared one locale-independent ledger normalizer	Notion backfill verification and stored ledger keys must use identical identity rules	src/services/jobLedgerIdentity.ts; src/services/__tests__/jobLedgerIdentity.test.ts	green

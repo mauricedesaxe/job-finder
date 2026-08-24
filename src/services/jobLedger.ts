@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { normalizeJobLedgerText } from "./jobLedgerIdentity";
 
 const JOB_LEDGER_SCHEMA = readFileSync(
   new URL("../../migrations/0001_job_ledger.sql", import.meta.url),
@@ -185,10 +186,10 @@ export function createJobLedger(databasePath: string): JobLedger {
       return row ? toProcessedJob(row) : null;
     },
     async titlesForCompany(company) {
-      return titlesForCompany.all(normalizeText(company)).map((row) => row.title);
+      return titlesForCompany.all(normalizeJobLedgerText(company)).map((row) => row.title);
     },
     async findCompanyExclusion(company) {
-      const row = findCompanyExclusion.get(normalizeText(company));
+      const row = findCompanyExclusion.get(normalizeJobLedgerText(company));
       return row ? { company: row.company, excludedAt: row.excluded_at } : null;
     },
     async recordProcessedJob(input) {
@@ -197,9 +198,9 @@ export function createJobLedger(databasePath: string): JobLedger {
         input.sourceKey ?? sourceKeyFor(input.rawUrl),
         input.rawUrl ?? null,
         input.company,
-        normalizeText(input.company),
+        normalizeJobLedgerText(input.company),
         input.title,
-        normalizeText(input.title),
+        normalizeJobLedgerText(input.title),
         input.outcome,
         processedAt,
         processedAt,
@@ -208,7 +209,7 @@ export function createJobLedger(databasePath: string): JobLedger {
     },
     async excludeCompany(input) {
       excludeCompany.run(
-        normalizeText(input.company),
+        normalizeJobLedgerText(input.company),
         input.company,
         input.excludedAt ?? new Date().toISOString(),
         input.sourceKey ?? null,
@@ -237,10 +238,6 @@ function sourceKeyFor(rawUrl: string | undefined): string {
   }
 
   return `url:${rawUrl}`;
-}
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function toProcessedJob(row: ProcessedJobRow): ProcessedJob {

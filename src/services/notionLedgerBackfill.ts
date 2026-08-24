@@ -1,4 +1,5 @@
 import type { JobLedger, NotionBackfillStats } from "./jobLedger";
+import { normalizeJobLedgerText } from "./jobLedgerIdentity";
 import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
@@ -154,7 +155,8 @@ function snapshotStats(
     urls: new Set(jobs.flatMap((job) => (job.rawUrl ? [job.rawUrl] : []))).size,
     companyTitlePairs: new Set(jobs.map((job) => companyTitleKey(job))).size,
     urlLessRows: jobs.filter((job) => job.rawUrl === null).length,
-    exclusions: new Set(exclusions.map((exclusion) => normalizeText(exclusion.company))).size,
+    exclusions: new Set(exclusions.map((exclusion) => normalizeJobLedgerText(exclusion.company)))
+      .size,
   };
 }
 
@@ -174,9 +176,5 @@ function verifyBackfill(expected: NotionBackfillStats, actual: NotionBackfillSta
 }
 
 function companyTitleKey(job: NotionJobRecord): string {
-  return `${normalizeText(job.company)}\u0000${normalizeText(job.title)}`;
-}
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return `${normalizeJobLedgerText(job.company)}\u0000${normalizeJobLedgerText(job.title)}`;
 }

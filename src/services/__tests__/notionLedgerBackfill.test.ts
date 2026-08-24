@@ -55,11 +55,16 @@ describe("backfillJobLedger", () => {
   test("imports all Notion rows and verifies an idempotent backfill", async () => {
     ledger = createJobLedger(":memory:");
     const source = client([
-      page({ id: "page-1", company: "Acme", title: "Engineer", url: "https://jobs.example/1" }),
+      page({
+        id: "page-1",
+        company: "INDIGO",
+        title: "INTERFACE Engineer",
+        url: "https://jobs.example/1",
+      }),
       page({
         id: "page-2",
-        company: "Acme",
-        title: "Engineer",
+        company: "indigo",
+        title: "INTERFACE Engineer",
         url: null,
         status: "Company Blocked",
       }),
@@ -89,7 +94,7 @@ describe("backfillJobLedger", () => {
     });
     expect(second.stats).toEqual(first.stats);
     expect((await ledger.findByRawUrl("https://jobs.example/1"))?.outcome).toBe("historical");
-    expect(await ledger.titlesForCompany("Acme")).toEqual(["Engineer"]);
+    expect(await ledger.titlesForCompany("INDIGO")).toEqual(["INTERFACE Engineer"]);
     expect(await ledger.findCompanyExclusion("Blocked only")).not.toBeNull();
     expect(await ledger.hasMigration("notion-job-ledger-backfill-v1")).toBe(true);
   });
