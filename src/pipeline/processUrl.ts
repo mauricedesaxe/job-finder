@@ -66,6 +66,8 @@ interface ProcessJobResult {
   record: (traceId: string) => Promise<void>;
 }
 
+type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
+
 export async function processUrl(
   url: string,
   keyword: string,
@@ -149,7 +151,7 @@ async function processJobBody(
           "rejected (ats)",
         );
         state.outcome = "rejected";
-        return terminalResult("rejected", {
+        return terminalResult({
           ledger,
           url,
           job,
@@ -167,7 +169,7 @@ async function processJobBody(
       "rejected (structural)",
     );
     state.outcome = "rejected";
-    return terminalResult("rejected", {
+    return terminalResult({
       ledger,
       url,
       job,
@@ -199,7 +201,7 @@ async function processJobBody(
       "rejected",
     );
     state.outcome = "rejected";
-    return terminalResult("rejected", {
+    return terminalResult({
       ledger,
       url,
       job,
@@ -241,7 +243,7 @@ async function processJobBody(
         "duplicate",
       );
       state.outcome = "duplicated";
-      return terminalResult("duplicated", {
+      return terminalResult({
         ledger,
         url,
         job,
@@ -253,7 +255,7 @@ async function processJobBody(
   if (ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
     state.outcome = "archived";
-    return terminalResult("archived", {
+    return terminalResult({
       ledger,
       url,
       job,
@@ -265,7 +267,7 @@ async function processJobBody(
   if (recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
     state.outcome = "companyApplied";
-    return terminalResult("companyApplied", {
+    return terminalResult({
       ledger,
       url,
       job,
@@ -275,7 +277,7 @@ async function processJobBody(
   }
 
   state.outcome = "inserted";
-  return terminalResult("inserted", {
+  return terminalResult({
     ledger,
     url,
     job,
@@ -285,8 +287,14 @@ async function processJobBody(
 }
 
 function terminalResult(
-  outcome: ProcessResult,
-  input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId">,
+  input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId" | "outcome"> & {
+    outcome: TerminalOutcome;
+  },
 ): { data: ProcessJobResult } {
-  return { data: { outcome, record: (traceId) => recordTerminalResult({ ...input, traceId }) } };
+  return {
+    data: {
+      outcome: input.outcome,
+      record: (traceId) => recordTerminalResult({ ...input, traceId }),
+    },
+  };
 }
