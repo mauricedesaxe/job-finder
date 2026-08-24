@@ -1,9 +1,5 @@
 import { z } from "zod/v4";
-
-export const TARGET_PROFILE_NAMES = [
-  "early-stage-product-engineer",
-  "applied-ai-product-engineer",
-] as const;
+import { EVALUATION_PROFILE_NAMES } from "./config/evaluation";
 
 export const REVIEW_DECISIONS = ["pursue", "reject", "unsure"] as const;
 
@@ -19,7 +15,7 @@ export const REVIEW_REASONS = [
   "other",
 ] as const;
 
-const TargetProfileSchema = z.enum(TARGET_PROFILE_NAMES);
+const TargetProfileSchema = z.enum(EVALUATION_PROFILE_NAMES);
 
 export const JobSnapshotSchema = z.object({
   title: z.string(),
@@ -61,7 +57,7 @@ export const ReviewSnapshotSchema = z
 
 export const ReviewFeedbackSchema = z.object({
   decision: z.enum(REVIEW_DECISIONS),
-  targetProfile: z.enum([...TARGET_PROFILE_NAMES, "neither"] as const),
+  targetProfile: z.enum([...EVALUATION_PROFILE_NAMES, "neither"] as const),
   primaryReason: z.enum(REVIEW_REASONS),
   note: z.string().optional(),
   blockCompany: z.boolean().default(false),
