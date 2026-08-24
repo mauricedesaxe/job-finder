@@ -14,12 +14,12 @@ import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
-import { flushPending, traced } from "../services/langsmith";
+import { traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
-import { recordAfterTraceFlush, recordTerminalResult } from "./recordTerminalResult";
+import { recordTerminalResult } from "./recordTerminalResult";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
 import { structuralFilter } from "./structuralFilter";
 
@@ -59,12 +59,11 @@ interface ProcessResultState {
   retries: number;
   outcome: ProcessResult;
   profile: string;
-  traceId: string | undefined;
 }
 
 interface ProcessJobResult {
   outcome: ProcessResult;
-  record: () => Promise<void>;
+  record: (traceId: string) => Promise<void>;
 }
 
 export async function processUrl(
@@ -88,17 +87,13 @@ export async function processUrl(
     retries: 0,
     outcome: "errored",
     profile: "",
-    traceId: undefined,
   };
 
-  const result = await traced(
+  return traced(
     {
       name: "process_job",
       runType: "chain",
       metadata: { url, discovery_keyword: keyword },
-      onStart: (traceId) => {
-        state.traceId = traceId;
-      },
       finalMeta: () => ({
         source: state.source,
         ats_presence: state.ats,
@@ -107,10 +102,13 @@ export async function processUrl(
         retry_count: state.retries,
       }),
     },
-    async () => processJobBody(url, keyword, ctx, state),
+    async ({ requireAccepted }) => {
+      const { data: result } = await processJobBody(url, keyword, ctx, state);
+      const traceId = await requireAccepted();
+      await result.record(traceId);
+      return { data: result.outcome };
+    },
   );
-  await recordAfterTraceFlush({ flush: flushPending, record: result.record });
-  return result.outcome;
 }
 
 async function processJobBody(
@@ -156,7 +154,6 @@ async function processJobBody(
           url,
           job,
           outcome: "rejected",
-          traceId: state.traceId,
           project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
         });
       }
@@ -175,7 +172,6 @@ async function processJobBody(
       url,
       job,
       outcome: "rejected",
-      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
   }
@@ -208,7 +204,6 @@ async function processJobBody(
       url,
       job,
       outcome: "rejected",
-      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
   }
@@ -251,7 +246,6 @@ async function processJobBody(
         url,
         job,
         outcome: "duplicated",
-        traceId: state.traceId,
       });
     }
   }
@@ -264,7 +258,6 @@ async function processJobBody(
       url,
       job,
       outcome: "archived",
-      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
     });
   }
@@ -277,7 +270,6 @@ async function processJobBody(
       url,
       job,
       outcome: "companyApplied",
-      traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
     });
   }
@@ -288,14 +280,13 @@ async function processJobBody(
     url,
     job,
     outcome: "inserted",
-    traceId: state.traceId,
     project: () => insertJob(notion, config.notionDatabaseId, job),
   });
 }
 
 function terminalResult(
   outcome: ProcessResult,
-  input: Parameters<typeof recordTerminalResult>[0],
+  input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId">,
 ): { data: ProcessJobResult } {
-  return { data: { outcome, record: () => recordTerminalResult(input) } };
+  return { data: { outcome, record: (traceId) => recordTerminalResult({ ...input, traceId }) } };
 }

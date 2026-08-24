@@ -4,6 +4,7 @@ import { pull } from "langchain/hub/node";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
+import { withRetry } from "../concurrency";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
 
 export interface LangSmithConfig {
@@ -23,9 +24,12 @@ export interface TraceOptions {
   name: string;
   runType?: "chain" | "llm";
   metadata?: Record<string, unknown>;
-  onStart?: (traceId: string) => void;
   finalMeta?: () => Record<string, unknown>;
   model?: { name: string; temperature?: number };
+}
+
+export interface TraceContext {
+  requireAccepted(): Promise<string>;
 }
 
 export interface TraceResult<T> {
@@ -57,6 +61,7 @@ interface TraceConfigState {
 }
 
 export interface LangSmithDependencies {
+  client?: Client;
   resolvePrompt?: (input: {
     client: Client;
     config: LangSmithConfig;
@@ -112,7 +117,7 @@ export async function initLangSmith(
   cfg: LangSmithConfig,
   deps: LangSmithDependencies = {},
 ): Promise<void> {
-  const client = new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
+  const client = deps.client ?? new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
   const resolve = deps.resolvePrompt ?? resolvePrompt;
   const load = deps.pullPrompt ?? pullPrompt;
   const versions = await Promise.all(
@@ -237,23 +242,48 @@ function attachUsage<T>(data: T, usage: TraceResult<T>["usage"]): Record<string,
     : { output: data };
 }
 
-export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResult<T>>): Promise<T> {
-  if (!state) return (await fn()).data;
+export async function traced<T>(
+  opts: TraceOptions,
+  fn: (context: TraceContext) => Promise<TraceResult<T>>,
+): Promise<T> {
+  if (!state) {
+    return (
+      await fn({
+        requireAccepted: async () => {
+          throw new Error("LangSmith is not initialized");
+        },
+      })
+    ).data;
+  }
+  const configured = state;
   let result: TraceResult<T> | undefined;
+  let traceId: string | undefined;
   const wrapped = traceable(
     async (): Promise<Record<string, unknown>> => {
-      result = await fn();
+      result = await fn({
+        requireAccepted: async () => {
+          const startedTraceId = traceId;
+          if (!startedTraceId) throw new Error("LangSmith trace did not start");
+          await configured.client.flush();
+          await withRetry(() => configured.client.readRun(startedTraceId), {
+            maxRetries: 2,
+            baseDelayMs: 100,
+            shouldRetry: isMissingTrace,
+          });
+          return startedTraceId;
+        },
+      });
       return attachUsage(result.data, result.usage);
     },
     {
       name: opts.name,
       run_type: opts.runType ?? "chain",
-      client: state.client,
-      project_name: state.project,
+      client: configured.client,
+      project_name: configured.project,
       tracingEnabled: true,
       metadata: opts.metadata,
       on_start: (runTree) => {
-        if (runTree) opts.onStart?.(runTree.id);
+        if (runTree) traceId = runTree.id;
       },
       getInvocationParams: opts.model
         ? () => ({
@@ -274,6 +304,10 @@ export async function traced<T>(opts: TraceOptions, fn: () => Promise<TraceResul
   await wrapped();
   if (!result) throw new Error("tracing returned without a result");
   return result.data;
+}
+
+function isMissingTrace(error: unknown): boolean {
+  return error instanceof Error && "status" in error && error.status === 404;
 }
 
 export async function flushPending(): Promise<void> {

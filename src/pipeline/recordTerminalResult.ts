@@ -13,7 +13,7 @@ export async function recordTerminalResult({
   url: string;
   job: Pick<JobListing, "company" | "title">;
   outcome: ProcessedJobOutcome;
-  traceId?: string;
+  traceId: string;
   project?: () => Promise<unknown>;
 }): Promise<void> {
   ledger.recordProcessedJob({
@@ -24,12 +24,4 @@ export async function recordTerminalResult({
     traceId,
   });
   await project?.();
-}
-
-export async function recordAfterTraceFlush(input: {
-  flush: () => Promise<void>;
-  record: () => Promise<void>;
-}): Promise<void> {
-  await input.flush();
-  await input.record();
 }

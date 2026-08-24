@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createJobLedger, type JobLedger } from "../../services/jobLedger";
-import { recordAfterTraceFlush, recordTerminalResult } from "../recordTerminalResult";
+import { recordTerminalResult } from "../recordTerminalResult";
 
 describe("recordTerminalResult", () => {
   let ledger: JobLedger | undefined;
@@ -19,6 +19,7 @@ describe("recordTerminalResult", () => {
       url,
       job: { company: "Acme", title: "Senior Engineer" },
       outcome: "rejected",
+      traceId: "trace-123",
       project: async () => {
         expect(ledger?.findByRawUrl(url)).toMatchObject({
           company: "Acme",
@@ -38,6 +39,7 @@ describe("recordTerminalResult", () => {
       url,
       job: { company: "Acme", title: "Staff Engineer" },
       outcome: "duplicated",
+      traceId: "trace-123",
     });
 
     expect(ledger.findByRawUrl(url)?.outcome).toBe("duplicated");
@@ -56,28 +58,5 @@ describe("recordTerminalResult", () => {
     });
 
     expect(ledger.findByRawUrl(url)?.traceId).toBe("trace-123");
-  });
-
-  test("does not record a job when its parent trace flush fails", async () => {
-    ledger = createJobLedger(":memory:");
-    const currentLedger = ledger;
-    const url = "https://jobs.example.com/role/4";
-
-    await expect(
-      recordAfterTraceFlush({
-        flush: async () => {
-          throw new Error("LangSmith unavailable");
-        },
-        record: () =>
-          recordTerminalResult({
-            ledger: currentLedger,
-            url,
-            job: { company: "Acme", title: "Product Engineer" },
-            outcome: "inserted",
-          }),
-      }),
-    ).rejects.toThrow("LangSmith unavailable");
-
-    expect(ledger.findByRawUrl(url)).toBeNull();
   });
 });
