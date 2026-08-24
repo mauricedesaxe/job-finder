@@ -12,9 +12,15 @@ import {
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
-import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
+import { type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
+import {
+  type AtsJobData,
+  atsStructuralFilter,
+  fetchAtsData,
+  formatAtsBlock,
+} from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
-import { traced } from "../services/langsmith";
+import { enqueueReviewTrace, getPromptReleaseTag, traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
@@ -59,11 +65,13 @@ interface ProcessResultState {
   retries: number;
   outcome: ProcessResult;
   profile: string;
+  atsData: AtsJobData | null;
+  reviewSnapshot: ReviewSnapshot | undefined;
 }
 
 interface ProcessJobResult {
   outcome: ProcessResult;
-  record: (traceId: string) => Promise<void>;
+  prepareTraceCompletion: (traceId: string) => Promise<(() => Promise<void>) | undefined>;
 }
 
 type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
@@ -89,6 +97,8 @@ export async function processUrl(
     retries: 0,
     outcome: "errored",
     profile: "",
+    atsData: null,
+    reviewSnapshot: undefined,
   };
 
   return traced(
@@ -102,13 +112,14 @@ export async function processUrl(
         outcome: state.outcome,
         matched_profile: state.profile,
         retry_count: state.retries,
+        ...(state.reviewSnapshot ? { review_snapshot: state.reviewSnapshot } : {}),
       }),
     },
     async ({ requireAccepted }) => {
       const { data: result } = await processJobBody(url, keyword, ctx, state);
       const traceId = await requireAccepted();
-      await result.record(traceId);
-      return { data: result.outcome };
+      const afterTraceComplete = await result.prepareTraceCompletion(traceId);
+      return { data: result.outcome, afterTraceComplete };
     },
   );
 }
@@ -141,6 +152,7 @@ async function processJobBody(
     );
     if (atsData) {
       state.ats = true;
+      state.atsData = atsData;
       log.debug({ url, source: atsData.source }, "ats enriched");
       job.description = `${formatAtsBlock(atsData)}\n\n${job.description}`;
 
@@ -270,13 +282,39 @@ async function processJobBody(
     });
   }
 
-  return terminalResult(state, {
-    ledger,
-    url,
-    job,
-    outcome: "inserted",
-    project: () => insertJob(notion, config.notionDatabaseId, job),
-  });
+  const outcome = "inserted";
+  return {
+    data: {
+      outcome,
+      prepareTraceCompletion: async (traceId) => {
+        const snapshot = ReviewSnapshotSchema.parse({
+          traceId,
+          promptRelease: getPromptReleaseTag(),
+          job,
+          ats: state.atsData,
+          compensationRates:
+            ctx.filters?.find((filter) => filter.name === "compensation-minimum")?.rates ?? null,
+          evaluation: {
+            profile: evaluation.profileName,
+            reason: evaluation.reason,
+          },
+        });
+        state.outcome = outcome;
+        state.reviewSnapshot = snapshot;
+        return async () => {
+          await enqueueReviewTrace(traceId);
+          await recordTerminalResult({
+            ledger,
+            url,
+            job,
+            outcome,
+            traceId,
+            project: () => insertJob(notion, config.notionDatabaseId, job),
+          });
+        };
+      },
+    },
+  };
 }
 
 function terminalResult(
@@ -289,7 +327,10 @@ function terminalResult(
   return {
     data: {
       outcome: input.outcome,
-      record: (traceId) => recordTerminalResult({ ...input, traceId }),
+      prepareTraceCompletion: async (traceId) => {
+        await recordTerminalResult({ ...input, traceId });
+        return undefined;
+      },
     },
   };
 }
