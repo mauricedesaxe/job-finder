@@ -58,5 +58,4 @@ export interface JobLedger {
   notionBackfillStats(): Promise<NotionBackfillStats>;
   markMigration(name: string, completedAt: string): Promise<void>;
   hasMigration(name: string): Promise<boolean>;
-  close(): Promise<void>;
 }

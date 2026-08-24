@@ -4,7 +4,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
-import type { JobLedger } from "../jobLedger";
 import { createSqliteJobLedger } from "../sqliteJobLedger";
 import {
   JOB_LEDGER_CONFORMANCE_RESULT,
@@ -12,7 +11,7 @@ import {
 } from "./jobLedgerConformance";
 
 test("preserves the job ledger contract in SQLite", async () => {
-  const ledger: JobLedger = createSqliteJobLedger(":memory:");
+  const ledger = createSqliteJobLedger(":memory:");
   try {
     expect(JOB_LEDGER_CONFORMANCE_RESULT).toEqual(await runJobLedgerConformanceScenario(ledger));
   } finally {

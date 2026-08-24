@@ -46,7 +46,7 @@ function client(pages: ReturnType<typeof page>[]) {
 }
 
 describe("backfillJobLedger", () => {
-  let ledger: JobLedger | undefined;
+  let ledger: ReturnType<typeof createSqliteJobLedger> | undefined;
 
   afterEach(async () => {
     await ledger?.close();

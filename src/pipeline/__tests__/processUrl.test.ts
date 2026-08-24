@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { JobLedger } from "../../services/jobLedger";
 import { createSqliteJobLedger } from "../../services/sqliteJobLedger";
 import { recordTerminalResult } from "../recordTerminalResult";
 
 describe("recordTerminalResult", () => {
-  let ledger: JobLedger | undefined;
+  let ledger: ReturnType<typeof createSqliteJobLedger> | undefined;
 
   afterEach(async () => {
     await ledger?.close();

@@ -27,12 +27,10 @@ export default {
       )
         .bind("notion-job-ledger-backfill-v1")
         .first();
-      await ledger.close();
 
       return Response.json({
         result,
         migration,
-        worksAfterClose: await ledger.hasMigration("notion-job-ledger-backfill-v1"),
       });
     }
 

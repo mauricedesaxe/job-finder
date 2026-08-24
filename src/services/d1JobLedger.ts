@@ -97,6 +97,5 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
     async hasMigration(name) {
       return parseMigrationRow(await binding.prepare(HAS_MIGRATION_SQL).bind(name).first());
     },
-    async close() {},
   };
 }

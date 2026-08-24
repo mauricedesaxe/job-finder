@@ -32,7 +32,9 @@ const JOB_LEDGER_SCHEMA = readFileSync(
   "utf8",
 );
 
-export function createSqliteJobLedger(databasePath: string): JobLedger {
+export function createSqliteJobLedger(
+  databasePath: string,
+): JobLedger & { close(): Promise<void> } {
   if (databasePath !== ":memory:") {
     mkdirSync(dirname(databasePath), { recursive: true });
   }

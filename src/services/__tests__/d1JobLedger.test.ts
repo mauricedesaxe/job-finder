@@ -45,7 +45,6 @@ const ScenarioResponseSchema = z.object({
     count: z.number(),
     completed_at: z.string(),
   }),
-  worksAfterClose: z.boolean(),
 });
 
 const MalformedResponseSchema = z.object({ rejected: z.boolean() });
@@ -79,7 +78,6 @@ test("runs the job ledger adapter in workerd", async () => {
     count: 1,
     completed_at: "2026-08-22T13:00:00.000Z",
   });
-  expect(result.worksAfterClose).toBe(true);
 }, 15_000);
 
 test("rejects malformed stored outcomes at the D1 boundary", async () => {
