@@ -1,6 +1,6 @@
 import type { AnnotationQueueRubricItem, FeedbackConfig } from "langsmith/schemas";
 import { EVALUATION_PROFILE_NAMES } from "../config/evaluation";
-import { REVIEW_DECISIONS, REVIEW_REASONS, type ReviewSnapshot } from "../review";
+import { REVIEW_DECISIONS, REVIEW_REASONS } from "../review";
 
 export const JOB_REVIEW_QUEUE_NAME = "job-finder-job-review";
 
@@ -88,24 +88,24 @@ const rubricItems: AnnotationQueueRubricItem[] = [
 ];
 
 export function createReviewQueue(client: ReviewQueueClient): {
-  enqueue(snapshot: ReviewSnapshot): Promise<void>;
+  enqueue(traceId: string): Promise<void>;
 } {
   let queueId: Promise<string> | undefined;
 
   return {
-    async enqueue(snapshot) {
+    async enqueue(traceId) {
       const id = await getQueueId();
       try {
         await client.annotationQueues.items.create(
           id,
           {
             extend_trace_retention: true,
-            items: [{ item_type: "RUN", run_id: snapshot.traceId }],
+            items: [{ item_type: "RUN", run_id: traceId }],
           },
           { maxRetries: 0 },
         );
       } catch (error) {
-        if (!(await queueContainsRun(client, id, snapshot.traceId))) throw error;
+        if (!(await queueContainsRun(client, id, traceId))) throw error;
       }
     },
   };

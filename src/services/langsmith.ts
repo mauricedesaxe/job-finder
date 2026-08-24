@@ -5,9 +5,11 @@ import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
 import { withRetry } from "../concurrency";
-import type { ReviewSnapshot } from "../review";
+import { logger } from "../logger";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
 import { createReviewQueue } from "./reviewQueue";
+
+const log = logger.child({ component: "langsmith" });
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -37,7 +39,7 @@ export interface TraceContext {
 export interface TraceResult<T> {
   data: T;
   usage?: { input: number; output: number; total: number };
-  afterComplete?: () => Promise<void>;
+  afterTraceComplete?: () => Promise<void>;
 }
 
 type PromptRunnable = Runnable<Record<string, string>, AIMessage>;
@@ -175,9 +177,9 @@ export function getPromptReleaseTag(): string {
   return prompt.releaseTag;
 }
 
-export async function enqueueReviewSnapshot(snapshot: ReviewSnapshot): Promise<void> {
+export async function enqueueReviewTrace(traceId: string): Promise<void> {
   if (!state) throw new Error("LangSmith is not initialized");
-  await state.reviewQueue.enqueue(snapshot);
+  await state.reviewQueue.enqueue(traceId);
 }
 
 export async function invokePrompt<T>(input: {
@@ -316,11 +318,11 @@ export async function traced<T>(
     await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
   }
   if (!result) throw new Error("tracing returned without a result");
-  if (result.afterComplete) {
+  if (result.afterTraceComplete) {
     if (!traceId) throw new Error("LangSmith trace did not start");
     await requireCompletedTrace(configured.client, traceId);
     try {
-      await result.afterComplete();
+      await result.afterTraceComplete();
     } catch (error) {
       await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
     }
@@ -380,10 +382,7 @@ async function rethrowWithExtendedErrorTrace(
       extendTraceRetention: true,
     });
   } catch (retentionError) {
-    throw new AggregateError(
-      [error, retentionError],
-      "Processing failed and its trace retention could not be extended",
-    );
+    log.error({ traceId, err: retentionError }, "could not extend failed trace retention");
   }
   throw error;
 }

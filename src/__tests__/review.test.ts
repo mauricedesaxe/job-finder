@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ReviewFeedbackSchema, type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
+import { type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
 
 const snapshot: ReviewSnapshot = {
   traceId: "trace-123",
@@ -26,16 +26,6 @@ const snapshot: ReviewSnapshot = {
 
 test("parses a review snapshot with frozen evaluation inputs", () => {
   expect(ReviewSnapshotSchema.parse(snapshot)).toEqual(snapshot);
-});
-
-test("rejects a review feedback profile outside the target set", () => {
-  expect(() =>
-    ReviewFeedbackSchema.parse({
-      decision: "pursue",
-      targetProfile: "crypto-web3-ts",
-      primaryReason: "technology-fit",
-    }),
-  ).toThrow();
 });
 
 test("rejects dates the job parser cannot produce", () => {

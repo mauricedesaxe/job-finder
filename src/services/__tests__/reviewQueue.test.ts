@@ -1,29 +1,7 @@
 import { expect, test } from "bun:test";
-import type { ReviewSnapshot } from "../../review";
 import { createReviewQueue, JOB_REVIEW_QUEUE_NAME } from "../reviewQueue";
 
-const snapshot: ReviewSnapshot = {
-  traceId: "trace-123",
-  promptRelease: "release-2026-08-23-1",
-  job: {
-    title: "Founding Product Engineer",
-    company: "Acme",
-    url: "https://jobs.example.com/1",
-    source: "jobs.example.com",
-    keywordsMatched: ["product engineer"],
-    datePosted: null,
-    dateScraped: "2026-08-23",
-    description: "Build the product.",
-    location: "Europe",
-    profile: "early-stage-product-engineer",
-  },
-  ats: null,
-  compensationRates: "EURUSD=1.16",
-  evaluation: {
-    profile: "early-stage-product-engineer",
-    reason: "Hands-on product delivery.",
-  },
-};
+const traceId = "trace-123";
 
 test("creates the review queue and enqueues the trace with extended retention", async () => {
   const calls: string[] = [];
@@ -64,7 +42,7 @@ test("creates the review queue and enqueues the trace with extended retention", 
     },
   });
 
-  await queue.enqueue(snapshot);
+  await queue.enqueue(traceId);
 
   expect(calls).toContain("queue:job-finder-job-review");
   expect(calls).toContain("enqueue:queue-123:trace-123");
@@ -101,8 +79,8 @@ test("reuses an existing queue and its initialized queue id", async () => {
     },
   });
 
-  await queue.enqueue(snapshot);
-  await queue.enqueue({ ...snapshot, traceId: "trace-456" });
+  await queue.enqueue(traceId);
+  await queue.enqueue("trace-456");
 
   expect(queueSearches).toBe(1);
   expect(queueCreates).toBe(0);
@@ -130,10 +108,7 @@ test("shares queue initialization across concurrent qualified traces", async () 
     },
   });
 
-  await Promise.all([
-    queue.enqueue(snapshot),
-    queue.enqueue({ ...snapshot, traceId: "trace-456" }),
-  ]);
+  await Promise.all([queue.enqueue(traceId), queue.enqueue("trace-456")]);
 
   expect(queueSearches).toBe(1);
 });
@@ -159,8 +134,8 @@ test("retries queue initialization after a transient failure", async () => {
     },
   });
 
-  await expect(queue.enqueue(snapshot)).rejects.toThrow("LangSmith unavailable");
-  await queue.enqueue(snapshot);
+  await expect(queue.enqueue(traceId)).rejects.toThrow("LangSmith unavailable");
+  await queue.enqueue(traceId);
 
   expect(attempts).toBe(2);
 });
@@ -187,7 +162,7 @@ test("propagates an ambiguous queue failure when the run is absent", async () =>
     },
   });
 
-  await expect(queue.enqueue(snapshot)).rejects.toThrow("LangSmith unavailable");
+  await expect(queue.enqueue(traceId)).rejects.toThrow("LangSmith unavailable");
   expect(attempted).toBe(true);
 });
 
@@ -205,11 +180,11 @@ test("accepts an ambiguous queue response when the run is present", async () => 
           throw new Error("response lost");
         },
         async *list(_queueId, { status }) {
-          if (status === "needs_my_review") yield { run_id: snapshot.traceId };
+          if (status === "needs_my_review") yield { run_id: traceId };
         },
       },
     },
   });
 
-  await expect(queue.enqueue(snapshot)).resolves.toBeUndefined();
+  await expect(queue.enqueue(traceId)).resolves.toBeUndefined();
 });

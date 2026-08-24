@@ -207,7 +207,7 @@ describe("LangSmith trace acceptance", () => {
       events.push("callback");
       return {
         data: "inserted",
-        afterComplete: async () => {
+        afterTraceComplete: async () => {
           events.push("after-complete");
         },
       };

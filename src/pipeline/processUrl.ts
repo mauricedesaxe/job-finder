@@ -20,7 +20,7 @@ import {
   formatAtsBlock,
 } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
-import { enqueueReviewSnapshot, getPromptReleaseTag, traced } from "../services/langsmith";
+import { enqueueReviewTrace, getPromptReleaseTag, traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
@@ -71,7 +71,7 @@ interface ProcessResultState {
 
 interface ProcessJobResult {
   outcome: ProcessResult;
-  record: (traceId: string) => Promise<(() => Promise<void>) | undefined>;
+  prepareTraceCompletion: (traceId: string) => Promise<(() => Promise<void>) | undefined>;
 }
 
 type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
@@ -118,8 +118,8 @@ export async function processUrl(
     async ({ requireAccepted }) => {
       const { data: result } = await processJobBody(url, keyword, ctx, state);
       const traceId = await requireAccepted();
-      const afterComplete = await result.record(traceId);
-      return { data: result.outcome, afterComplete };
+      const afterTraceComplete = await result.prepareTraceCompletion(traceId);
+      return { data: result.outcome, afterTraceComplete };
     },
   );
 }
@@ -286,7 +286,7 @@ async function processJobBody(
   return {
     data: {
       outcome,
-      record: async (traceId) => {
+      prepareTraceCompletion: async (traceId) => {
         const snapshot = ReviewSnapshotSchema.parse({
           traceId,
           promptRelease: getPromptReleaseTag(),
@@ -302,7 +302,7 @@ async function processJobBody(
         state.outcome = outcome;
         state.reviewSnapshot = snapshot;
         return async () => {
-          await enqueueReviewSnapshot(snapshot);
+          await enqueueReviewTrace(traceId);
           await recordTerminalResult({
             ledger,
             url,
@@ -327,7 +327,7 @@ function terminalResult(
   return {
     data: {
       outcome: input.outcome,
-      record: async (traceId) => {
+      prepareTraceCompletion: async (traceId) => {
         await recordTerminalResult({ ...input, traceId });
         return undefined;
       },

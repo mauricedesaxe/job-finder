@@ -48,13 +48,4 @@ export const ReviewSnapshotSchema = z
     message: "Review snapshot profiles must match",
   });
 
-export const ReviewFeedbackSchema = z.object({
-  decision: z.enum(REVIEW_DECISIONS),
-  targetProfile: z.enum([...EVALUATION_PROFILE_NAMES, "neither"] as const),
-  primaryReason: z.enum(REVIEW_REASONS),
-  note: z.string().optional(),
-  blockCompany: z.boolean().default(false),
-});
-
 export type ReviewSnapshot = z.infer<typeof ReviewSnapshotSchema>;
-export type ReviewFeedback = z.infer<typeof ReviewFeedbackSchema>;
