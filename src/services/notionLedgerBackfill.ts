@@ -1,5 +1,5 @@
 import type { JobLedger, NotionBackfillStats } from "./jobLedger";
-import { normalizeJobLedgerText } from "./jobLedgerIdentity";
+import { normalizeJobLedgerText } from "./jobLedgerRecord";
 import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 

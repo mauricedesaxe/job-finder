@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createJobLedger, type JobLedger } from "../jobLedger";
+import type { JobLedger } from "../jobLedger";
 import { backfillJobLedger } from "../notionLedgerBackfill";
+import { createSqliteJobLedger } from "../sqliteJobLedger";
 
 function page({
   id,
@@ -45,7 +46,7 @@ function client(pages: ReturnType<typeof page>[]) {
 }
 
 describe("backfillJobLedger", () => {
-  let ledger: JobLedger | undefined;
+  let ledger: ReturnType<typeof createSqliteJobLedger> | undefined;
 
   afterEach(async () => {
     await ledger?.close();
@@ -53,7 +54,7 @@ describe("backfillJobLedger", () => {
   });
 
   test("imports all Notion rows and verifies an idempotent backfill", async () => {
-    ledger = createJobLedger(":memory:");
+    ledger = createSqliteJobLedger(":memory:");
     const source = client([
       page({
         id: "page-1",
@@ -100,7 +101,7 @@ describe("backfillJobLedger", () => {
   });
 
   test("does not mark the migration when verification fails", async () => {
-    ledger = createJobLedger(":memory:");
+    ledger = createSqliteJobLedger(":memory:");
     const failingLedger: JobLedger = {
       ...ledger,
       notionBackfillStats: async () => ({

@@ -33,7 +33,7 @@
     "lint:fix": "biome check --write .",
     "typecheck": "tsc --noEmit",
     "prepare": "lefthook install",
-    "test:d1-job-ledger": "bun test src/services/__tests__/d1JobLedgerMigration.test.ts"
+    "test:d1-job-ledger": "bun test src/services/__tests__/d1JobLedger.test.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.9",

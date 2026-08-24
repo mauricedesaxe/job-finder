@@ -1,0 +1,13 @@
+{
+  "name": "d1-job-ledger-test-worker",
+  "main": "./d1JobLedgerWorker.ts",
+  "compatibility_date": "2026-08-24",
+  "d1_databases": [
+    {
+      "binding": "JOB_LEDGER",
+      "database_name": "job-ledger-test",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../../../migrations"
+    }
+  ]
+}

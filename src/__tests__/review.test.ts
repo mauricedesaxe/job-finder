@@ -5,7 +5,7 @@ import {
   ReviewSnapshotSchema,
   replayCompletedReviewCompanyBlocks,
 } from "../review";
-import { createJobLedger } from "../services/jobLedger";
+import { createSqliteJobLedger } from "../services/sqliteJobLedger";
 
 const snapshot: ReviewSnapshot = {
   traceId: "trace-123",
@@ -53,7 +53,7 @@ test("rejects snapshots with conflicting target profiles", () => {
 });
 
 test("applies company blocks idempotently before URL processing", async () => {
-  const ledger = createJobLedger(":memory:");
+  const ledger = createSqliteJobLedger(":memory:");
   try {
     const firstReplay = await replayCompletedReviewCompanyBlocks({
       reviews: completedReviews(),
