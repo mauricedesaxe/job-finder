@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import { EVALUATION_PROFILE_NAMES } from "./config/evaluation";
+import { AtsJobDataSchema } from "./services/ats";
 
 export const REVIEW_DECISIONS = ["pursue", "reject", "unsure"] as const;
 
@@ -30,20 +31,12 @@ export const JobSnapshotSchema = z.object({
   profile: TargetProfileSchema,
 });
 
-export const AtsSnapshotSchema = z.object({
-  source: z.enum(["lever", "ashby", "greenhouse", "workable"]),
-  location: z.string(),
-  locations: z.array(z.string()),
-  workplaceType: z.enum(["Remote", "Hybrid", "OnSite"]).nullable(),
-  country: z.string().nullable(),
-});
-
 export const ReviewSnapshotSchema = z
   .object({
     traceId: z.string().min(1),
     promptRelease: z.string().min(1),
     job: JobSnapshotSchema,
-    ats: AtsSnapshotSchema.nullable(),
+    ats: AtsJobDataSchema.nullable(),
     compensationRates: z.string().nullable(),
     evaluation: z.object({
       profile: TargetProfileSchema,
