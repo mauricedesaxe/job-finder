@@ -19,17 +19,19 @@ export const REVIEW_REASONS = [
   "other",
 ] as const;
 
+const TargetProfileSchema = z.enum(TARGET_PROFILE_NAMES);
+
 export const JobSnapshotSchema = z.object({
   title: z.string(),
   company: z.string(),
   url: z.string().url(),
   source: z.string(),
   keywordsMatched: z.array(z.string()),
-  datePosted: z.string().nullable(),
-  dateScraped: z.string(),
+  datePosted: z.string().date().nullable(),
+  dateScraped: z.string().date(),
   description: z.string(),
   location: z.string(),
-  profile: z.string(),
+  profile: TargetProfileSchema,
 });
 
 export const AtsSnapshotSchema = z.object({
@@ -40,17 +42,22 @@ export const AtsSnapshotSchema = z.object({
   country: z.string().nullable(),
 });
 
-export const ReviewSnapshotSchema = z.object({
-  traceId: z.string().min(1),
-  promptRelease: z.string().min(1),
-  job: JobSnapshotSchema,
-  ats: AtsSnapshotSchema.nullable(),
-  compensationRates: z.string().nullable(),
-  evaluation: z.object({
-    profile: z.enum(TARGET_PROFILE_NAMES),
-    reason: z.string(),
-  }),
-});
+export const ReviewSnapshotSchema = z
+  .object({
+    traceId: z.string().min(1),
+    promptRelease: z.string().min(1),
+    job: JobSnapshotSchema,
+    ats: AtsSnapshotSchema.nullable(),
+    compensationRates: z.string().nullable(),
+    evaluation: z.object({
+      profile: TargetProfileSchema,
+      reason: z.string(),
+    }),
+  })
+  .refine((snapshot) => snapshot.job.profile === snapshot.evaluation.profile, {
+    path: ["evaluation", "profile"],
+    message: "Review snapshot profiles must match",
+  });
 
 export const ReviewFeedbackSchema = z.object({
   decision: z.enum(REVIEW_DECISIONS),

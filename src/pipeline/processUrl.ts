@@ -14,12 +14,12 @@ import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
 import { atsStructuralFilter, fetchAtsData, formatAtsBlock } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
-import { traced } from "../services/langsmith";
+import { flushPending, traced } from "../services/langsmith";
 import { insertJob, type ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
-import { recordTerminalResult } from "./recordTerminalResult";
+import { recordAfterTraceFlush, recordTerminalResult } from "./recordTerminalResult";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
 import { structuralFilter } from "./structuralFilter";
 
@@ -62,6 +62,11 @@ interface ProcessResultState {
   traceId: string | undefined;
 }
 
+interface ProcessJobResult {
+  outcome: ProcessResult;
+  record: () => Promise<void>;
+}
+
 export async function processUrl(
   url: string,
   keyword: string,
@@ -86,7 +91,7 @@ export async function processUrl(
     traceId: undefined,
   };
 
-  return await traced(
+  const result = await traced(
     {
       name: "process_job",
       runType: "chain",
@@ -104,6 +109,8 @@ export async function processUrl(
     },
     async () => processJobBody(url, keyword, ctx, state),
   );
+  await recordAfterTraceFlush({ flush: flushPending, record: result.record });
+  return result.outcome;
 }
 
 async function processJobBody(
@@ -111,7 +118,7 @@ async function processJobBody(
   keyword: string,
   ctx: ProcessContext,
   state: ProcessResultState,
-): Promise<{ data: ProcessResult }> {
+): Promise<{ data: ProcessJobResult }> {
   const { config, ledger, notion, recentAppCompanies } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
@@ -143,7 +150,8 @@ async function processJobBody(
           { url, title: job.title, company: job.company, reason: atsCheck.reason },
           "rejected (ats)",
         );
-        await recordTerminalResult({
+        state.outcome = "rejected";
+        return terminalResult("rejected", {
           ledger,
           url,
           job,
@@ -151,8 +159,6 @@ async function processJobBody(
           traceId: state.traceId,
           project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
         });
-        state.outcome = "rejected";
-        return { data: "rejected" };
       }
     }
   }
@@ -163,7 +169,8 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: structural.reason },
       "rejected (structural)",
     );
-    await recordTerminalResult({
+    state.outcome = "rejected";
+    return terminalResult("rejected", {
       ledger,
       url,
       job,
@@ -171,8 +178,6 @@ async function processJobBody(
       traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
-    state.outcome = "rejected";
-    return { data: "rejected" };
   }
 
   const evaluation = await llmSemaphore.run(() =>
@@ -197,7 +202,8 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: evaluation.reason },
       "rejected",
     );
-    await recordTerminalResult({
+    state.outcome = "rejected";
+    return terminalResult("rejected", {
       ledger,
       url,
       job,
@@ -205,8 +211,6 @@ async function processJobBody(
       traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
-    state.outcome = "rejected";
-    return { data: "rejected" };
   }
 
   const enriched = await llmSemaphore.run(() =>
@@ -241,21 +245,21 @@ async function processJobBody(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
-      await recordTerminalResult({
+      state.outcome = "duplicated";
+      return terminalResult("duplicated", {
         ledger,
         url,
         job,
         outcome: "duplicated",
         traceId: state.traceId,
       });
-      state.outcome = "duplicated";
-      return { data: "duplicated" };
     }
   }
 
   if (ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
-    await recordTerminalResult({
+    state.outcome = "archived";
+    return terminalResult("archived", {
       ledger,
       url,
       job,
@@ -263,13 +267,12 @@ async function processJobBody(
       traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
     });
-    state.outcome = "archived";
-    return { data: "archived" };
   }
 
   if (recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
-    await recordTerminalResult({
+    state.outcome = "companyApplied";
+    return terminalResult("companyApplied", {
       ledger,
       url,
       job,
@@ -277,11 +280,10 @@ async function processJobBody(
       traceId: state.traceId,
       project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
     });
-    state.outcome = "companyApplied";
-    return { data: "companyApplied" };
   }
 
-  await recordTerminalResult({
+  state.outcome = "inserted";
+  return terminalResult("inserted", {
     ledger,
     url,
     job,
@@ -289,8 +291,11 @@ async function processJobBody(
     traceId: state.traceId,
     project: () => insertJob(notion, config.notionDatabaseId, job),
   });
-  log.info({ url, title: job.title, company: job.company }, "inserted");
+}
 
-  state.outcome = "inserted";
-  return { data: "inserted" };
+function terminalResult(
+  outcome: ProcessResult,
+  input: Parameters<typeof recordTerminalResult>[0],
+): { data: ProcessJobResult } {
+  return { data: { outcome, record: () => recordTerminalResult(input) } };
 }

@@ -11,7 +11,7 @@ const snapshot: ReviewSnapshot = {
     source: "jobs.example.com",
     keywordsMatched: ["product engineer"],
     datePosted: null,
-    dateScraped: "2026-08-23T00:00:00.000Z",
+    dateScraped: "2026-08-23",
     description: "Build the product.",
     location: "Europe",
     profile: "early-stage-product-engineer",
@@ -36,4 +36,22 @@ test("rejects a review feedback profile outside the target set", () => {
       primaryReason: "technology-fit",
     }),
   ).toThrow();
+});
+
+test("rejects dates the job parser cannot produce", () => {
+  expect(() =>
+    ReviewSnapshotSchema.parse({
+      ...snapshot,
+      job: { ...snapshot.job, datePosted: "23 August 2026" },
+    }),
+  ).toThrow();
+});
+
+test("rejects snapshots with conflicting target profiles", () => {
+  expect(() =>
+    ReviewSnapshotSchema.parse({
+      ...snapshot,
+      evaluation: { ...snapshot.evaluation, profile: "applied-ai-product-engineer" },
+    }),
+  ).toThrow("profiles must match");
 });

@@ -25,3 +25,11 @@ export async function recordTerminalResult({
   });
   await project?.();
 }
+
+export async function recordAfterTraceFlush(input: {
+  flush: () => Promise<void>;
+  record: () => Promise<void>;
+}): Promise<void> {
+  await input.flush();
+  await input.record();
+}
