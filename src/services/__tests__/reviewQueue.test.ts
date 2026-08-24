@@ -38,7 +38,7 @@ test("creates the review queue and records a snapshot before it enqueues the tra
     createAnnotationQueue: async ({ name, rubricItems }) => {
       calls.push(`queue:${name}`);
       expect(rubricItems.map((item) => item.feedback_key)).toEqual([
-        "review_decision",
+        "job_decision",
         "target_profile",
         "primary_reason",
         "block_company",

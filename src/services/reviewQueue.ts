@@ -32,7 +32,7 @@ interface ReviewQueueClient {
 
 const feedbackConfigs = [
   {
-    feedbackKey: "review_decision",
+    feedbackKey: "job_decision",
     feedbackConfig: {
       type: "categorical",
       categories: [...REVIEW_DECISIONS.map((label, value) => ({ value, label }))],
@@ -68,7 +68,7 @@ const feedbackConfigs = [
 ] satisfies Array<{ feedbackKey: string; feedbackConfig: FeedbackConfig }>;
 
 const rubricItems: AnnotationQueueRubricItem[] = [
-  { feedback_key: "review_decision", is_required: true },
+  { feedback_key: "job_decision", is_required: true },
   { feedback_key: "target_profile", is_required: true },
   { feedback_key: "primary_reason", is_required: true },
   { feedback_key: "block_company", is_required: true },
