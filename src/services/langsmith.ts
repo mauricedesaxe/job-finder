@@ -6,6 +6,7 @@ import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
 import { withRetry } from "../concurrency";
 import { logger } from "../logger";
+import type { CompletedReview } from "../review";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
 import { createReviewQueue } from "./reviewQueue";
 
@@ -180,6 +181,11 @@ export function getPromptReleaseTag(): string {
 export async function enqueueReviewTrace(traceId: string): Promise<void> {
   if (!state) throw new Error("LangSmith is not initialized");
   await state.reviewQueue.enqueue(traceId);
+}
+
+export function completedReviews(): AsyncIterable<CompletedReview> {
+  if (!state) throw new Error("LangSmith is not initialized");
+  return state.reviewQueue.completedReviews();
 }
 
 export async function invokePrompt<T>(input: {

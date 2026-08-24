@@ -10,7 +10,7 @@ import { runPreflight } from "./preflight";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import { createJobLedger, type JobLedger } from "./services/jobLedger";
-import { flushPending, initLangSmith } from "./services/langsmith";
+import { completedReviews, flushPending, initLangSmith } from "./services/langsmith";
 import { createNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
 import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./services/notionLedgerBackfill";
@@ -51,6 +51,21 @@ async function mainWithLedger(ledger: JobLedger) {
   if (!ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION)) {
     throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
   }
+
+  let reviewCount = 0;
+  let companyExclusionCount = 0;
+  for await (const review of completedReviews()) {
+    reviewCount++;
+    if (review.blockCompany) {
+      ledger.excludeCompany({
+        company: review.snapshot.job.company,
+        excludedAt: review.reviewedAt,
+        sourceKey: `langsmith-review:${review.runId}`,
+      });
+      companyExclusionCount++;
+    }
+  }
+  log.info({ reviews: reviewCount, companyExclusions: companyExclusionCount }, "reviews replayed");
 
   const preReconcileStats = await reconcile(notion, config.notionDatabaseId, "Pre-scrape");
 

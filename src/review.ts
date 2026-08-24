@@ -17,6 +17,7 @@ export const REVIEW_REASONS = [
 ] as const;
 
 const TargetProfileSchema = z.enum(EVALUATION_PROFILE_NAMES);
+const ReviewTargetProfileSchema = z.enum([...EVALUATION_PROFILE_NAMES, "neither"]);
 
 export const JobSnapshotSchema = z.object({
   title: z.string(),
@@ -48,4 +49,21 @@ export const ReviewSnapshotSchema = z
     message: "Review snapshot profiles must match",
   });
 
+export const CompletedReviewSchema = z
+  .object({
+    runId: z.string().min(1),
+    reviewedAt: z.string().datetime({ offset: true }),
+    snapshot: ReviewSnapshotSchema,
+    decision: z.enum(REVIEW_DECISIONS),
+    targetProfile: ReviewTargetProfileSchema,
+    primaryReason: z.enum(REVIEW_REASONS),
+    note: z.string().optional(),
+    blockCompany: z.boolean(),
+  })
+  .refine((review) => review.snapshot.traceId === review.runId, {
+    path: ["snapshot", "traceId"],
+    message: "Completed review trace must match its run",
+  });
+
 export type ReviewSnapshot = z.infer<typeof ReviewSnapshotSchema>;
+export type CompletedReview = z.infer<typeof CompletedReviewSchema>;
