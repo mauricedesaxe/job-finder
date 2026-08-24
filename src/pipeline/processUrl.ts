@@ -150,8 +150,7 @@ async function processJobBody(
           { url, title: job.title, company: job.company, reason: atsCheck.reason },
           "rejected (ats)",
         );
-        state.outcome = "rejected";
-        return terminalResult({
+        return terminalResult(state, {
           ledger,
           url,
           job,
@@ -168,8 +167,7 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: structural.reason },
       "rejected (structural)",
     );
-    state.outcome = "rejected";
-    return terminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
@@ -200,8 +198,7 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: evaluation.reason },
       "rejected",
     );
-    state.outcome = "rejected";
-    return terminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
@@ -242,8 +239,7 @@ async function processJobBody(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
-      state.outcome = "duplicated";
-      return terminalResult({
+      return terminalResult(state, {
         ledger,
         url,
         job,
@@ -254,8 +250,7 @@ async function processJobBody(
 
   if (ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
-    state.outcome = "archived";
-    return terminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
@@ -266,8 +261,7 @@ async function processJobBody(
 
   if (recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
-    state.outcome = "companyApplied";
-    return terminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
@@ -276,8 +270,7 @@ async function processJobBody(
     });
   }
 
-  state.outcome = "inserted";
-  return terminalResult({
+  return terminalResult(state, {
     ledger,
     url,
     job,
@@ -287,10 +280,12 @@ async function processJobBody(
 }
 
 function terminalResult(
+  state: ProcessResultState,
   input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId" | "outcome"> & {
     outcome: TerminalOutcome;
   },
 ): { data: ProcessJobResult } {
+  state.outcome = input.outcome;
   return {
     data: {
       outcome: input.outcome,
