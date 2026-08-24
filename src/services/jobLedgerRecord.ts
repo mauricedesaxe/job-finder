@@ -28,9 +28,10 @@ export function createProcessedJobWriteRecord(
   input: RecordProcessedJobInput,
 ): ProcessedJobWriteRecord {
   const processedAt = input.processedAt ?? new Date().toISOString();
+  const sourceKey = input.sourceKey ?? sourceKeyForRawUrl(input.rawUrl);
 
   return {
-    sourceKey: input.sourceKey ?? sourceKeyFor(input.rawUrl),
+    sourceKey,
     rawUrl: input.rawUrl ?? null,
     company: input.company,
     normalizedCompany: normalizeJobLedgerText(input.company),
@@ -92,7 +93,7 @@ export function normalizeJobLedgerText(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function sourceKeyFor(rawUrl: string | undefined): string {
+function sourceKeyForRawUrl(rawUrl: string | undefined): string {
   if (!rawUrl) {
     throw new Error("A source key is required when a processed job has no URL");
   }

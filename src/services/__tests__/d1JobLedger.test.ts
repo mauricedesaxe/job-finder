@@ -2,12 +2,31 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { createTestHarness, type TestHarness, type WorkerHandle } from "wrangler";
 import { z } from "zod/v4";
+import { JOB_STATUSES } from "../../types";
 import { createD1JobLedger } from "../d1JobLedger";
 import { PROCESSED_JOB_OUTCOMES } from "../jobLedger";
 import { JOB_LEDGER_CONFORMANCE_RESULT } from "./jobLedgerConformance";
 
 const projectRoot = resolve(import.meta.dir, "../../..");
 const configPath = resolve(import.meta.dir, "fixtures/d1-job-ledger.wrangler.jsonc");
+
+const PendingProjectionSchema = z.object({
+  sourceKey: z.string(),
+  job: z.object({
+    title: z.string(),
+    company: z.string(),
+    url: z.string(),
+    source: z.string(),
+    keywordsMatched: z.array(z.string()),
+    datePosted: z.string().nullable(),
+    dateScraped: z.string(),
+    description: z.string(),
+    location: z.string(),
+    profile: z.string(),
+  }),
+  status: z.enum(JOB_STATUSES),
+  createdAt: z.string(),
+});
 
 const ProcessedJobSchema = z.object({
   sourceKey: z.string(),
@@ -37,6 +56,10 @@ const ConformanceResultSchema = z.object({
   }),
   hasMigration: z.boolean(),
   missingSourceKeyError: z.string(),
+  pendingBeforeComplete: z.array(PendingProjectionSchema),
+  pendingAfterOrdinaryUpsert: z.array(PendingProjectionSchema),
+  pendingAfterComplete: z.array(PendingProjectionSchema),
+  duplicatePending: z.array(PendingProjectionSchema),
 });
 
 const ScenarioResponseSchema = z.object({
@@ -48,6 +71,7 @@ const ScenarioResponseSchema = z.object({
 });
 
 const MalformedResponseSchema = z.object({ rejected: z.boolean() });
+const AtomicResponseSchema = z.object({ rejected: z.boolean(), rolledBack: z.boolean() });
 
 let harness: TestHarness;
 let worker: WorkerHandle;
@@ -80,6 +104,13 @@ test("runs the job ledger adapter in workerd", async () => {
   });
 }, 15_000);
 
+test("records a processed job and projection atomically in D1", async () => {
+  const response = await worker.fetch("/atomic-projection");
+  expect(response.status).toBe(200);
+  const body: unknown = await response.json();
+  expect(AtomicResponseSchema.parse(body)).toEqual({ rejected: true, rolledBack: true });
+}, 15_000);
+
 test("rejects malformed stored outcomes at the D1 boundary", async () => {
   const response = await worker.fetch("/malformed-outcome");
   expect(response.status).toBe(200);
@@ -87,8 +118,18 @@ test("rejects malformed stored outcomes at the D1 boundary", async () => {
   expect(MalformedResponseSchema.parse(body)).toEqual({ rejected: true });
 }, 15_000);
 
+test("rejects malformed stored projections at the D1 boundary", async () => {
+  const response = await worker.fetch("/malformed-projection");
+  expect(response.status).toBe(200);
+  const body: unknown = await response.json();
+  expect(MalformedResponseSchema.parse(body)).toEqual({ rejected: true });
+}, 15_000);
+
 test("rejects D1 writes that do not report success", async () => {
   const ledger = createD1JobLedger({
+    async batch() {
+      return [{ success: false }, { success: true }];
+    },
     prepare() {
       return {
         bind() {

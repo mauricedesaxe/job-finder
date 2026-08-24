@@ -48,10 +48,15 @@ export function withNotionResilience<T>(fn: () => Promise<T>): Promise<T> {
   );
 }
 
+/** Runs once because retrying after a lost success response can create a duplicate page. */
+export function withNonRetryingNotionCreate<T>(fn: () => Promise<T>): Promise<T> {
+  return notionRateLimiter.run(() => notionBreaker.run(fn));
+}
+
 /**
  * The ONLY Notion client the app constructs. Returns a resilient wrapper rather
  * than the raw SDK client, so no call site — pipeline stage, reconcile, cache
- * build, or script — can issue an unthrottled, un-retried Notion request.
+ * build, or script — can bypass its Notion resilience policy.
  */
 export function createNotionClient(token: string): ResilientNotionClient {
   const client = new Client({ auth: token });
@@ -62,7 +67,7 @@ export function createNotionClient(token: string): ResilientNotionClient {
       update: (args) => withNotionResilience(() => client.databases.update(args)),
     },
     pages: {
-      create: (args) => withNotionResilience(() => client.pages.create(args)),
+      create: (args) => withNonRetryingNotionCreate(() => client.pages.create(args)),
       update: (args) => withNotionResilience(() => client.pages.update(args)),
     },
   };

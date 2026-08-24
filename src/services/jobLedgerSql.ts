@@ -74,3 +74,22 @@ export const EXCLUDE_COMPANY_SQL = `
   ON CONFLICT(normalized_company) DO UPDATE SET
     source_key = COALESCE(excluded.source_key, company_exclusions.source_key)
 `;
+
+export const RECORD_PENDING_NOTION_PROJECTION_SQL = `
+  INSERT INTO pending_notion_projections (source_key, job_json, status, created_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(source_key) DO UPDATE SET
+    job_json = excluded.job_json,
+    status = excluded.status,
+    created_at = excluded.created_at
+`;
+
+export const LIST_PENDING_NOTION_PROJECTIONS_SQL = `
+  SELECT source_key, job_json, status, created_at
+  FROM pending_notion_projections
+  ORDER BY created_at, source_key
+`;
+
+export const MARK_NOTION_PROJECTION_COMPLETE_SQL = `
+  DELETE FROM pending_notion_projections WHERE source_key = ?
+`;

@@ -21,7 +21,7 @@ import {
 } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
 import { enqueueReviewTrace, getPromptReleaseTag, traced } from "../services/langsmith";
-import { insertJob, type ResilientNotionClient } from "../services/notion";
+import type { ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -164,10 +164,9 @@ async function processJobBody(
         );
         return terminalResult(state, {
           ledger,
-          url,
           job,
           outcome: "rejected",
-          project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+          projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
         });
       }
     }
@@ -181,10 +180,9 @@ async function processJobBody(
     );
     return terminalResult(state, {
       ledger,
-      url,
       job,
       outcome: "rejected",
-      project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+      projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
     });
   }
 
@@ -212,10 +210,9 @@ async function processJobBody(
     );
     return terminalResult(state, {
       ledger,
-      url,
       job,
       outcome: "rejected",
-      project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
+      projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
     });
   }
 
@@ -253,7 +250,6 @@ async function processJobBody(
       );
       return terminalResult(state, {
         ledger,
-        url,
         job,
         outcome: "duplicated",
       });
@@ -264,10 +260,9 @@ async function processJobBody(
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
     return terminalResult(state, {
       ledger,
-      url,
       job,
       outcome: "archived",
-      project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
+      projection: { notion, databaseId: config.notionDatabaseId, status: "Archived" },
     });
   }
 
@@ -275,10 +270,9 @@ async function processJobBody(
     log.info({ url, title: job.title, company: job.company }, "company applied");
     return terminalResult(state, {
       ledger,
-      url,
       job,
       outcome: "companyApplied",
-      project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
+      projection: { notion, databaseId: config.notionDatabaseId, status: "Company Applied" },
     });
   }
 
@@ -305,11 +299,10 @@ async function processJobBody(
           await enqueueReviewTrace(traceId);
           await recordTerminalResult({
             ledger,
-            url,
             job,
             outcome,
             traceId,
-            project: () => insertJob(notion, config.notionDatabaseId, job),
+            projection: { notion, databaseId: config.notionDatabaseId, status: "To Review" },
           });
         };
       },

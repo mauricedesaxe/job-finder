@@ -1,7 +1,9 @@
 import { z } from "zod/v4";
+import { JobListingSchema, JobStatusSchema } from "../types";
 import {
   type CompanyExclusion,
   type NotionBackfillStats,
+  type PendingNotionProjection,
   PROCESSED_JOB_OUTCOMES,
   type ProcessedJob,
 } from "./jobLedger";
@@ -34,6 +36,13 @@ const NotionBackfillStatsSchema = z.object({
 
 const MigrationRowSchema = z.object({ name: z.string() });
 
+const PendingNotionProjectionRowSchema = z.object({
+  source_key: z.string(),
+  job_json: z.string(),
+  status: JobStatusSchema,
+  created_at: z.iso.datetime(),
+});
+
 export function parseProcessedJobRow(value: unknown): ProcessedJob | null {
   const row = ProcessedJobRowSchema.nullable().parse(value);
   if (!row) return null;
@@ -65,4 +74,19 @@ export function parseNotionBackfillStats(value: unknown): NotionBackfillStats | 
 
 export function parseMigrationRow(value: unknown): boolean {
   return MigrationRowSchema.nullable().parse(value) !== null;
+}
+
+export function parsePendingNotionProjectionRows(value: unknown): PendingNotionProjection[] {
+  return z
+    .array(PendingNotionProjectionRowSchema)
+    .parse(value)
+    .map((row) => {
+      const storedJob: unknown = JSON.parse(row.job_json);
+      return {
+        sourceKey: row.source_key,
+        job: JobListingSchema.parse(storedJob),
+        status: row.status,
+        createdAt: row.created_at,
+      };
+    });
 }
