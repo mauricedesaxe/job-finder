@@ -2,6 +2,7 @@ import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./
 import type { JobFinderConfig } from "./config";
 import { getEvaluationFilters } from "./config/evaluation";
 import { logger } from "./logger";
+import { replayPendingNotionProjections } from "./pipeline/notionProjection";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { prune } from "./pipeline/prune";
 import { reconcile } from "./pipeline/reconcile";
@@ -73,6 +74,12 @@ async function scrapeJobs({
   if (!(await ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION))) {
     throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
   }
+
+  await replayPendingNotionProjections({
+    ledger,
+    notion,
+    databaseId: config.notionDatabaseId,
+  });
 
   const reviewStats = await replayCompletedReviewCompanyBlocks({
     reviews: completedReviews(),

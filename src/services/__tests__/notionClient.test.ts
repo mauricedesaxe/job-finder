@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { withNotionResilience } from "../notion/client";
+import { withNonRetryingNotionCreate, withNotionResilience } from "../notion/client";
 
 function notionError(status: number): Error {
   return Object.assign(new Error(`notion ${status}`), { status });
@@ -16,6 +16,20 @@ describe("withNotionResilience", () => {
     });
     expect(result).toBe("ok");
     expect(calls).toBe(3);
+    sleep.mockRestore();
+  });
+
+  test("invokes page creation once on a retryable error", async () => {
+    const sleep = spyOn(Bun, "sleep").mockImplementation(() => Promise.resolve());
+    let calls = 0;
+    const run = withNonRetryingNotionCreate(async () => {
+      calls += 1;
+      throw notionError(429);
+    });
+
+    await expect(run).rejects.toMatchObject({ status: 429 });
+    expect(calls).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
     sleep.mockRestore();
   });
 

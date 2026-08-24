@@ -1,4 +1,10 @@
-import type { CompanyExclusion, JobLedger, NotionBackfillStats, ProcessedJob } from "../jobLedger";
+import type {
+  CompanyExclusion,
+  JobLedger,
+  NotionBackfillStats,
+  PendingNotionProjection,
+  ProcessedJob,
+} from "../jobLedger";
 
 interface JobLedgerConformanceResult {
   exactJob: ProcessedJob | null;
@@ -11,6 +17,10 @@ interface JobLedgerConformanceResult {
   notionStats: NotionBackfillStats;
   hasMigration: boolean;
   missingSourceKeyError: string;
+  pendingBeforeComplete: PendingNotionProjection[];
+  pendingAfterOrdinaryUpsert: PendingNotionProjection[];
+  pendingAfterComplete: PendingNotionProjection[];
+  duplicatePending: PendingNotionProjection[];
 }
 
 export const JOB_LEDGER_CONFORMANCE_RESULT: JobLedgerConformanceResult = {
@@ -51,6 +61,46 @@ export const JOB_LEDGER_CONFORMANCE_RESULT: JobLedgerConformanceResult = {
   },
   hasMigration: true,
   missingSourceKeyError: "A source key is required when a processed job has no URL",
+  pendingBeforeComplete: [
+    {
+      sourceKey: "source:pending",
+      job: {
+        title: "Pending Engineer",
+        company: "Pending Co",
+        url: "https://jobs.example.com/pending",
+        source: "Example",
+        keywordsMatched: ["engineer"],
+        datePosted: null,
+        dateScraped: "2026-08-22",
+        description: "Pending projection",
+        location: "Remote",
+        profile: "Backend",
+      },
+      status: "To Review",
+      createdAt: "2026-08-22T14:00:00.000Z",
+    },
+  ],
+  pendingAfterOrdinaryUpsert: [
+    {
+      sourceKey: "source:pending",
+      job: {
+        title: "Pending Engineer",
+        company: "Pending Co",
+        url: "https://jobs.example.com/pending",
+        source: "Example",
+        keywordsMatched: ["engineer"],
+        datePosted: null,
+        dateScraped: "2026-08-22",
+        description: "Pending projection",
+        location: "Remote",
+        profile: "Backend",
+      },
+      status: "To Review",
+      createdAt: "2026-08-22T14:00:00.000Z",
+    },
+  ],
+  pendingAfterComplete: [],
+  duplicatePending: [],
 };
 
 export async function runJobLedgerConformanceScenario(
@@ -162,6 +212,55 @@ export async function runJobLedgerConformanceScenario(
   await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T12:00:00.000Z");
   await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T13:00:00.000Z");
 
+  const pendingProjection: PendingNotionProjection = {
+    sourceKey: "source:pending",
+    job: {
+      title: "Pending Engineer",
+      company: "Pending Co",
+      url: "https://jobs.example.com/pending",
+      source: "Example",
+      keywordsMatched: ["engineer"],
+      datePosted: null,
+      dateScraped: "2026-08-22",
+      description: "Pending projection",
+      location: "Remote",
+      profile: "Backend",
+    },
+    status: "To Review",
+    createdAt: "2026-08-22T14:00:00.000Z",
+  };
+  await ledger.recordProcessedJob({
+    sourceKey: pendingProjection.sourceKey,
+    rawUrl: pendingProjection.job.url,
+    company: pendingProjection.job.company,
+    title: pendingProjection.job.title,
+    outcome: "inserted",
+    pendingNotionProjection: {
+      job: pendingProjection.job,
+      status: pendingProjection.status,
+      createdAt: pendingProjection.createdAt,
+    },
+  });
+  const pendingBeforeComplete = await ledger.listPendingNotionProjections();
+  await ledger.recordProcessedJob({
+    sourceKey: pendingProjection.sourceKey,
+    rawUrl: pendingProjection.job.url,
+    company: pendingProjection.job.company,
+    title: "Updated Pending Engineer",
+    outcome: "inserted",
+  });
+  const pendingAfterOrdinaryUpsert = await ledger.listPendingNotionProjections();
+  await ledger.markNotionProjectionComplete(pendingProjection.sourceKey);
+  const pendingAfterComplete = await ledger.listPendingNotionProjections();
+  await ledger.recordProcessedJob({
+    sourceKey: "source:duplicate-pending",
+    rawUrl: "https://jobs.example.com/duplicate-pending",
+    company: "Pending Co",
+    title: "Duplicate Pending Engineer",
+    outcome: "duplicated",
+  });
+  const duplicatePending = await ledger.listPendingNotionProjections();
+
   let missingSourceKeyError = "";
   try {
     await ledger.recordProcessedJob({
@@ -184,5 +283,9 @@ export async function runJobLedgerConformanceScenario(
     notionStats: await ledger.notionBackfillStats(),
     hasMigration: await ledger.hasMigration("notion-job-ledger-backfill-v1"),
     missingSourceKeyError,
+    pendingBeforeComplete,
+    pendingAfterOrdinaryUpsert,
+    pendingAfterComplete,
+    duplicatePending,
   };
 }

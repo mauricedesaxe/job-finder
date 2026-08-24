@@ -1,3 +1,5 @@
+import { z } from "zod/v4";
+
 export const JOB_STATUSES = [
   "To Review",
   "Applied",
@@ -9,17 +11,20 @@ export const JOB_STATUSES = [
   "Archived",
 ] as const;
 
-export type JobStatus = (typeof JOB_STATUSES)[number];
+export const JobStatusSchema = z.enum(JOB_STATUSES);
+export type JobStatus = z.infer<typeof JobStatusSchema>;
 
-export interface JobListing {
-  title: string;
-  company: string;
-  url: string;
-  source: string;
-  keywordsMatched: string[];
-  datePosted: string | null;
-  dateScraped: string;
-  description: string;
-  location: string;
-  profile: string;
-}
+export const JobListingSchema = z.object({
+  title: z.string(),
+  company: z.string(),
+  url: z.string(),
+  source: z.string(),
+  keywordsMatched: z.array(z.string()),
+  datePosted: z.string().nullable(),
+  dateScraped: z.string(),
+  description: z.string(),
+  location: z.string(),
+  profile: z.string(),
+});
+
+export type JobListing = z.infer<typeof JobListingSchema>;

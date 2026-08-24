@@ -1,5 +1,5 @@
 import { z } from "zod/v4";
-import type { JobLedger } from "./jobLedger";
+import type { JobLedger, PendingNotionProjection } from "./jobLedger";
 import {
   companyExclusionWriteValues,
   createCompanyExclusionWriteRecord,
@@ -11,6 +11,7 @@ import {
   parseCompanyExclusionRow,
   parseMigrationRow,
   parseNotionBackfillStats,
+  parsePendingNotionProjectionRows,
   parseProcessedJobRow,
   parseTitleRows,
 } from "./jobLedgerRows";
@@ -19,8 +20,11 @@ import {
   FIND_BY_RAW_URL_SQL,
   FIND_COMPANY_EXCLUSION_SQL,
   HAS_MIGRATION_SQL,
+  LIST_PENDING_NOTION_PROJECTIONS_SQL,
   MARK_MIGRATION_SQL,
+  MARK_NOTION_PROJECTION_COMPLETE_SQL,
   NOTION_BACKFILL_STATS_SQL,
+  RECORD_PENDING_NOTION_PROJECTION_SQL,
   RECORD_PROCESSED_JOB_SQL,
   TITLES_FOR_COMPANY_SQL,
 } from "./jobLedgerSql";
@@ -36,14 +40,16 @@ interface D1PreparedStatement {
 
 interface D1DatabaseBinding {
   prepare(query: string): D1PreparedStatement;
+  batch(statements: D1PreparedStatement[]): Promise<unknown>;
 }
 
-const TitleRowsResultSchema = z.object({
+const RowsResultSchema = z.object({
   success: z.literal(true),
   results: z.array(z.unknown()),
 });
 
 const WriteResultSchema = z.object({ success: z.literal(true) });
+const BatchWriteResultSchema = z.array(WriteResultSchema);
 
 export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
   return {
@@ -51,7 +57,7 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
       return parseProcessedJobRow(await binding.prepare(FIND_BY_RAW_URL_SQL).bind(rawUrl).first());
     },
     async titlesForCompany(company) {
-      const result = TitleRowsResultSchema.parse(
+      const result = RowsResultSchema.parse(
         await binding.prepare(TITLES_FOR_COMPANY_SQL).bind(normalizeJobLedgerText(company)).all(),
       );
       return parseTitleRows(result.results);
@@ -66,11 +72,41 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
     },
     async recordProcessedJob(input) {
       const record = createProcessedJobWriteRecord(input);
+      const projection: PendingNotionProjection | null = input.pendingNotionProjection
+        ? {
+            sourceKey: record.sourceKey,
+            job: input.pendingNotionProjection.job,
+            status: input.pendingNotionProjection.status,
+            createdAt: input.pendingNotionProjection.createdAt,
+          }
+        : null;
+      const statements = [
+        binding.prepare(RECORD_PROCESSED_JOB_SQL).bind(...processedJobWriteValues(record)),
+      ];
+      if (projection) {
+        statements.push(
+          binding
+            .prepare(RECORD_PENDING_NOTION_PROJECTION_SQL)
+            .bind(
+              projection.sourceKey,
+              JSON.stringify(projection.job),
+              projection.status,
+              projection.createdAt,
+            ),
+        );
+      }
+      BatchWriteResultSchema.parse(await binding.batch(statements));
+      return projection;
+    },
+    async listPendingNotionProjections() {
+      const result = RowsResultSchema.parse(
+        await binding.prepare(LIST_PENDING_NOTION_PROJECTIONS_SQL).all(),
+      );
+      return parsePendingNotionProjectionRows(result.results);
+    },
+    async markNotionProjectionComplete(sourceKey) {
       WriteResultSchema.parse(
-        await binding
-          .prepare(RECORD_PROCESSED_JOB_SQL)
-          .bind(...processedJobWriteValues(record))
-          .run(),
+        await binding.prepare(MARK_NOTION_PROJECTION_COMPLETE_SQL).bind(sourceKey).run(),
       );
     },
     async excludeCompany(input) {
