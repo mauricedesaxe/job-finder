@@ -71,7 +71,7 @@ interface ProcessResultState {
 
 interface ProcessJobResult {
   outcome: ProcessResult;
-  record: (traceId: string) => Promise<void>;
+  record: (traceId: string) => Promise<(() => Promise<void>) | undefined>;
 }
 
 type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
@@ -118,8 +118,8 @@ export async function processUrl(
     async ({ requireAccepted }) => {
       const { data: result } = await processJobBody(url, keyword, ctx, state);
       const traceId = await requireAccepted();
-      await result.record(traceId);
-      return { data: result.outcome };
+      const afterComplete = await result.record(traceId);
+      return { data: result.outcome, afterComplete };
     },
   );
 }
@@ -301,15 +301,17 @@ async function processJobBody(
         });
         state.outcome = outcome;
         state.reviewSnapshot = snapshot;
-        await enqueueReviewSnapshot(snapshot);
-        await recordTerminalResult({
-          ledger,
-          url,
-          job,
-          outcome,
-          traceId,
-          project: () => insertJob(notion, config.notionDatabaseId, job),
-        });
+        return async () => {
+          await enqueueReviewSnapshot(snapshot);
+          await recordTerminalResult({
+            ledger,
+            url,
+            job,
+            outcome,
+            traceId,
+            project: () => insertJob(notion, config.notionDatabaseId, job),
+          });
+        };
       },
     },
   };
@@ -325,7 +327,10 @@ function terminalResult(
   return {
     data: {
       outcome: input.outcome,
-      record: (traceId) => recordTerminalResult({ ...input, traceId }),
+      record: async (traceId) => {
+        await recordTerminalResult({ ...input, traceId });
+        return undefined;
+      },
     },
   };
 }

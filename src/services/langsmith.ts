@@ -37,6 +37,7 @@ export interface TraceContext {
 export interface TraceResult<T> {
   data: T;
   usage?: { input: number; output: number; total: number };
+  afterComplete?: () => Promise<void>;
 }
 
 type PromptRunnable = Runnable<Record<string, string>, AIMessage>;
@@ -176,7 +177,6 @@ export function getPromptReleaseTag(): string {
 
 export async function enqueueReviewSnapshot(snapshot: ReviewSnapshot): Promise<void> {
   if (!state) throw new Error("LangSmith is not initialized");
-  await state.client.flush();
   await state.reviewQueue.enqueue(snapshot);
 }
 
@@ -278,12 +278,7 @@ export async function traced<T>(
         requireAccepted: async () => {
           const startedTraceId = traceId;
           if (!startedTraceId) throw new Error("LangSmith trace did not start");
-          await configured.client.flush();
-          await withRetry(() => configured.client.readRun(startedTraceId), {
-            maxRetries: 2,
-            baseDelayMs: 100,
-            shouldRetry: isMissingTrace,
-          });
+          await requireAcceptedTrace(configured.client, startedTraceId);
           return startedTraceId;
         },
       });
@@ -315,9 +310,82 @@ export async function traced<T>(
         : undefined,
     },
   );
-  await wrapped();
+  try {
+    await wrapped();
+  } catch (error) {
+    await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
+  }
   if (!result) throw new Error("tracing returned without a result");
+  if (result.afterComplete) {
+    if (!traceId) throw new Error("LangSmith trace did not start");
+    await requireCompletedTrace(configured.client, traceId);
+    try {
+      await result.afterComplete();
+    } catch (error) {
+      await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
+    }
+  }
   return result.data;
+}
+
+async function requireAcceptedTrace(client: Client, traceId: string): Promise<void> {
+  await client.flush();
+  await withRetry(() => client.readRun(traceId), {
+    maxRetries: 2,
+    baseDelayMs: 100,
+    shouldRetry: isMissingTrace,
+  });
+}
+
+async function requireCompletedTrace(
+  client: Client,
+  traceId: string,
+): Promise<Awaited<ReturnType<Client["readRun"]>>> {
+  await client.flush();
+  return withRetry(
+    async () => {
+      const trace = await client.readRun(traceId);
+      if (!trace.end_time) {
+        throw Object.assign(new Error("LangSmith trace is not complete"), {
+          code: "TRACE_INCOMPLETE",
+        });
+      }
+      return trace;
+    },
+    {
+      maxRetries: 2,
+      baseDelayMs: 100,
+      shouldRetry: (error) =>
+        isMissingTrace(error) ||
+        (error instanceof Error && "code" in error && error.code === "TRACE_INCOMPLETE"),
+    },
+  );
+}
+
+async function rethrowWithExtendedErrorTrace(
+  client: Client,
+  traceId: string | undefined,
+  error: unknown,
+): Promise<never> {
+  if (!traceId) throw error;
+  try {
+    const trace = await requireCompletedTrace(client, traceId);
+    if (!trace.session_id) throw new Error("Completed LangSmith trace has no project ID");
+    await client.createFeedback({
+      runId: traceId,
+      sessionId: trace.session_id,
+      key: "operational_error",
+      value: error instanceof Error ? error.message : String(error),
+      feedbackSourceType: "app",
+      extendTraceRetention: true,
+    });
+  } catch (retentionError) {
+    throw new AggregateError(
+      [error, retentionError],
+      "Processing failed and its trace retention could not be extended",
+    );
+  }
+  throw error;
 }
 
 function isMissingTrace(error: unknown): boolean {

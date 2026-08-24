@@ -174,11 +174,101 @@ describe("LangSmith trace acceptance", () => {
 
     expect(events.slice(0, 3)).toEqual(["batch", "read", "persist"]);
   });
+
+  test("runs deferred work only after the parent trace completes", async () => {
+    const events: string[] = [];
+    let reads = 0;
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        events.push("batch");
+        return new Response(null, { status: 202 });
+      }
+      reads++;
+      events.push(reads === 1 ? "read-open" : "read-complete");
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        session_id: "22222222-2222-4222-8222-222222222222",
+        name: "process_job",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        end_time: reads === 1 ? null : "2026-08-24T00:00:01Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "process_job" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      events.push("callback");
+      return {
+        data: "inserted",
+        afterComplete: async () => {
+          events.push("after-complete");
+        },
+      };
+    });
+
+    expect(events).toEqual([
+      "batch",
+      "read-open",
+      "callback",
+      "batch",
+      "read-complete",
+      "after-complete",
+    ]);
+  });
+
+  test("extends retention for operational errors", async () => {
+    let reads = 0;
+    let feedback: Record<string, unknown> | undefined;
+    const client = traceClient((url, init) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) return new Response(null, { status: 202 });
+      if (url.endsWith("/feedback")) {
+        feedback = JSON.parse(String(init?.body));
+        return new Response(null, { status: 202 });
+      }
+      reads++;
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        session_id: "22222222-2222-4222-8222-222222222222",
+        name: "process_job",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        end_time: reads === 1 ? null : "2026-08-24T00:00:01Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await expect(
+      traced({ name: "process_job" }, async ({ requireAccepted }) => {
+        await requireAccepted();
+        throw new Error("Notion unavailable");
+      }),
+    ).rejects.toThrow("Notion unavailable");
+
+    expect(feedback).toMatchObject({
+      key: "operational_error",
+      value: "Notion unavailable",
+      extend_trace_retention: true,
+    });
+  });
 });
 
-function traceClient(fetchImplementation: (url: string) => Response): Client {
+function traceClient(fetchImplementation: (url: string, init?: RequestInit) => Response): Client {
   const testFetch = Object.assign(
-    async (url: string | URL | Request) => fetchImplementation(String(url)),
+    async (url: string | URL | Request, init?: RequestInit) =>
+      fetchImplementation(String(url), init),
     { preconnect: (_url: string | URL) => {} },
   );
   return new Client({
