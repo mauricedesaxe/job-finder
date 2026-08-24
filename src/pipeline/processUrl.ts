@@ -25,7 +25,7 @@ import type { ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
-import { recordTerminalResult } from "./recordTerminalResult";
+import { type PreparedTerminalResultInput, recordTerminalResult } from "./recordTerminalResult";
 import { parseJobDetails, scrapeJobPage } from "./scrape";
 import { structuralFilter } from "./structuralFilter";
 
@@ -73,8 +73,6 @@ interface ProcessJobResult {
   outcome: ProcessResult;
   prepareTraceCompletion: (traceId: string) => Promise<(() => Promise<void>) | undefined>;
 }
-
-type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
 
 export async function processUrl(
   url: string,
@@ -166,7 +164,7 @@ async function processJobBody(
           ledger,
           job,
           outcome: "rejected",
-          projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
+          projection: { notion, databaseId: config.notionDatabaseId },
         });
       }
     }
@@ -182,7 +180,7 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
+      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -212,7 +210,7 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId, status: "Auto-Rejected" },
+      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -262,7 +260,7 @@ async function processJobBody(
       ledger,
       job,
       outcome: "archived",
-      projection: { notion, databaseId: config.notionDatabaseId, status: "Archived" },
+      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -272,7 +270,7 @@ async function processJobBody(
       ledger,
       job,
       outcome: "companyApplied",
-      projection: { notion, databaseId: config.notionDatabaseId, status: "Company Applied" },
+      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -302,7 +300,7 @@ async function processJobBody(
             job,
             outcome,
             traceId,
-            projection: { notion, databaseId: config.notionDatabaseId, status: "To Review" },
+            projection: { notion, databaseId: config.notionDatabaseId },
           });
         };
       },
@@ -312,9 +310,7 @@ async function processJobBody(
 
 function terminalResult(
   state: ProcessResultState,
-  input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId" | "outcome"> & {
-    outcome: TerminalOutcome;
-  },
+  input: PreparedTerminalResultInput,
 ): { data: ProcessJobResult } {
   state.outcome = input.outcome;
   return {

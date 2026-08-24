@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { QueryDatabaseResponse } from "@notionhq/client/build/src/api-endpoints";
 import type { ResilientNotionClient } from "../../services/notion";
 import { createSqliteJobLedger } from "../../services/sqliteJobLedger";
-import type { JobListing } from "../../types";
-import { recordTerminalResult } from "../recordTerminalResult";
+import type { JobListing, JobStatus } from "../../types";
+import { recordTerminalResult, type TerminalProcessedJobOutcome } from "../recordTerminalResult";
 
 const job = {
   title: "Senior Engineer",
@@ -44,7 +44,7 @@ describe("recordTerminalResult", () => {
       job,
       outcome: "rejected",
       traceId: "trace-123",
-      projection: { notion, databaseId: "database", status: "Auto-Rejected" },
+      projection: { notion, databaseId: "database" },
     });
 
     expect(await ledger.listPendingNotionProjections()).toEqual([]);
@@ -72,36 +72,46 @@ describe("recordTerminalResult", () => {
       job,
       outcome: "inserted",
       traceId: "trace-123",
+      projection: { notion: notionClient(), databaseId: "database" },
     });
 
     expect((await ledger.findByRawUrl(job.url))?.traceId).toBe("trace-123");
   });
 
-  test("keeps a recoverable projection when Notion creation fails", async () => {
-    ledger = createSqliteJobLedger(":memory:");
-    const notion = notionClient({
-      create: async () => {
-        throw new Error("Notion unavailable");
-      },
-    });
+  test("maps every projected terminal outcome to its Notion status", async () => {
+    const mappings = [
+      ["inserted", "To Review"],
+      ["rejected", "Auto-Rejected"],
+      ["companyApplied", "Company Applied"],
+      ["archived", "Archived"],
+    ] as const satisfies readonly (readonly [
+      Exclude<TerminalProcessedJobOutcome, "duplicated">,
+      JobStatus,
+    ])[];
 
-    await expect(
-      recordTerminalResult({
-        ledger,
-        job,
-        outcome: "inserted",
-        traceId: "trace-123",
-        projection: { notion, databaseId: "database", status: "To Review" },
-      }),
-    ).rejects.toThrow("Notion unavailable");
+    for (const [outcome, status] of mappings) {
+      ledger = createSqliteJobLedger(":memory:");
+      const notion = notionClient({
+        create: async () => {
+          throw new Error("Notion unavailable");
+        },
+      });
 
-    expect(await ledger.listPendingNotionProjections()).toEqual([
-      expect.objectContaining({
-        sourceKey: `url:${job.url}`,
-        job,
-        status: "To Review",
-      }),
-    ]);
+      await expect(
+        recordTerminalResult({
+          ledger,
+          job,
+          outcome,
+          traceId: "trace-123",
+          projection: { notion, databaseId: "database" },
+        }),
+      ).rejects.toThrow("Notion unavailable");
+      expect(await ledger.listPendingNotionProjections()).toEqual([
+        expect.objectContaining({ sourceKey: `url:${job.url}`, job, status }),
+      ]);
+      await ledger.close();
+      ledger = undefined;
+    }
   });
 });
 
