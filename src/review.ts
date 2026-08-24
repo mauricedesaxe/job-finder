@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 import { EVALUATION_PROFILE_NAMES } from "./config/evaluation";
 import { AtsJobDataSchema } from "./services/ats";
+import type { JobLedger } from "./services/jobLedger";
 
 export const REVIEW_DECISION_CATEGORIES = [
   { value: 0, label: "pursue" },
@@ -81,3 +82,23 @@ export const CompletedReviewSchema = z
 
 export type ReviewSnapshot = z.infer<typeof ReviewSnapshotSchema>;
 export type CompletedReview = z.infer<typeof CompletedReviewSchema>;
+
+export async function replayCompletedReviewCompanyBlocks(input: {
+  reviews: AsyncIterable<CompletedReview>;
+  ledger: Pick<JobLedger, "excludeCompany">;
+}): Promise<{ reviews: number; companyExclusions: number }> {
+  let reviews = 0;
+  let companyExclusions = 0;
+  for await (const review of input.reviews) {
+    reviews++;
+    if (review.blockCompany) {
+      input.ledger.excludeCompany({
+        company: review.snapshot.job.company,
+        excludedAt: review.reviewedAt,
+        sourceKey: `langsmith-review:${review.runId}`,
+      });
+      companyExclusions++;
+    }
+  }
+  return { reviews, companyExclusions };
+}

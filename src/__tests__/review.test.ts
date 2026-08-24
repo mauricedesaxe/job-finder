@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
+import {
+  type CompletedReview,
+  type ReviewSnapshot,
+  ReviewSnapshotSchema,
+  replayCompletedReviewCompanyBlocks,
+} from "../review";
+import { createJobLedger } from "../services/jobLedger";
 
 const snapshot: ReviewSnapshot = {
   traceId: "trace-123",
@@ -45,3 +51,58 @@ test("rejects snapshots with conflicting target profiles", () => {
     }),
   ).toThrow("profiles must match");
 });
+
+test("applies company blocks idempotently before URL processing", async () => {
+  const ledger = createJobLedger(":memory:");
+  try {
+    const firstReplay = await replayCompletedReviewCompanyBlocks({
+      reviews: completedReviews(),
+      ledger,
+    });
+
+    expect(firstReplay).toEqual({ reviews: 2, companyExclusions: 1 });
+    expect(ledger.findCompanyExclusion("ACME")).toEqual({
+      company: "Acme",
+      excludedAt: "2026-08-24T10:30:00.000Z",
+    });
+    expect(ledger.findCompanyExclusion("Beta")).toBeNull();
+
+    const secondReplay = await replayCompletedReviewCompanyBlocks({
+      reviews: completedReviews(),
+      ledger,
+    });
+
+    expect(secondReplay).toEqual(firstReplay);
+    expect(ledger.findCompanyExclusion("Acme")).toEqual({
+      company: "Acme",
+      excludedAt: "2026-08-24T10:30:00.000Z",
+    });
+  } finally {
+    ledger.close();
+  }
+});
+
+async function* completedReviews(): AsyncIterable<CompletedReview> {
+  yield {
+    runId: "trace-acme",
+    reviewedAt: "2026-08-24T10:30:00.000Z",
+    snapshot: { ...snapshot, traceId: "trace-acme" },
+    decision: "reject",
+    targetProfile: "early-stage-product-engineer",
+    primaryReason: "company-quality",
+    blockCompany: true,
+  };
+  yield {
+    runId: "trace-beta",
+    reviewedAt: "2026-08-24T10:31:00.000Z",
+    snapshot: {
+      ...snapshot,
+      traceId: "trace-beta",
+      job: { ...snapshot.job, company: "Beta" },
+    },
+    decision: "reject",
+    targetProfile: "early-stage-product-engineer",
+    primaryReason: "role-scope",
+    blockCompany: false,
+  };
+}
