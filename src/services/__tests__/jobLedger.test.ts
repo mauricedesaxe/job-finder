@@ -1,23 +1,5 @@
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
 import { createJobLedger, type JobLedger } from "../jobLedger.ts";
-
-interface SchemaRow {
-  type: string;
-  name: string;
-  tableName: string;
-  sql: string | null;
-}
-
-const schemaQuery = `
-  SELECT type, name, tbl_name AS tableName, sql
-  FROM sqlite_schema
-  WHERE name NOT LIKE 'sqlite_%'
-  ORDER BY type, name
-`;
 
 describe("job ledger", () => {
   let ledger: JobLedger | undefined;
@@ -141,36 +123,4 @@ describe("job ledger", () => {
       excludedAt: "2026-08-22T10:00:00.000Z",
     });
   });
-
-  test("keeps the SQLite schema aligned with the D1 migration", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "job-ledger-schema-"));
-    const runtimePath = join(directory, "runtime.sqlite");
-    const migrationDatabase = new Database(":memory:");
-
-    ledger = createJobLedger(runtimePath);
-    await ledger.close();
-    ledger = undefined;
-
-    const reopenedRuntimeDatabase = new Database(runtimePath, { readonly: true });
-    try {
-      const migrationPath = resolve(import.meta.dir, "../../../migrations/0001_job_ledger.sql");
-      migrationDatabase.exec(await Bun.file(migrationPath).text());
-
-      expect(readSchema(migrationDatabase)).toEqual(readSchema(reopenedRuntimeDatabase));
-    } finally {
-      reopenedRuntimeDatabase.close();
-      migrationDatabase.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
 });
-
-function readSchema(database: Database): SchemaRow[] {
-  return database
-    .query<SchemaRow, []>(schemaQuery)
-    .all()
-    .map((row) => ({
-      ...row,
-      sql: row.sql?.replace(/\s+/g, " ").trim() ?? null,
-    }));
-}

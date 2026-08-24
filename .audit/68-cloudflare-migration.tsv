@@ -17,3 +17,6 @@ ts	phase	decision	why	evidence	result
 2026-08-24T13:07:12Z	unit-3	made identity normalization locale-independent	Bun and workerd must derive the same company and title keys regardless of host locale	src/services/jobLedger.ts	green
 2026-08-24T13:07:12Z	unit-2	added a schema drift check	the SQLite runtime schema and checked-in D1 migration must change together	src/services/__tests__/jobLedger.test.ts	green
 2026-08-24T13:07:12Z	unit-3	covered CLI run-mode selection	the new process boundary now proves default scrape and explicit reconcile modes	src/__tests__/jobFinder.test.ts	green
+2026-08-24T13:13:06Z	review	made the D1 migration the canonical ledger schema	one schema now initializes both local SQLite and future D1 databases	migrations/0001_job_ledger.sql; src/services/jobLedger.ts	green
+2026-08-24T13:13:06Z	review	removed the unused run summary	no current caller consumed it and a Container process cannot return it directly	src/jobFinder.ts	green
+2026-08-24T13:13:06Z	review	stored the sanitized Container access failure in the repository	the earlier sandbox-local Wrangler log was not available to reviewers	.audit/68-cloudflare-containers-403.txt	supersedes the evidence in the 2026-08-24T12:49:18Z audit row

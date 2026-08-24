@@ -3,8 +3,8 @@ import type { JobFinderConfig } from "./config";
 import { getEvaluationFilters } from "./config/evaluation";
 import { logger } from "./logger";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
-import { type PruneStats, prune } from "./pipeline/prune";
-import { type ReconcileStats, reconcile } from "./pipeline/reconcile";
+import { prune } from "./pipeline/prune";
+import { reconcile } from "./pipeline/reconcile";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { replayCompletedReviewCompanyBlocks } from "./review";
@@ -19,23 +19,6 @@ import { sendRunReport } from "./services/slack";
 
 export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" };
 
-export type JobFinderRunSummary =
-  | {
-      kind: "reconcile";
-      durationMs: number;
-      reconcile: ReconcileStats;
-    }
-  | {
-      kind: "scrape";
-      durationMs: number;
-      scrape: ScrapeStats;
-      preReconcile: ReconcileStats;
-      postReconcile: ReconcileStats;
-      prune: PruneStats;
-      urlCount: number;
-      searchErrors: number;
-    };
-
 const log = logger.child({ component: "main" });
 
 export async function runJobFinder({
@@ -46,7 +29,7 @@ export async function runJobFinder({
   mode: JobFinderRunMode;
   ledger: JobLedger;
   config: Readonly<JobFinderConfig>;
-}): Promise<JobFinderRunSummary> {
+}): Promise<void> {
   const startTime = Date.now();
   const notion = createNotionClient(config.notionToken);
   await runPreflight(notion, config.notionDatabaseId);
@@ -58,7 +41,7 @@ export async function runJobFinder({
       const stats = await reconcile(notion, config.notionDatabaseId);
       const durationMs = Date.now() - startTime;
       log.info({ stats, durationMs }, "reconciliation complete");
-      return { kind: "reconcile", durationMs, reconcile: stats };
+      return;
     }
     case "scrape":
       return scrapeJobs({ ledger, notion, config, startTime });
@@ -79,7 +62,7 @@ async function scrapeJobs({
   notion: ResilientNotionClient;
   config: Readonly<JobFinderConfig>;
   startTime: number;
-}): Promise<JobFinderRunSummary> {
+}): Promise<void> {
   await initLangSmith({
     apiKey: config.langsmithApiKey,
     endpoint: config.langsmithEndpoint,
@@ -208,15 +191,4 @@ async function scrapeJobs({
       durationMs,
     );
   }
-
-  return {
-    kind: "scrape",
-    durationMs,
-    scrape: stats,
-    preReconcile: preReconcileStats,
-    postReconcile: postReconcileStats,
-    prune: pruneStats,
-    urlCount: urlMap.size,
-    searchErrors,
-  };
 }
