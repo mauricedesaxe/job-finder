@@ -1,6 +1,13 @@
 import type { AnnotationQueueRubricItem, FeedbackConfig } from "langsmith/schemas";
 import { z } from "zod/v4";
-import { type CompletedReview, CompletedReviewSchema, ReviewSnapshotSchema } from "../review";
+import {
+  type CompletedReview,
+  CompletedReviewSchema,
+  REVIEW_DECISION_CATEGORIES,
+  REVIEW_REASON_CATEGORIES,
+  REVIEW_TARGET_PROFILE_CATEGORIES,
+  ReviewSnapshotSchema,
+} from "../review";
 
 export const JOB_REVIEW_QUEUE_NAME = "job-finder-job-review";
 
@@ -18,33 +25,15 @@ type CategoricalFeedbackKey = Exclude<FeedbackKey, "review_note">;
 const feedbackRegistry = {
   job_decision: {
     type: "categorical",
-    categories: [
-      { value: 0, label: "pursue" },
-      { value: 1, label: "reject" },
-      { value: 2, label: "unsure" },
-    ] satisfies Array<{ value: number; label: CompletedReview["decision"] }>,
+    categories: REVIEW_DECISION_CATEGORIES.map(({ value, label }) => ({ value, label })),
   },
   target_profile: {
     type: "categorical",
-    categories: [
-      { value: 0, label: "early-stage-product-engineer" },
-      { value: 1, label: "applied-ai-product-engineer" },
-      { value: 2, label: "neither" },
-    ] satisfies Array<{ value: number; label: CompletedReview["targetProfile"] }>,
+    categories: REVIEW_TARGET_PROFILE_CATEGORIES.map(({ value, label }) => ({ value, label })),
   },
   primary_reason: {
     type: "categorical",
-    categories: [
-      { value: 0, label: "crypto-company" },
-      { value: 1, label: "location" },
-      { value: 2, label: "compensation" },
-      { value: 3, label: "role-scope" },
-      { value: 4, label: "technology-fit" },
-      { value: 5, label: "company-quality" },
-      { value: 6, label: "work-environment" },
-      { value: 7, label: "insufficient-information" },
-      { value: 8, label: "other" },
-    ] satisfies Array<{ value: number; label: CompletedReview["primaryReason"] }>,
+    categories: REVIEW_REASON_CATEGORIES.map(({ value, label }) => ({ value, label })),
   },
   block_company: {
     type: "categorical",
