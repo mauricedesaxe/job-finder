@@ -4,7 +4,7 @@ import type {
   RecordProcessedJobInput,
 } from "./jobLedger";
 
-export interface ProcessedJobWriteRecord {
+interface ProcessedJobWriteRecord {
   sourceKey: string;
   rawUrl: string | null;
   company: string;
@@ -17,7 +17,7 @@ export interface ProcessedJobWriteRecord {
   traceId: string | null;
 }
 
-export interface CompanyExclusionWriteRecord {
+interface CompanyExclusionWriteRecord {
   normalizedCompany: string;
   company: string;
   excludedAt: string;
@@ -52,6 +52,40 @@ export function createCompanyExclusionWriteRecord(
     excludedAt: input.excludedAt ?? new Date().toISOString(),
     sourceKey: input.sourceKey ?? null,
   };
+}
+
+export function processedJobWriteValues(
+  record: ProcessedJobWriteRecord,
+): [
+  string,
+  string | null,
+  string,
+  string,
+  string,
+  string,
+  ProcessedJobOutcome,
+  string,
+  string,
+  string | null,
+] {
+  return [
+    record.sourceKey,
+    record.rawUrl,
+    record.company,
+    record.normalizedCompany,
+    record.title,
+    record.normalizedTitle,
+    record.outcome,
+    record.firstProcessedAt,
+    record.lastProcessedAt,
+    record.traceId,
+  ];
+}
+
+export function companyExclusionWriteValues(
+  record: CompanyExclusionWriteRecord,
+): [string, string, string, string | null] {
+  return [record.normalizedCompany, record.company, record.excludedAt, record.sourceKey];
 }
 
 export function normalizeJobLedgerText(value: string): string {

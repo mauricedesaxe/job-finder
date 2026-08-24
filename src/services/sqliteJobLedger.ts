@@ -1,18 +1,21 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type {
-  CompanyExclusion,
-  JobLedger,
-  NotionBackfillStats,
-  ProcessedJob,
-  ProcessedJobOutcome,
-} from "./jobLedger";
+import type { JobLedger, ProcessedJobOutcome } from "./jobLedger";
 import {
+  companyExclusionWriteValues,
   createCompanyExclusionWriteRecord,
   createProcessedJobWriteRecord,
   normalizeJobLedgerText,
+  processedJobWriteValues,
 } from "./jobLedgerRecord";
+import {
+  parseCompanyExclusionRow,
+  parseMigrationRow,
+  parseNotionBackfillStats,
+  parseProcessedJobRow,
+  parseTitleRows,
+} from "./jobLedgerRows";
 import {
   EXCLUDE_COMPANY_SQL,
   FIND_BY_RAW_URL_SQL,
@@ -29,22 +32,6 @@ const JOB_LEDGER_SCHEMA = readFileSync(
   "utf8",
 );
 
-interface ProcessedJobRow {
-  source_key: string;
-  raw_url: string | null;
-  company: string;
-  title: string;
-  outcome: ProcessedJobOutcome;
-  first_processed_at: string;
-  last_processed_at: string;
-  trace_id: string | null;
-}
-
-interface CompanyExclusionRow {
-  company: string;
-  excluded_at: string;
-}
-
 export function createSqliteJobLedger(databasePath: string): JobLedger {
   if (databasePath !== ":memory:") {
     mkdirSync(dirname(databasePath), { recursive: true });
@@ -54,12 +41,16 @@ export function createSqliteJobLedger(databasePath: string): JobLedger {
   database.run("PRAGMA foreign_keys = ON");
   database.exec(JOB_LEDGER_SCHEMA);
 
-  const notionBackfillStats = database.query<NotionBackfillStats, []>(NOTION_BACKFILL_STATS_SQL);
+  const notionBackfillStats = database.query<Record<string, unknown>, []>(
+    NOTION_BACKFILL_STATS_SQL,
+  );
   const markMigration = database.query<never, [string, string]>(MARK_MIGRATION_SQL);
-  const hasMigration = database.query<{ name: string }, [string]>(HAS_MIGRATION_SQL);
-  const findByRawUrl = database.query<ProcessedJobRow, [string]>(FIND_BY_RAW_URL_SQL);
-  const titlesForCompany = database.query<{ title: string }, [string]>(TITLES_FOR_COMPANY_SQL);
-  const findCompanyExclusion = database.query<CompanyExclusionRow, [string]>(
+  const hasMigration = database.query<Record<string, unknown>, [string]>(HAS_MIGRATION_SQL);
+  const findByRawUrl = database.query<Record<string, unknown>, [string]>(FIND_BY_RAW_URL_SQL);
+  const titlesForCompany = database.query<Record<string, unknown>, [string]>(
+    TITLES_FOR_COMPANY_SQL,
+  );
+  const findCompanyExclusion = database.query<Record<string, unknown>, [string]>(
     FIND_COMPANY_EXCLUSION_SQL,
   );
   const recordProcessedJob = database.query<
@@ -83,42 +74,24 @@ export function createSqliteJobLedger(databasePath: string): JobLedger {
 
   return {
     async findByRawUrl(rawUrl) {
-      const row = findByRawUrl.get(rawUrl);
-      return row ? toProcessedJob(row) : null;
+      return parseProcessedJobRow(findByRawUrl.get(rawUrl));
     },
     async titlesForCompany(company) {
-      return titlesForCompany.all(normalizeJobLedgerText(company)).map((row) => row.title);
+      return parseTitleRows(titlesForCompany.all(normalizeJobLedgerText(company)));
     },
     async findCompanyExclusion(company) {
-      const row = findCompanyExclusion.get(normalizeJobLedgerText(company));
-      return row ? toCompanyExclusion(row) : null;
+      return parseCompanyExclusionRow(findCompanyExclusion.get(normalizeJobLedgerText(company)));
     },
     async recordProcessedJob(input) {
       const record = createProcessedJobWriteRecord(input);
-      recordProcessedJob.run(
-        record.sourceKey,
-        record.rawUrl,
-        record.company,
-        record.normalizedCompany,
-        record.title,
-        record.normalizedTitle,
-        record.outcome,
-        record.firstProcessedAt,
-        record.lastProcessedAt,
-        record.traceId,
-      );
+      recordProcessedJob.run(...processedJobWriteValues(record));
     },
     async excludeCompany(input) {
       const record = createCompanyExclusionWriteRecord(input);
-      excludeCompany.run(
-        record.normalizedCompany,
-        record.company,
-        record.excludedAt,
-        record.sourceKey,
-      );
+      excludeCompany.run(...companyExclusionWriteValues(record));
     },
     async notionBackfillStats() {
-      const stats = notionBackfillStats.get();
+      const stats = parseNotionBackfillStats(notionBackfillStats.get());
       if (!stats) throw new Error("Could not read Notion backfill statistics");
       return stats;
     },
@@ -126,27 +99,10 @@ export function createSqliteJobLedger(databasePath: string): JobLedger {
       markMigration.run(name, completedAt);
     },
     async hasMigration(name) {
-      return hasMigration.get(name) !== null;
+      return parseMigrationRow(hasMigration.get(name));
     },
     async close() {
       database.close();
     },
   };
-}
-
-function toProcessedJob(row: ProcessedJobRow): ProcessedJob {
-  return {
-    sourceKey: row.source_key,
-    rawUrl: row.raw_url,
-    company: row.company,
-    title: row.title,
-    outcome: row.outcome,
-    firstProcessedAt: row.first_processed_at,
-    lastProcessedAt: row.last_processed_at,
-    traceId: row.trace_id,
-  };
-}
-
-function toCompanyExclusion(row: CompanyExclusionRow): CompanyExclusion {
-  return { company: row.company, excludedAt: row.excluded_at };
 }

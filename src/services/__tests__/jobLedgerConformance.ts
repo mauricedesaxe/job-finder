@@ -1,6 +1,6 @@
 import type { CompanyExclusion, JobLedger, NotionBackfillStats, ProcessedJob } from "../jobLedger";
 
-export interface JobLedgerConformanceResult {
+interface JobLedgerConformanceResult {
   exactJob: ProcessedJob | null;
   exactMiss: ProcessedJob | null;
   clearedRawUrl: boolean;
