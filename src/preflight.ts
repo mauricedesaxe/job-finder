@@ -26,23 +26,7 @@ export async function runPreflight(
 
   // Retrieve database schema (also validates token + database access)
   const db = await notion.databases.retrieve({ database_id: databaseId });
-
-  // Validate properties exist with correct types
-  const errors: string[] = [];
-
-  for (const [name, expectedType] of Object.entries(EXPECTED_PROPERTIES)) {
-    const prop = db.properties[name];
-    if (!prop) {
-      errors.push(`Missing property: "${name}" (expected type: ${expectedType})`);
-    } else if (prop.type !== expectedType) {
-      errors.push(`Wrong type for "${name}": got "${prop.type}", expected "${expectedType}"`);
-    }
-  }
-
-  if (errors.length > 0) {
-    log.fatal({ errors }, "preflight failed: database schema errors");
-    process.exit(1);
-  }
+  assertNotionSchema(db.properties);
 
   // Validate status options
   const statusProp = db.properties.Status;
@@ -67,4 +51,23 @@ export async function runPreflight(
   }
 
   log.info("preflight checks passed");
+}
+
+export function assertNotionSchema(
+  properties: Readonly<Record<string, { type: string } | undefined>>,
+): void {
+  const errors: string[] = [];
+
+  for (const [name, expectedType] of Object.entries(EXPECTED_PROPERTIES)) {
+    const prop = properties[name];
+    if (!prop) {
+      errors.push(`Missing property: "${name}" (expected type: ${expectedType})`);
+    } else if (prop.type !== expectedType) {
+      errors.push(`Wrong type for "${name}": got "${prop.type}", expected "${expectedType}"`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Preflight failed: ${errors.join("; ")}`);
+  }
 }

@@ -45,7 +45,7 @@ export async function backfillJobLedger({
   const snapshot = await scanNotionJobs(client, databaseId, completedAt);
 
   for (const job of snapshot.jobs) {
-    ledger.recordProcessedJob({
+    await ledger.recordProcessedJob({
       sourceKey: job.sourceKey,
       rawUrl: job.rawUrl ?? undefined,
       company: job.company,
@@ -56,12 +56,12 @@ export async function backfillJobLedger({
   }
 
   for (const exclusion of snapshot.exclusions) {
-    ledger.excludeCompany(exclusion);
+    await ledger.excludeCompany(exclusion);
   }
 
-  const actualStats = ledger.notionBackfillStats();
+  const actualStats = await ledger.notionBackfillStats();
   verifyBackfill(snapshot.stats, actualStats);
-  ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, completedAt);
+  await ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, completedAt);
 
   return { stats: actualStats, migrationName: NOTION_JOB_LEDGER_BACKFILL_MIGRATION };
 }

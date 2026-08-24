@@ -70,15 +70,15 @@ interface CompanyExclusionRow {
 }
 
 export interface JobLedger {
-  findByRawUrl(rawUrl: string): ProcessedJob | null;
-  titlesForCompany(company: string): string[];
-  findCompanyExclusion(company: string): CompanyExclusion | null;
-  recordProcessedJob(input: RecordProcessedJobInput): void;
-  excludeCompany(input: ExcludeCompanyInput): void;
-  notionBackfillStats(): NotionBackfillStats;
-  markMigration(name: string, completedAt: string): void;
-  hasMigration(name: string): boolean;
-  close(): void;
+  findByRawUrl(rawUrl: string): Promise<ProcessedJob | null>;
+  titlesForCompany(company: string): Promise<string[]>;
+  findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
+  recordProcessedJob(input: RecordProcessedJobInput): Promise<void>;
+  excludeCompany(input: ExcludeCompanyInput): Promise<void>;
+  notionBackfillStats(): Promise<NotionBackfillStats>;
+  markMigration(name: string, completedAt: string): Promise<void>;
+  hasMigration(name: string): Promise<boolean>;
+  close(): Promise<void>;
 }
 
 export function createJobLedger(databasePath: string): JobLedger {
@@ -210,18 +210,18 @@ export function createJobLedger(databasePath: string): JobLedger {
   `);
 
   return {
-    findByRawUrl(rawUrl) {
+    async findByRawUrl(rawUrl) {
       const row = findByRawUrl.get(rawUrl);
       return row ? toProcessedJob(row) : null;
     },
-    titlesForCompany(company) {
+    async titlesForCompany(company) {
       return titlesForCompany.all(normalizeText(company)).map((row) => row.title);
     },
-    findCompanyExclusion(company) {
+    async findCompanyExclusion(company) {
       const row = findCompanyExclusion.get(normalizeText(company));
       return row ? { company: row.company, excludedAt: row.excluded_at } : null;
     },
-    recordProcessedJob(input) {
+    async recordProcessedJob(input) {
       const processedAt = input.processedAt ?? new Date().toISOString();
       recordProcessedJob.run(
         input.sourceKey ?? sourceKeyFor(input.rawUrl),
@@ -236,7 +236,7 @@ export function createJobLedger(databasePath: string): JobLedger {
         input.traceId ?? null,
       );
     },
-    excludeCompany(input) {
+    async excludeCompany(input) {
       excludeCompany.run(
         normalizeText(input.company),
         input.company,
@@ -244,18 +244,18 @@ export function createJobLedger(databasePath: string): JobLedger {
         input.sourceKey ?? null,
       );
     },
-    notionBackfillStats() {
+    async notionBackfillStats() {
       const stats = notionBackfillStats.get();
       if (!stats) throw new Error("Could not read Notion backfill statistics");
       return stats;
     },
-    markMigration(name, completedAt) {
+    async markMigration(name, completedAt) {
       markMigration.run(name, completedAt);
     },
-    hasMigration(name) {
+    async hasMigration(name) {
       return hasMigration.get(name) !== null;
     },
-    close() {
+    async close() {
       database.close();
     },
   };
@@ -270,7 +270,7 @@ function sourceKeyFor(rawUrl: string | undefined): string {
 }
 
 function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function toProcessedJob(row: ProcessedJobRow): ProcessedJob {

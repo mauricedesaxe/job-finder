@@ -16,7 +16,7 @@ export async function recordTerminalResult({
   traceId: string;
   project?: () => Promise<unknown>;
 }): Promise<void> {
-  ledger.recordProcessedJob({
+  await ledger.recordProcessedJob({
     rawUrl: url,
     company: job.company,
     title: job.title,

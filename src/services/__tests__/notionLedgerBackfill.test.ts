@@ -47,8 +47,8 @@ function client(pages: ReturnType<typeof page>[]) {
 describe("backfillJobLedger", () => {
   let ledger: JobLedger | undefined;
 
-  afterEach(() => {
-    ledger?.close();
+  afterEach(async () => {
+    await ledger?.close();
     ledger = undefined;
   });
 
@@ -88,17 +88,17 @@ describe("backfillJobLedger", () => {
       exclusions: 2,
     });
     expect(second.stats).toEqual(first.stats);
-    expect(ledger.findByRawUrl("https://jobs.example/1")?.outcome).toBe("historical");
-    expect(ledger.titlesForCompany("Acme")).toEqual(["Engineer"]);
-    expect(ledger.findCompanyExclusion("Blocked only")).not.toBeNull();
-    expect(ledger.hasMigration("notion-job-ledger-backfill-v1")).toBe(true);
+    expect((await ledger.findByRawUrl("https://jobs.example/1"))?.outcome).toBe("historical");
+    expect(await ledger.titlesForCompany("Acme")).toEqual(["Engineer"]);
+    expect(await ledger.findCompanyExclusion("Blocked only")).not.toBeNull();
+    expect(await ledger.hasMigration("notion-job-ledger-backfill-v1")).toBe(true);
   });
 
   test("does not mark the migration when verification fails", async () => {
     ledger = createJobLedger(":memory:");
     const failingLedger: JobLedger = {
       ...ledger,
-      notionBackfillStats: () => ({
+      notionBackfillStats: async () => ({
         sourceRows: 0,
         urls: 0,
         companyTitlePairs: 0,
@@ -116,6 +116,6 @@ describe("backfillJobLedger", () => {
       }),
     ).rejects.toThrow("Notion ledger backfill verification failed");
 
-    expect(ledger.hasMigration("notion-job-ledger-backfill-v1")).toBe(false);
+    expect(await ledger.hasMigration("notion-job-ledger-backfill-v1")).toBe(false);
   });
 });

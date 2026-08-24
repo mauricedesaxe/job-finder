@@ -16,7 +16,7 @@ async function main(): Promise<void> {
     });
     log.info(result, "Notion job ledger backfill complete");
   } finally {
-    ledger.close();
+    await ledger.close();
   }
 }
 

@@ -86,7 +86,7 @@ export async function processUrl(
   if (seenUrls.has(url)) return "skipped";
   seenUrls.add(url);
 
-  if (ledger.findByRawUrl(url)) {
+  if (await ledger.findByRawUrl(url)) {
     log.debug({ url }, "skipped (exists in ledger)");
     return "skipped";
   }
@@ -235,7 +235,7 @@ async function processJobBody(
   job.description = enriched.description;
   job.location = enriched.location;
 
-  const existingTitles = ledger.titlesForCompany(job.company);
+  const existingTitles = await ledger.titlesForCompany(job.company);
   if (existingTitles.length > 0) {
     const dedup = await llmSemaphore.run(() =>
       withRetry(() => checkFuzzyDuplicate(job.title, existingTitles), {
@@ -260,7 +260,7 @@ async function processJobBody(
     }
   }
 
-  if (ledger.findCompanyExclusion(job.company)) {
+  if (await ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
     return terminalResult(state, {
       ledger,

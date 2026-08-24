@@ -92,7 +92,7 @@ export async function replayCompletedReviewCompanyBlocks(input: {
   for await (const review of input.reviews) {
     reviews++;
     if (review.blockCompany) {
-      input.ledger.excludeCompany({
+      await input.ledger.excludeCompany({
         company: review.snapshot.job.company,
         excludedAt: review.reviewedAt,
         sourceKey: `langsmith-review:${review.runId}`,
