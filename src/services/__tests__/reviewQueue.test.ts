@@ -25,7 +25,7 @@ const snapshot: ReviewSnapshot = {
   },
 };
 
-test("creates the review queue and records a snapshot before it enqueues the trace", async () => {
+test("creates the review queue and enqueues the trace with extended retention", async () => {
   const calls: string[] = [];
   const queue = createReviewQueue({
     createFeedbackConfig: async ({ feedbackKey }) => {
@@ -44,17 +44,21 @@ test("creates the review queue and records a snapshot before it enqueues the tra
         "block_company",
         "review_note",
       ]);
+      expect(rubricItems.find((item) => item.feedback_key === "block_company")?.is_required).toBe(
+        false,
+      );
       return { id: "queue-123" };
     },
-    updateRun: async (traceId, run) => {
-      calls.push(`snapshot:${traceId}`);
-      expect(run.extra.metadata.review_snapshot).toEqual(snapshot);
-    },
+    updateAnnotationQueue: async () => {},
     annotationQueues: {
       items: {
-        create: async (queueId, input) => {
+        create: async (queueId, input, options) => {
           calls.push(`enqueue:${queueId}:${input.items.map((item) => item.run_id).join(",")}`);
           expect(input.extend_trace_retention).toBe(true);
+          expect(options?.maxRetries).toBe(0);
+        },
+        async *list() {
+          yield* [];
         },
       },
     },
@@ -63,14 +67,13 @@ test("creates the review queue and records a snapshot before it enqueues the tra
   await queue.enqueue(snapshot);
 
   expect(calls).toContain("queue:job-finder-job-review");
-  expect(calls.indexOf("snapshot:trace-123")).toBeLessThan(
-    calls.indexOf("enqueue:queue-123:trace-123"),
-  );
+  expect(calls).toContain("enqueue:queue-123:trace-123");
 });
 
 test("reuses an existing queue and its initialized queue id", async () => {
   let queueSearches = 0;
   let queueCreates = 0;
+  let queueUpdates = 0;
   const enqueued: string[][] = [];
   const queue = createReviewQueue({
     createFeedbackConfig: async () => {},
@@ -82,11 +85,17 @@ test("reuses an existing queue and its initialized queue id", async () => {
       queueCreates++;
       return { id: "new-queue" };
     },
-    updateRun: async () => {},
+    updateAnnotationQueue: async (queueId) => {
+      expect(queueId).toBe("existing-queue");
+      queueUpdates++;
+    },
     annotationQueues: {
       items: {
         create: async (_queueId, input) => {
           enqueued.push(input.items.map((item) => item.run_id));
+        },
+        async *list() {
+          yield* [];
         },
       },
     },
@@ -97,6 +106,7 @@ test("reuses an existing queue and its initialized queue id", async () => {
 
   expect(queueSearches).toBe(1);
   expect(queueCreates).toBe(0);
+  expect(queueUpdates).toBe(1);
   expect(enqueued).toEqual([["trace-123"], ["trace-456"]]);
 });
 
@@ -109,8 +119,15 @@ test("shares queue initialization across concurrent qualified traces", async () 
       yield { id: "existing-queue" };
     },
     createAnnotationQueue: async () => ({ id: "new-queue" }),
-    updateRun: async () => {},
-    annotationQueues: { items: { create: async () => {} } },
+    updateAnnotationQueue: async () => {},
+    annotationQueues: {
+      items: {
+        create: async () => {},
+        async *list() {
+          yield* [];
+        },
+      },
+    },
   });
 
   await Promise.all([
@@ -131,8 +148,15 @@ test("retries queue initialization after a transient failure", async () => {
       yield { id: "existing-queue" };
     },
     createAnnotationQueue: async () => ({ id: "new-queue" }),
-    updateRun: async () => {},
-    annotationQueues: { items: { create: async () => {} } },
+    updateAnnotationQueue: async () => {},
+    annotationQueues: {
+      items: {
+        create: async () => {},
+        async *list() {
+          yield* [];
+        },
+      },
+    },
   });
 
   await expect(queue.enqueue(snapshot)).rejects.toThrow("LangSmith unavailable");
@@ -141,26 +165,51 @@ test("retries queue initialization after a transient failure", async () => {
   expect(attempts).toBe(2);
 });
 
-test("does not enqueue a trace when its snapshot cannot be recorded", async () => {
-  let enqueued = false;
+test("propagates an ambiguous queue failure when the run is absent", async () => {
+  let attempted = false;
   const queue = createReviewQueue({
     createFeedbackConfig: async () => {},
     async *listAnnotationQueues() {
       yield { id: "existing-queue" };
     },
     createAnnotationQueue: async () => ({ id: "new-queue" }),
-    updateRun: async () => {
-      throw new Error("LangSmith unavailable");
-    },
+    updateAnnotationQueue: async () => {},
     annotationQueues: {
       items: {
         create: async () => {
-          enqueued = true;
+          attempted = true;
+          throw new Error("LangSmith unavailable");
+        },
+        async *list() {
+          yield* [];
         },
       },
     },
   });
 
   await expect(queue.enqueue(snapshot)).rejects.toThrow("LangSmith unavailable");
-  expect(enqueued).toBe(false);
+  expect(attempted).toBe(true);
+});
+
+test("accepts an ambiguous queue response when the run is present", async () => {
+  const queue = createReviewQueue({
+    createFeedbackConfig: async () => {},
+    async *listAnnotationQueues() {
+      yield { id: "existing-queue" };
+    },
+    createAnnotationQueue: async () => ({ id: "new-queue" }),
+    updateAnnotationQueue: async () => {},
+    annotationQueues: {
+      items: {
+        create: async () => {
+          throw new Error("response lost");
+        },
+        async *list(_queueId, { status }) {
+          if (status === "needs_my_review") yield { run_id: snapshot.traceId };
+        },
+      },
+    },
+  });
+
+  await expect(queue.enqueue(snapshot)).resolves.toBeUndefined();
 });

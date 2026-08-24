@@ -16,16 +16,28 @@ interface ReviewQueueClient {
     rubricInstructions: string;
     rubricItems: AnnotationQueueRubricItem[];
   }): Promise<{ id: string }>;
-  updateRun(
-    runId: string,
-    run: { extra: { metadata: { review_snapshot: ReviewSnapshot } } },
+  updateAnnotationQueue(
+    queueId: string,
+    input: {
+      description: string;
+      rubricInstructions: string;
+      rubricItems: AnnotationQueueRubricItem[];
+    },
   ): Promise<void>;
   annotationQueues: {
     items: {
       create(
         queueId: string,
         input: { extend_trace_retention: boolean; items: { item_type: "RUN"; run_id: string }[] },
+        options?: { maxRetries: number },
       ): Promise<unknown>;
+      list(
+        queueId: string,
+        input: {
+          status: "needs_my_review" | "needs_others_review" | "archived";
+          item_type: "RUN";
+        },
+      ): AsyncIterable<{ run_id?: string }>;
     };
   };
 }
@@ -71,7 +83,7 @@ const rubricItems: AnnotationQueueRubricItem[] = [
   { feedback_key: "job_decision", is_required: true },
   { feedback_key: "target_profile", is_required: true },
   { feedback_key: "primary_reason", is_required: true },
-  { feedback_key: "block_company", is_required: true },
+  { feedback_key: "block_company", is_required: false },
   { feedback_key: "review_note", is_required: false },
 ];
 
@@ -83,13 +95,18 @@ export function createReviewQueue(client: ReviewQueueClient): {
   return {
     async enqueue(snapshot) {
       const id = await getQueueId();
-      await client.updateRun(snapshot.traceId, {
-        extra: { metadata: { review_snapshot: snapshot } },
-      });
-      await client.annotationQueues.items.create(id, {
-        extend_trace_retention: true,
-        items: [{ item_type: "RUN", run_id: snapshot.traceId }],
-      });
+      try {
+        await client.annotationQueues.items.create(
+          id,
+          {
+            extend_trace_retention: true,
+            items: [{ item_type: "RUN", run_id: snapshot.traceId }],
+          },
+          { maxRetries: 0 },
+        );
+      } catch (error) {
+        if (!(await queueContainsRun(client, id, snapshot.traceId))) throw error;
+      }
     },
   };
 
@@ -107,6 +124,11 @@ export function createReviewQueue(client: ReviewQueueClient): {
 async function findOrCreateQueue(client: ReviewQueueClient): Promise<string> {
   await Promise.all(feedbackConfigs.map((config) => client.createFeedbackConfig(config)));
   for await (const queue of client.listAnnotationQueues({ name: JOB_REVIEW_QUEUE_NAME })) {
+    await client.updateAnnotationQueue(queue.id, {
+      description: "Qualified jobs awaiting manual review.",
+      rubricInstructions: "Review the normalized job snapshot and record every required decision.",
+      rubricItems,
+    });
     return queue.id;
   }
   const queue = await client.createAnnotationQueue({
@@ -116,4 +138,20 @@ async function findOrCreateQueue(client: ReviewQueueClient): Promise<string> {
     rubricItems,
   });
   return queue.id;
+}
+
+async function queueContainsRun(
+  client: ReviewQueueClient,
+  queueId: string,
+  runId: string,
+): Promise<boolean> {
+  for (const status of ["needs_my_review", "needs_others_review", "archived"] as const) {
+    for await (const item of client.annotationQueues.items.list(queueId, {
+      status,
+      item_type: "RUN",
+    })) {
+      if (item.run_id === runId) return true;
+    }
+  }
+  return false;
 }
