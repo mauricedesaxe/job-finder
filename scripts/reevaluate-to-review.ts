@@ -14,7 +14,7 @@
  */
 
 import { atsApiRateLimiter, atsApiSemaphore, Semaphore } from "../src/concurrency";
-import { config } from "../src/config";
+import { loadJobFinderConfig } from "../src/config";
 import { evaluateJob, type JobEvaluation } from "../src/pipeline/evaluate";
 import { parseJobDetails, scrapeJobPage } from "../src/pipeline/scrape";
 import { structuralFilter } from "../src/pipeline/structuralFilter";
@@ -31,6 +31,8 @@ import {
 } from "../src/services/langsmith";
 import { createNotionClient, updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
+
+const config = loadJobFinderConfig();
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const limitArg = process.argv.find((a) => a.startsWith("--limit"));

@@ -5,7 +5,11 @@ import { z } from "zod/v4";
 import { JOB_STATUSES } from "../../types";
 import { createD1JobLedger } from "../d1JobLedger";
 import { PROCESSED_JOB_OUTCOMES } from "../jobLedger";
-import { JOB_LEDGER_CONFORMANCE_RESULT } from "./jobLedgerConformance";
+import { createHttpJobLedger } from "../jobLedgerRpc";
+import {
+  JOB_LEDGER_CONFORMANCE_RESULT,
+  runJobLedgerConformanceScenario,
+} from "./jobLedgerConformance";
 
 const projectRoot = resolve(import.meta.dir, "../../..");
 const configPath = resolve(import.meta.dir, "fixtures/d1-job-ledger.wrangler.jsonc");
@@ -75,6 +79,8 @@ const AtomicResponseSchema = z.object({ rejected: z.boolean(), rolledBack: z.boo
 
 let harness: TestHarness;
 let worker: WorkerHandle;
+let rpcHarness: TestHarness;
+let rpcWorker: WorkerHandle;
 
 beforeAll(async () => {
   harness = createTestHarness({
@@ -85,10 +91,17 @@ beforeAll(async () => {
   worker = harness.getWorker();
   await worker.applyD1Migrations("JOB_LEDGER");
   await worker.applyD1Migrations("JOB_LEDGER");
+  rpcHarness = createTestHarness({
+    root: projectRoot,
+    workers: [{ configPath }],
+  });
+  await rpcHarness.listen();
+  rpcWorker = rpcHarness.getWorker();
+  await rpcWorker.applyD1Migrations("JOB_LEDGER");
 });
 
 afterAll(async () => {
-  await harness.close();
+  await Promise.all([harness.close(), rpcHarness.close()]);
 });
 
 test("runs the job ledger adapter in workerd", async () => {
@@ -103,6 +116,28 @@ test("runs the job ledger adapter in workerd", async () => {
     completed_at: "2026-08-22T13:00:00.000Z",
   });
 }, 15_000);
+
+test("preserves the job ledger contract through the domain RPC", async () => {
+  const ledger = createHttpJobLedger((url, init) => rpcWorker.fetch(url, init));
+  expect(await runJobLedgerConformanceScenario(ledger)).toEqual(JOB_LEDGER_CONFORMANCE_RESULT);
+}, 15_000);
+
+test("rejects malformed job ledger RPC operations", async () => {
+  const response = await rpcWorker.fetch("/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ kind: "recordProcessedJob", input: { company: "Incomplete" } }),
+  });
+  expect(response.status).toBe(400);
+}, 15_000);
+
+test("rejects malformed job ledger RPC responses", async () => {
+  const ledger = createHttpJobLedger(async () =>
+    Response.json({ kind: "findByRawUrl", result: { outcome: "unknown" } }),
+  );
+
+  await expect(ledger.findByRawUrl("https://jobs.example.com/malformed")).rejects.toThrow();
+});
 
 test("records a processed job and projection atomically in D1", async () => {
   const response = await worker.fetch("/atomic-projection");

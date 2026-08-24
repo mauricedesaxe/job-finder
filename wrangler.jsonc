@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "job-finder",
+  "main": "src/cloudflare.ts",
+  "compatibility_date": "2026-08-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "name": "job-finder",
+      "class_name": "JobFinderContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "instance_type": "lite"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "JOB_FINDER",
+        "class_name": "JobFinderContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["JobFinderContainer"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "JOB_LEDGER",
+      "database_name": "job-finder-ledger",
+      "database_id": "196a7110-b06f-4cdc-ad99-3ef30cfcdb2e",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "job-finder",
+      "binding": "JOB_FINDER_WORKFLOW",
+      "class_name": "JobFinderWorkflow",
+      "schedules": ["0 8 */2 * *"]
+    }
+  ],
+  "vars": {
+    "ENABLE_ATS_ENRICHMENT": "true"
+  }
+}

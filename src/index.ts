@@ -1,4 +1,4 @@
-import { config } from "./config";
+import { loadCliConfig } from "./config";
 import { jobFinderRunMode, runJobFinder } from "./jobFinder";
 import { logger } from "./logger";
 import { flushPending } from "./services/langsmith";
@@ -9,6 +9,7 @@ const log = logger.child({ component: "main" });
 const mode = jobFinderRunMode(process.argv);
 
 async function main(): Promise<void> {
+  const config = loadCliConfig();
   const ledger = createSqliteJobLedger(config.jobLedgerPath);
   try {
     await runJobFinder({ mode, ledger, config });
@@ -18,6 +19,7 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
+  const config = loadCliConfig();
   log.fatal({ err }, "fatal error");
   await flushPending();
   if (config.slackWebhookUrl) {

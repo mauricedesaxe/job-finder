@@ -38,7 +38,7 @@ interface D1PreparedStatement {
   run(): Promise<unknown>;
 }
 
-interface D1DatabaseBinding {
+export interface D1DatabaseBinding {
   prepare(query: string): D1PreparedStatement;
   batch(statements: D1PreparedStatement[]): Promise<unknown>;
 }

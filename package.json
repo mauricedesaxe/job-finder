@@ -44,6 +44,7 @@
     "wrangler": "4.125.0"
   },
   "dependencies": {
+    "@cloudflare/containers": "0.3.7",
     "@langchain/core": "1.2.3",
     "@langchain/openai": "1.5.5",
     "@notionhq/client": "2.3.0",

@@ -7,4 +7,7 @@ RUN bun install --frozen-lockfile --production --ignore-scripts
 
 COPY . .
 
-CMD ["bun", "run", "src/index.ts"]
+ENV NODE_ENV=production
+ENV LOG_LEVEL=info
+
+CMD ["bun", "run", "src/container.ts"]

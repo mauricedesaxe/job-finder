@@ -1,5 +1,6 @@
 import { ZodError } from "zod/v4";
 import { createD1JobLedger } from "../../d1JobLedger";
+import { handleJobLedgerRpc } from "../../jobLedgerRpc";
 import { runJobLedgerConformanceScenario } from "../jobLedgerConformance";
 
 interface TestD1Statement {
@@ -20,6 +21,8 @@ export default {
   async fetch(request: Request, environment: TestEnvironment): Promise<Response> {
     const path = new URL(request.url).pathname;
     const ledger = createD1JobLedger(environment.JOB_LEDGER);
+
+    if (path === "/rpc") return handleJobLedgerRpc(request, ledger);
 
     if (path === "/scenario") {
       const result = await runJobLedgerConformanceScenario(ledger);

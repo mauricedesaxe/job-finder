@@ -1,10 +1,12 @@
-import { config } from "../src/config";
+import { loadJobFinderConfig } from "../src/config";
 import {
   createPromptTagClient,
   moveProductionAtomically,
   resolvePromptCommit,
 } from "../src/services/promptAdmin";
 import { PROMPT_NAMES } from "../src/services/promptRegistry";
+
+const config = loadJobFinderConfig();
 
 const release = process.argv[2];
 if (!release || !/^release-\d{4}-\d{2}-\d{2}-\d+$/.test(release)) throw new Error("Usage: bun scripts/rollback-prompts.ts release-YYYY-MM-DD-N");

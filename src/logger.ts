@@ -1,11 +1,20 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import pino from "pino";
+import { loadLoggingConfig } from "./config/schema";
 
-const isProduction =
-  process.env.RAILWAY_ENVIRONMENT !== undefined || process.env.NODE_ENV === "production";
+interface LogContext {
+  runId: string;
+}
+
+const logContext = new AsyncLocalStorage<LogContext>();
+const loggingConfig = loadLoggingConfig();
 
 export const logger = pino({
-  level: process.env.LOG_LEVEL ?? "info",
-  ...(isProduction
+  level: loggingConfig.level,
+  mixin() {
+    return logContext.getStore() ?? {};
+  },
+  ...(loggingConfig.isProduction
     ? {}
     : {
         transport: {
@@ -18,3 +27,7 @@ export const logger = pino({
         },
       }),
 });
+
+export function withRunLogContext<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+  return logContext.run({ runId }, operation);
+}
