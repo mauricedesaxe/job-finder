@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { AIMessage } from "@langchain/core/messages";
 import { RunnableLambda } from "@langchain/core/runnables";
+import { Client } from "langsmith";
 import {
   getPromptCommitHash,
   getPromptReleaseTag,
   initLangSmith,
   shutdownLangSmith,
+  traced,
 } from "../langsmith";
 import { PROMPT_NAMES } from "../promptRegistry";
 
@@ -109,3 +111,98 @@ describe("LangSmith prompt resolution", () => {
     expect(getPromptReleaseTag()).toBe("release-2026-08-23-1");
   });
 });
+
+describe("LangSmith trace acceptance", () => {
+  afterEach(shutdownLangSmith);
+
+  test("rejects an unaccepted trace when batch export fails", async () => {
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    const client = traceClient((url) =>
+      url.endsWith("/info")
+        ? Response.json({ batch_ingest_config: { use_multipart_endpoint: false } })
+        : url.endsWith("/runs/batch")
+          ? new Response("unavailable", { status: 503 })
+          : new Response("missing", { status: 404 }),
+    );
+    await initTestLangSmith(client);
+
+    try {
+      let recorded = false;
+      await expect(
+        traced({ name: "process_job" }, async ({ requireAccepted }) => {
+          await requireAccepted();
+          recorded = true;
+          return { data: "inserted" };
+        }),
+      ).rejects.toThrow();
+
+      expect(recorded).toBe(false);
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  test("persists work inside the parent after trace acceptance", async () => {
+    const events: string[] = [];
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        events.push("batch");
+        return new Response(null, { status: 202 });
+      }
+      events.push("read");
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        name: "process_job",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "process_job" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      events.push("persist");
+      return { data: "inserted" };
+    });
+
+    expect(events.slice(0, 3)).toEqual(["batch", "read", "persist"]);
+  });
+});
+
+function traceClient(fetchImplementation: (url: string) => Response): Client {
+  const testFetch = Object.assign(
+    async (url: string | URL | Request) => fetchImplementation(String(url)),
+    { preconnect: (_url: string | URL) => {} },
+  );
+  return new Client({
+    apiUrl: "https://example.test",
+    apiKey: "key",
+    callerOptions: { maxRetries: 0 },
+    fetchImplementation: testFetch,
+  });
+}
+
+async function initTestLangSmith(client: Client): Promise<void> {
+  await initLangSmith(
+    {
+      apiKey: "key",
+      endpoint: "https://example.test",
+      project: "test",
+      openrouterApiKey: "router",
+    },
+    {
+      client,
+      resolvePrompt: async ({ name }) => ({
+        releaseTags: [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
+      }),
+      pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
+    },
+  );
+}

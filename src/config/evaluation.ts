@@ -10,13 +10,18 @@ export type EvaluationProfile = EvaluationCriteria;
 export type EvaluationFilter = EvaluationCriteria;
 export type LocalEvaluationCriteria = EvaluationCriteria;
 
+export const EVALUATION_PROFILE_NAMES = [
+  "early-stage-product-engineer",
+  "applied-ai-product-engineer",
+] as const;
+
 export const EVALUATION_PROFILES: EvaluationProfile[] = [
   {
-    name: "early-stage-product-engineer",
+    name: EVALUATION_PROFILE_NAMES[0],
     promptName: "job-finder-profile-early-stage-product-engineer",
   },
   {
-    name: "applied-ai-product-engineer",
+    name: EVALUATION_PROFILE_NAMES[1],
     promptName: "job-finder-profile-applied-ai-product-engineer",
   },
 ];

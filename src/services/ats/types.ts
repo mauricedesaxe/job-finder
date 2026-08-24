@@ -1,21 +1,24 @@
 import { z } from "zod";
 
-export type AtsSource = "lever" | "ashby" | "greenhouse" | "workable";
+export const AtsSourceSchema = z.enum(["lever", "ashby", "greenhouse", "workable"]);
+export type AtsSource = z.infer<typeof AtsSourceSchema>;
 
-export type WorkplaceType = "Remote" | "Hybrid" | "OnSite";
+export const WorkplaceTypeSchema = z.enum(["Remote", "Hybrid", "OnSite"]);
+export type WorkplaceType = z.infer<typeof WorkplaceTypeSchema>;
 
 // Injected so unit tests can supply recorded responses without hitting the network.
 // Mirrors the `fetch` signature so POST-bodied calls (Workable) work alongside
 // the simple GETs the other fetchers use.
 export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
-export interface AtsJobData {
-  source: AtsSource;
-  location: string;
-  locations: string[];
-  workplaceType: WorkplaceType | null;
-  country: string | null;
-}
+export const AtsJobDataSchema = z.object({
+  source: AtsSourceSchema,
+  location: z.string(),
+  locations: z.array(z.string()),
+  workplaceType: WorkplaceTypeSchema.nullable(),
+  country: z.string().nullable(),
+});
+export type AtsJobData = z.infer<typeof AtsJobDataSchema>;
 
 // All three ATS surfaces emit `null` for unset fields on at least some payloads
 // (observed live on Ashby), so optional fields use .nullish() to accept both

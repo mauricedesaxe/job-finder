@@ -6,6 +6,7 @@ import type { AtsJobData, AtsSource, Fetcher } from "./types";
 import { fetchWorkableJob } from "./workable";
 
 export type { AtsJobData, AtsSource } from "./types";
+export { AtsJobDataSchema } from "./types";
 export { clearAshbyCache };
 
 const log = logger.child({ component: "ats" });

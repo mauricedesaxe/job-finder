@@ -19,6 +19,7 @@ describe("recordTerminalResult", () => {
       url,
       job: { company: "Acme", title: "Senior Engineer" },
       outcome: "rejected",
+      traceId: "trace-123",
       project: async () => {
         expect(ledger?.findByRawUrl(url)).toMatchObject({
           company: "Acme",
@@ -38,8 +39,24 @@ describe("recordTerminalResult", () => {
       url,
       job: { company: "Acme", title: "Staff Engineer" },
       outcome: "duplicated",
+      traceId: "trace-123",
     });
 
     expect(ledger.findByRawUrl(url)?.outcome).toBe("duplicated");
+  });
+
+  test("records the parent trace with the terminal result", async () => {
+    ledger = createJobLedger(":memory:");
+    const url = "https://jobs.example.com/role/3";
+
+    await recordTerminalResult({
+      ledger,
+      url,
+      job: { company: "Acme", title: "Product Engineer" },
+      outcome: "inserted",
+      traceId: "trace-123",
+    });
+
+    expect(ledger.findByRawUrl(url)?.traceId).toBe("trace-123");
   });
 });

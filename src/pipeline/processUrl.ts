@@ -61,6 +61,13 @@ interface ProcessResultState {
   profile: string;
 }
 
+interface ProcessJobResult {
+  outcome: ProcessResult;
+  record: (traceId: string) => Promise<void>;
+}
+
+type TerminalOutcome = Exclude<ProcessResult, "skipped" | "errored">;
+
 export async function processUrl(
   url: string,
   keyword: string,
@@ -84,7 +91,7 @@ export async function processUrl(
     profile: "",
   };
 
-  return await traced(
+  return traced(
     {
       name: "process_job",
       runType: "chain",
@@ -97,7 +104,12 @@ export async function processUrl(
         retry_count: state.retries,
       }),
     },
-    async () => processJobBody(url, keyword, ctx, state),
+    async ({ requireAccepted }) => {
+      const { data: result } = await processJobBody(url, keyword, ctx, state);
+      const traceId = await requireAccepted();
+      await result.record(traceId);
+      return { data: result.outcome };
+    },
   );
 }
 
@@ -106,7 +118,7 @@ async function processJobBody(
   keyword: string,
   ctx: ProcessContext,
   state: ProcessResultState,
-): Promise<{ data: ProcessResult }> {
+): Promise<{ data: ProcessJobResult }> {
   const { config, ledger, notion, recentAppCompanies } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
@@ -138,15 +150,13 @@ async function processJobBody(
           { url, title: job.title, company: job.company, reason: atsCheck.reason },
           "rejected (ats)",
         );
-        await recordTerminalResult({
+        return terminalResult(state, {
           ledger,
           url,
           job,
           outcome: "rejected",
           project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
         });
-        state.outcome = "rejected";
-        return { data: "rejected" };
       }
     }
   }
@@ -157,15 +167,13 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: structural.reason },
       "rejected (structural)",
     );
-    await recordTerminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
       outcome: "rejected",
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
-    state.outcome = "rejected";
-    return { data: "rejected" };
   }
 
   const evaluation = await llmSemaphore.run(() =>
@@ -190,15 +198,13 @@ async function processJobBody(
       { url, title: job.title, company: job.company, reason: evaluation.reason },
       "rejected",
     );
-    await recordTerminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
       outcome: "rejected",
       project: () => insertJob(notion, config.notionDatabaseId, job, "Auto-Rejected"),
     });
-    state.outcome = "rejected";
-    return { data: "rejected" };
   }
 
   const enriched = await llmSemaphore.run(() =>
@@ -233,47 +239,57 @@ async function processJobBody(
         { url, title: job.title, company: job.company, matchedTitle: dedup.matchedTitle },
         "duplicate",
       );
-      await recordTerminalResult({ ledger, url, job, outcome: "duplicated" });
-      state.outcome = "duplicated";
-      return { data: "duplicated" };
+      return terminalResult(state, {
+        ledger,
+        url,
+        job,
+        outcome: "duplicated",
+      });
     }
   }
 
   if (ledger.findCompanyExclusion(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "archived (company blocked)");
-    await recordTerminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
       outcome: "archived",
       project: () => insertJob(notion, config.notionDatabaseId, job, "Archived"),
     });
-    state.outcome = "archived";
-    return { data: "archived" };
   }
 
   if (recentAppCompanies.has(job.company)) {
     log.info({ url, title: job.title, company: job.company }, "company applied");
-    await recordTerminalResult({
+    return terminalResult(state, {
       ledger,
       url,
       job,
       outcome: "companyApplied",
       project: () => insertJob(notion, config.notionDatabaseId, job, "Company Applied"),
     });
-    state.outcome = "companyApplied";
-    return { data: "companyApplied" };
   }
 
-  await recordTerminalResult({
+  return terminalResult(state, {
     ledger,
     url,
     job,
     outcome: "inserted",
     project: () => insertJob(notion, config.notionDatabaseId, job),
   });
-  log.info({ url, title: job.title, company: job.company }, "inserted");
+}
 
-  state.outcome = "inserted";
-  return { data: "inserted" };
+function terminalResult(
+  state: ProcessResultState,
+  input: Omit<Parameters<typeof recordTerminalResult>[0], "traceId" | "outcome"> & {
+    outcome: TerminalOutcome;
+  },
+): { data: ProcessJobResult } {
+  state.outcome = input.outcome;
+  return {
+    data: {
+      outcome: input.outcome,
+      record: (traceId) => recordTerminalResult({ ...input, traceId }),
+    },
+  };
 }
