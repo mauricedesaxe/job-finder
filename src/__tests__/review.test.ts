@@ -61,11 +61,11 @@ test("applies company blocks idempotently before URL processing", async () => {
     });
 
     expect(firstReplay).toEqual({ reviews: 2, companyExclusions: 1 });
-    expect(ledger.findCompanyExclusion("ACME")).toEqual({
+    expect(await ledger.findCompanyExclusion("ACME")).toEqual({
       company: "Acme",
       excludedAt: "2026-08-24T10:30:00.000Z",
     });
-    expect(ledger.findCompanyExclusion("Beta")).toBeNull();
+    expect(await ledger.findCompanyExclusion("Beta")).toBeNull();
 
     const secondReplay = await replayCompletedReviewCompanyBlocks({
       reviews: completedReviews(),
@@ -73,12 +73,12 @@ test("applies company blocks idempotently before URL processing", async () => {
     });
 
     expect(secondReplay).toEqual(firstReplay);
-    expect(ledger.findCompanyExclusion("Acme")).toEqual({
+    expect(await ledger.findCompanyExclusion("Acme")).toEqual({
       company: "Acme",
       excludedAt: "2026-08-24T10:30:00.000Z",
     });
   } finally {
-    ledger.close();
+    await ledger.close();
   }
 });
 

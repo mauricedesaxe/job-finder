@@ -5,8 +5,8 @@ import { recordTerminalResult } from "../recordTerminalResult";
 describe("recordTerminalResult", () => {
   let ledger: JobLedger | undefined;
 
-  afterEach(() => {
-    ledger?.close();
+  afterEach(async () => {
+    await ledger?.close();
     ledger = undefined;
   });
 
@@ -21,7 +21,7 @@ describe("recordTerminalResult", () => {
       outcome: "rejected",
       traceId: "trace-123",
       project: async () => {
-        expect(ledger?.findByRawUrl(url)).toMatchObject({
+        expect(await ledger?.findByRawUrl(url)).toMatchObject({
           company: "Acme",
           title: "Senior Engineer",
           outcome: "rejected",
@@ -42,7 +42,7 @@ describe("recordTerminalResult", () => {
       traceId: "trace-123",
     });
 
-    expect(ledger.findByRawUrl(url)?.outcome).toBe("duplicated");
+    expect((await ledger.findByRawUrl(url))?.outcome).toBe("duplicated");
   });
 
   test("records the parent trace with the terminal result", async () => {
@@ -57,6 +57,6 @@ describe("recordTerminalResult", () => {
       traceId: "trace-123",
     });
 
-    expect(ledger.findByRawUrl(url)?.traceId).toBe("trace-123");
+    expect((await ledger.findByRawUrl(url))?.traceId).toBe("trace-123");
   });
 });

@@ -1,0 +1,4 @@
+Command: bunx wrangler containers list
+Endpoint: GET /client/v4/accounts/<account-id>/containers/dash/applications
+Response: HTTP 403 Forbidden
+Wrangler error: {"error":"Authentication error"}

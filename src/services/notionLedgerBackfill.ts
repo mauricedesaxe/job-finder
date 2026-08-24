@@ -1,4 +1,5 @@
 import type { JobLedger, NotionBackfillStats } from "./jobLedger";
+import { normalizeJobLedgerText } from "./jobLedgerIdentity";
 import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
@@ -45,7 +46,7 @@ export async function backfillJobLedger({
   const snapshot = await scanNotionJobs(client, databaseId, completedAt);
 
   for (const job of snapshot.jobs) {
-    ledger.recordProcessedJob({
+    await ledger.recordProcessedJob({
       sourceKey: job.sourceKey,
       rawUrl: job.rawUrl ?? undefined,
       company: job.company,
@@ -56,12 +57,12 @@ export async function backfillJobLedger({
   }
 
   for (const exclusion of snapshot.exclusions) {
-    ledger.excludeCompany(exclusion);
+    await ledger.excludeCompany(exclusion);
   }
 
-  const actualStats = ledger.notionBackfillStats();
+  const actualStats = await ledger.notionBackfillStats();
   verifyBackfill(snapshot.stats, actualStats);
-  ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, completedAt);
+  await ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, completedAt);
 
   return { stats: actualStats, migrationName: NOTION_JOB_LEDGER_BACKFILL_MIGRATION };
 }
@@ -154,7 +155,8 @@ function snapshotStats(
     urls: new Set(jobs.flatMap((job) => (job.rawUrl ? [job.rawUrl] : []))).size,
     companyTitlePairs: new Set(jobs.map((job) => companyTitleKey(job))).size,
     urlLessRows: jobs.filter((job) => job.rawUrl === null).length,
-    exclusions: new Set(exclusions.map((exclusion) => normalizeText(exclusion.company))).size,
+    exclusions: new Set(exclusions.map((exclusion) => normalizeJobLedgerText(exclusion.company)))
+      .size,
   };
 }
 
@@ -174,9 +176,5 @@ function verifyBackfill(expected: NotionBackfillStats, actual: NotionBackfillSta
 }
 
 function companyTitleKey(job: NotionJobRecord): string {
-  return `${normalizeText(job.company)}\u0000${normalizeText(job.title)}`;
-}
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  return `${normalizeJobLedgerText(job.company)}\u0000${normalizeJobLedgerText(job.title)}`;
 }

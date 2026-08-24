@@ -1,6 +1,12 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { normalizeJobLedgerText } from "./jobLedgerIdentity";
+
+const JOB_LEDGER_SCHEMA = readFileSync(
+  new URL("../../migrations/0001_job_ledger.sql", import.meta.url),
+  "utf8",
+);
 
 export const PROCESSED_JOB_OUTCOMES = [
   "historical",
@@ -70,15 +76,15 @@ interface CompanyExclusionRow {
 }
 
 export interface JobLedger {
-  findByRawUrl(rawUrl: string): ProcessedJob | null;
-  titlesForCompany(company: string): string[];
-  findCompanyExclusion(company: string): CompanyExclusion | null;
-  recordProcessedJob(input: RecordProcessedJobInput): void;
-  excludeCompany(input: ExcludeCompanyInput): void;
-  notionBackfillStats(): NotionBackfillStats;
-  markMigration(name: string, completedAt: string): void;
-  hasMigration(name: string): boolean;
-  close(): void;
+  findByRawUrl(rawUrl: string): Promise<ProcessedJob | null>;
+  titlesForCompany(company: string): Promise<string[]>;
+  findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
+  recordProcessedJob(input: RecordProcessedJobInput): Promise<void>;
+  excludeCompany(input: ExcludeCompanyInput): Promise<void>;
+  notionBackfillStats(): Promise<NotionBackfillStats>;
+  markMigration(name: string, completedAt: string): Promise<void>;
+  hasMigration(name: string): Promise<boolean>;
+  close(): Promise<void>;
 }
 
 export function createJobLedger(databasePath: string): JobLedger {
@@ -88,42 +94,7 @@ export function createJobLedger(databasePath: string): JobLedger {
   const database = new Database(databasePath);
   database.run("PRAGMA journal_mode = WAL");
   database.run("PRAGMA foreign_keys = ON");
-  database.run(`
-    CREATE TABLE IF NOT EXISTS processed_jobs (
-      source_key TEXT PRIMARY KEY,
-      raw_url TEXT,
-      company TEXT NOT NULL,
-      normalized_company TEXT NOT NULL,
-      title TEXT NOT NULL,
-      normalized_title TEXT NOT NULL,
-      outcome TEXT NOT NULL,
-      first_processed_at TEXT NOT NULL,
-      last_processed_at TEXT NOT NULL,
-      trace_id TEXT
-    )
-  `);
-  database.run(`
-    CREATE INDEX IF NOT EXISTS processed_jobs_company_title
-    ON processed_jobs(normalized_company, normalized_title)
-  `);
-  database.run(`
-    CREATE INDEX IF NOT EXISTS processed_jobs_raw_url
-    ON processed_jobs(raw_url)
-  `);
-  database.run(`
-    CREATE TABLE IF NOT EXISTS company_exclusions (
-      normalized_company TEXT PRIMARY KEY,
-      company TEXT NOT NULL,
-      excluded_at TEXT NOT NULL,
-      source_key TEXT
-    )
-  `);
-  database.run(`
-    CREATE TABLE IF NOT EXISTS job_ledger_migrations (
-      name TEXT PRIMARY KEY,
-      completed_at TEXT NOT NULL
-    )
-  `);
+  database.exec(JOB_LEDGER_SCHEMA);
   const notionBackfillStats = database.query<NotionBackfillStats, []>(`
     SELECT
       (SELECT COUNT(*) FROM processed_jobs WHERE source_key LIKE 'notion:%') AS sourceRows,
@@ -210,52 +181,52 @@ export function createJobLedger(databasePath: string): JobLedger {
   `);
 
   return {
-    findByRawUrl(rawUrl) {
+    async findByRawUrl(rawUrl) {
       const row = findByRawUrl.get(rawUrl);
       return row ? toProcessedJob(row) : null;
     },
-    titlesForCompany(company) {
-      return titlesForCompany.all(normalizeText(company)).map((row) => row.title);
+    async titlesForCompany(company) {
+      return titlesForCompany.all(normalizeJobLedgerText(company)).map((row) => row.title);
     },
-    findCompanyExclusion(company) {
-      const row = findCompanyExclusion.get(normalizeText(company));
+    async findCompanyExclusion(company) {
+      const row = findCompanyExclusion.get(normalizeJobLedgerText(company));
       return row ? { company: row.company, excludedAt: row.excluded_at } : null;
     },
-    recordProcessedJob(input) {
+    async recordProcessedJob(input) {
       const processedAt = input.processedAt ?? new Date().toISOString();
       recordProcessedJob.run(
         input.sourceKey ?? sourceKeyFor(input.rawUrl),
         input.rawUrl ?? null,
         input.company,
-        normalizeText(input.company),
+        normalizeJobLedgerText(input.company),
         input.title,
-        normalizeText(input.title),
+        normalizeJobLedgerText(input.title),
         input.outcome,
         processedAt,
         processedAt,
         input.traceId ?? null,
       );
     },
-    excludeCompany(input) {
+    async excludeCompany(input) {
       excludeCompany.run(
-        normalizeText(input.company),
+        normalizeJobLedgerText(input.company),
         input.company,
         input.excludedAt ?? new Date().toISOString(),
         input.sourceKey ?? null,
       );
     },
-    notionBackfillStats() {
+    async notionBackfillStats() {
       const stats = notionBackfillStats.get();
       if (!stats) throw new Error("Could not read Notion backfill statistics");
       return stats;
     },
-    markMigration(name, completedAt) {
+    async markMigration(name, completedAt) {
       markMigration.run(name, completedAt);
     },
-    hasMigration(name) {
+    async hasMigration(name) {
       return hasMigration.get(name) !== null;
     },
-    close() {
+    async close() {
       database.close();
     },
   };
@@ -267,10 +238,6 @@ function sourceKeyFor(rawUrl: string | undefined): string {
   }
 
   return `url:${rawUrl}`;
-}
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
 
 function toProcessedJob(row: ProcessedJobRow): ProcessedJob {
