@@ -86,6 +86,10 @@ describe("full evaluation pipeline (integration)", () => {
       project: integrationConfig.langsmithProject,
       openrouterApiKey: integrationConfig.openrouterApiKey,
     });
+    await traced({ name: "integration_trace_capacity" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      return { data: undefined };
+    });
 
     const passFiles = collectFixtures(`${FIXTURES_DIR}/pass`).map((file) => ({
       file,
