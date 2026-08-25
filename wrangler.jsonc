@@ -9,7 +9,7 @@
   },
   "limits": {
     "cpu_ms": 300000,
-    "subrequests": 10000
+    "subrequests": 20000
   },
   "d1_databases": [
     {
