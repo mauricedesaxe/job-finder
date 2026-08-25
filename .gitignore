@@ -28,6 +28,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.tsbuildinfo
 .wrangler/
 .audit/
+worker-configuration.d.ts
 
 # IntelliJ based IDEs
 .idea
