@@ -6,6 +6,7 @@ import {
   getPromptCommitHash,
   getPromptReleaseTag,
   initLangSmith,
+  LangSmithTraceUnavailableError,
   shutdownLangSmith,
   traced,
 } from "../langsmith";
@@ -158,7 +159,7 @@ describe("LangSmith trace acceptance", () => {
           recorded = true;
           return { data: "inserted" };
         }),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(LangSmithTraceUnavailableError);
 
       expect(recorded).toBe(false);
       expect(consoleError).toHaveBeenCalled();

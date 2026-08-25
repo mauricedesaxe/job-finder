@@ -13,15 +13,20 @@ import { replayCompletedReviewCompanyBlocks } from "./review";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import type { JobLedger } from "./services/jobLedger";
-import { completedReviews, flushPending, initLangSmith } from "./services/langsmith";
+import {
+  completedReviews,
+  flushPending,
+  initLangSmith,
+  LangSmithTraceUnavailableError,
+} from "./services/langsmith";
 import { createNotionClient, type ResilientNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
-import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./services/notionLedgerBackfill";
 import { sendRunReport } from "./services/slack";
 
 export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" };
 
 const log = logger.child({ component: "main" });
+const PIPELINE_WORKERS = 8;
 
 export async function runJobFinder({
   mode,
@@ -72,8 +77,8 @@ async function scrapeJobs({
     openrouterApiKey: config.openrouterApiKey,
   });
 
-  if (!(await ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION))) {
-    throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
+  if (!(await ledger.isReadyForScrape())) {
+    throw new Error("Run bun run backfill:job-ledger before scraping");
   }
 
   await replayPendingReviewProjections(ledger);
@@ -105,58 +110,8 @@ async function scrapeJobs({
     config.domains.map((domain) => ({ keyword, domain })),
   );
 
-  log.info({ pairs: searchPairs.length }, "phase 1: searching");
-
-  const urlMap = new Map<string, string>();
-
-  const searchResults = await Promise.allSettled(
-    searchPairs.map(({ keyword, domain }) =>
-      jinaSearchSemaphore.run(async () => {
-        const urls = await jinaBreaker.run(() =>
-          withRetry(() => searchJobs(keyword, domain, config), {
-            shouldRetry: isRetryableJina,
-            onRetry: (a) => log.warn({ keyword, domain, attempt: a }, "search retry"),
-          }),
-        );
-        log.info({ domain, keyword, urls: urls.length }, "search complete");
-        return { keyword, urls };
-      }),
-    ),
-  );
-
-  let searchErrors = 0;
-  for (const result of searchResults) {
-    if (result.status === "fulfilled") {
-      for (const url of result.value.urls) {
-        if (!urlMap.has(url)) {
-          urlMap.set(url, result.value.keyword);
-        }
-      }
-    } else {
-      log.error({ err: result.reason }, "search failed");
-      searchErrors++;
-    }
-  }
-
-  log.info({ uniqueUrls: urlMap.size, searchErrors }, "all searches complete");
-
+  log.info({ pairs: searchPairs.length }, "searching and processing");
   const seenUrls = new Set<string>();
-
-  log.info({ urls: urlMap.size }, "phase 2: processing urls");
-
-  const processResults = await Promise.allSettled(
-    Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, {
-        notion,
-        config,
-        ledger,
-        recentAppCompanies: cache.recentAppCompanies,
-        seenUrls,
-        filters,
-      }),
-    ),
-  );
-
   const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
@@ -166,17 +121,69 @@ async function scrapeJobs({
     duplicated: 0,
     errored: 0,
   };
+  let nextSearchPair = 0;
+  let searchErrors = 0;
+  let uniqueUrls = 0;
+  const pipelineState: { fatalError?: LangSmithTraceUnavailableError } = {};
 
-  for (const result of processResults) {
-    if (result.status === "fulfilled") {
-      const key = result.value as ProcessResult;
-      if (key === "companyApplied") stats.companyApplied++;
-      else if (key in stats) stats[key as keyof typeof stats]++;
-    } else {
-      log.error({ err: result.reason }, "url processing failed");
-      stats.errored++;
-    }
-  }
+  await Promise.all(
+    Array.from({ length: Math.min(PIPELINE_WORKERS, searchPairs.length) }, async () => {
+      while (!pipelineState.fatalError && nextSearchPair < searchPairs.length) {
+        const pair = searchPairs[nextSearchPair++];
+        if (!pair) return;
+
+        let urls: string[];
+        try {
+          urls = await jinaSearchSemaphore.run(() =>
+            jinaBreaker.run(() =>
+              withRetry(() => searchJobs(pair.keyword, pair.domain, config), {
+                shouldRetry: isRetryableJina,
+                onRetry: (attempt) => log.warn({ ...pair, attempt }, "search retry"),
+              }),
+            ),
+          );
+          log.info({ ...pair, urls: urls.length }, "search complete");
+        } catch (error) {
+          log.error({ ...pair, err: error }, "search failed");
+          searchErrors++;
+          continue;
+        }
+
+        for (const url of urls) {
+          const seen = seenUrls.has(url);
+          if (!seen) uniqueUrls++;
+          try {
+            const result = await processUrl(url, pair.keyword, {
+              notion,
+              config,
+              ledger,
+              recentAppCompanies: cache.recentAppCompanies,
+              seenUrls,
+              filters,
+            });
+            recordProcessResult(stats, result);
+          } catch (error) {
+            if (error instanceof LangSmithTraceUnavailableError) {
+              pipelineState.fatalError ??= error;
+              return;
+            }
+            log.error({ url, err: error }, "url processing failed");
+            stats.errored++;
+          }
+        }
+      }
+    }),
+  );
+
+  if (pipelineState.fatalError) throw pipelineState.fatalError;
+
+  log.info({ uniqueUrls, searchErrors }, "all searches complete");
+
+  await replayPendingNotionProjections({
+    ledger,
+    notion,
+    databaseId: config.notionDatabaseId,
+  });
 
   const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
@@ -195,10 +202,18 @@ async function scrapeJobs({
       postReconcileStats,
       pruneStats,
       {
-        urlCount: urlMap.size,
+        urlCount: uniqueUrls,
         searchErrors,
       },
       durationMs,
     );
+  }
+}
+
+function recordProcessResult(stats: ScrapeStats, result: ProcessResult): void {
+  if (result === "companyApplied") {
+    stats.companyApplied++;
+  } else if (result in stats) {
+    stats[result as keyof ScrapeStats]++;
   }
 }

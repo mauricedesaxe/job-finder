@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,19 +115,47 @@ describe("replayPendingNotionProjections", () => {
 
     expect(await ledger.listPendingNotionProjections()).toEqual([projection]);
   });
+
+  test("drains Notion projections in bounded pages", async () => {
+    ledger = createSqliteJobLedger(":memory:");
+    for (let index = 0; index < 11; index++) {
+      await seedProjection(ledger, {
+        ...job,
+        title: `Senior Engineer ${index}`,
+        url: `https://jobs.example.com/role/${index}`,
+      });
+    }
+    const listPending = spyOn(ledger, "listPendingNotionProjections");
+    let creates = 0;
+    const notion = notionClient({
+      create: async () => {
+        creates++;
+        return { object: "page", id: `page-${creates}` };
+      },
+    });
+
+    await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
+
+    expect(creates).toBe(11);
+    expect(listPending.mock.calls).toEqual([[10], [10], [10]]);
+    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+  });
 });
 
-async function seedProjection(ledger: ReturnType<typeof createSqliteJobLedger>): Promise<void> {
+async function seedProjection(
+  ledger: ReturnType<typeof createSqliteJobLedger>,
+  queuedJob: JobListing = job,
+): Promise<void> {
   await ledger.recordProcessedJob({
-    rawUrl: job.url,
-    company: job.company,
-    title: job.title,
+    rawUrl: queuedJob.url,
+    company: queuedJob.company,
+    title: queuedJob.title,
     outcome: "inserted",
     processedAt: projection.createdAt,
     projections: {
       kind: "notion",
       notion: {
-        job: projection.job,
+        job: queuedJob,
         status: projection.status,
         createdAt: projection.createdAt,
       },

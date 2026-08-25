@@ -59,7 +59,7 @@ export function withNonRetryingNotionCreate<T>(fn: () => Promise<T>): Promise<T>
  * build, or script — can bypass its Notion resilience policy.
  */
 export function createNotionClient(token: string): ResilientNotionClient {
-  const client = new Client({ auth: token });
+  const client = new Client({ auth: token, fetch: globalThis.fetch.bind(globalThis) });
   return {
     databases: {
       query: (args) => withNotionResilience(() => client.databases.query(args)),

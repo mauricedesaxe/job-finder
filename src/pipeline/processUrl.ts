@@ -128,7 +128,7 @@ async function processJobBody(
   ctx: ProcessContext,
   state: ProcessResultState,
 ): Promise<{ data: ProcessJobResult }> {
-  const { config, ledger, notion, recentAppCompanies } = ctx;
+  const { config, ledger, recentAppCompanies } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
     jinaBreaker.run(() =>
@@ -164,7 +164,6 @@ async function processJobBody(
           ledger,
           job,
           outcome: "rejected",
-          projection: { notion, databaseId: config.notionDatabaseId },
         });
       }
     }
@@ -180,7 +179,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -210,7 +208,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -260,7 +257,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "archived",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -270,7 +266,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "companyApplied",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -300,7 +295,6 @@ async function processJobBody(
             outcome,
             traceId,
             review: { enqueue: enqueueReviewTrace },
-            projection: { notion, databaseId: config.notionDatabaseId },
           });
         };
       },

@@ -147,6 +147,12 @@ test("runs the job ledger adapter in workerd", async () => {
   });
 }, 15_000);
 
+test("allows a clean D1 ledger to scrape", async () => {
+  const response = await worker.fetch("/ready");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ ready: true });
+});
+
 test("acquires, contends, and releases the singleton D1 run lock", async () => {
   const response = await worker.fetch("/run-lock");
   expect(response.status).toBe(200);

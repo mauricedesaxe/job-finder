@@ -88,6 +88,7 @@ export const LIST_PENDING_NOTION_PROJECTIONS_SQL = `
   SELECT source_key, job_json, status, created_at
   FROM pending_notion_projections
   ORDER BY created_at, source_key
+  LIMIT ?
 `;
 
 export const MARK_NOTION_PROJECTION_COMPLETE_SQL = `

@@ -89,11 +89,12 @@ export interface NotionBackfillStats {
 }
 
 export interface JobLedger {
+  isReadyForScrape(): Promise<boolean>;
   findByRawUrl(rawUrl: string): Promise<ProcessedJob | null>;
   titlesForCompany(company: string): Promise<string[]>;
   findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
   recordProcessedJob(input: RecordProcessedJobInput): Promise<PendingJobProjections>;
-  listPendingNotionProjections(): Promise<PendingNotionProjection[]>;
+  listPendingNotionProjections(limit?: number): Promise<PendingNotionProjection[]>;
   markNotionProjectionComplete(sourceKey: string): Promise<void>;
   listPendingReviewProjections(): Promise<PendingReviewProjection[]>;
   markReviewProjectionComplete(sourceKey: string): Promise<void>;

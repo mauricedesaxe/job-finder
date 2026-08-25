@@ -41,6 +41,7 @@ import {
   RECORD_PROCESSED_JOB_SQL,
   TITLES_FOR_COMPANY_SQL,
 } from "./jobLedgerSql";
+import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./notionLedgerBackfill";
 
 const JOB_LEDGER_SCHEMA = [
   "0001_job_ledger.sql",
@@ -91,7 +92,7 @@ export function createSqliteJobLedger(
   const recordPendingNotionProjection = database.query<never, [string, string, string, string]>(
     RECORD_PENDING_NOTION_PROJECTION_SQL,
   );
-  const listPendingNotionProjections = database.query<Record<string, unknown>, []>(
+  const listPendingNotionProjections = database.query<Record<string, unknown>, [number]>(
     LIST_PENDING_NOTION_PROJECTIONS_SQL,
   );
   const markNotionProjectionComplete = database.query<never, [string]>(
@@ -142,6 +143,9 @@ export function createSqliteJobLedger(
   }
 
   return {
+    async isReadyForScrape() {
+      return parseMigrationRow(hasMigration.get(NOTION_JOB_LEDGER_BACKFILL_MIGRATION));
+    },
     async findByRawUrl(rawUrl) {
       return parseProcessedJobRow(findByRawUrl.get(rawUrl));
     },
@@ -154,8 +158,8 @@ export function createSqliteJobLedger(
     async recordProcessedJob(input) {
       return recordProcessedJobAtomically(input);
     },
-    async listPendingNotionProjections() {
-      return parsePendingNotionProjectionRows(listPendingNotionProjections.all());
+    async listPendingNotionProjections(limit = 100) {
+      return parsePendingNotionProjectionRows(listPendingNotionProjections.all(limit));
     },
     async markNotionProjectionComplete(sourceKey) {
       markNotionProjectionComplete.run(sourceKey);

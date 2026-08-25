@@ -46,7 +46,7 @@ export class JobFinderWorkflow extends WorkflowEntrypoint<
         log.info({ mode: payload.mode.kind }, "run started");
         await step.do(
           "run job finder",
-          { retries: { limit: 0, delay: "1 second" }, timeout: "30 minutes" },
+          { retries: { limit: 0, delay: "1 second" }, timeout: "2 hours" },
           async () => {
             const ledger = createD1JobLedger(this.env.JOB_LEDGER);
             await runLockedJob(runId, {

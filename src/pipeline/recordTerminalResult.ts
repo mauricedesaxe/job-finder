@@ -3,9 +3,7 @@ import type {
   PendingJobProjectionInput,
   ProcessedJobOutcome,
 } from "../services/jobLedger";
-import type { ResilientNotionClient } from "../services/notion";
 import type { JobListing, JobStatus } from "../types";
-import { projectPendingNotionProjection } from "./notionProjection";
 import { projectPendingReviewProjection } from "./reviewProjection";
 
 export type TerminalProcessedJobOutcome = Exclude<ProcessedJobOutcome, "historical">;
@@ -15,11 +13,6 @@ interface ReviewProjectionTransport {
   enqueue(traceId: string): Promise<void>;
 }
 
-interface ProjectionTransport {
-  notion: ResilientNotionClient;
-  databaseId: string;
-}
-
 interface PreparedTerminalResultBase {
   ledger: JobLedger;
   job: JobListing;
@@ -27,9 +20,9 @@ interface PreparedTerminalResultBase {
 
 export type PreparedTerminalResultInput = PreparedTerminalResultBase &
   (
-    | { outcome: "duplicated"; projection?: never }
-    | { outcome: "inserted"; projection: ProjectionTransport; review: ReviewProjectionTransport }
-    | { outcome: Exclude<ProjectedTerminalOutcome, "inserted">; projection: ProjectionTransport }
+    | { outcome: "duplicated" }
+    | { outcome: "inserted"; review: ReviewProjectionTransport }
+    | { outcome: Exclude<ProjectedTerminalOutcome, "inserted"> }
   );
 
 export type RecordTerminalResultInput = PreparedTerminalResultInput & { traceId: string };
@@ -44,8 +37,9 @@ const NOTION_STATUS_BY_OUTCOME = {
 
 export async function recordTerminalResult(input: RecordTerminalResultInput): Promise<void> {
   const { ledger, job, outcome, traceId } = input;
+  const review = "review" in input ? input.review : undefined;
   const createdAt = new Date().toISOString();
-  const projections = pendingProjectionInput({ job, outcome, traceId, createdAt });
+  const projections = pendingProjectionInput({ job, outcome, traceId, review, createdAt });
   const stored = await ledger.recordProcessedJob({
     rawUrl: job.url,
     company: job.company,
@@ -60,19 +54,13 @@ export async function recordTerminalResult(input: RecordTerminalResultInput): Pr
       if (stored.kind !== "none") throw new Error("Duplicated job stored unexpected projections");
       return;
     case "inserted":
-      if (stored.kind !== "notion-and-review") {
+      if (stored.kind !== "notion-and-review" || !input.review) {
         throw new Error("Inserted job did not store both pending projections");
       }
       await projectPendingReviewProjection({
         ledger,
         projection: stored.review,
         enqueue: input.review.enqueue,
-      });
-      await projectPendingNotionProjection({
-        ledger,
-        notion: input.projection.notion,
-        databaseId: input.projection.databaseId,
-        projection: stored.notion,
       });
       return;
     case "rejected":
@@ -81,12 +69,7 @@ export async function recordTerminalResult(input: RecordTerminalResultInput): Pr
       if (stored.kind !== "notion") {
         throw new Error(`${outcome} job did not store its pending Notion projection`);
       }
-      await projectPendingNotionProjection({
-        ledger,
-        notion: input.projection.notion,
-        databaseId: input.projection.databaseId,
-        projection: stored.notion,
-      });
+      return;
   }
 }
 
@@ -94,17 +77,19 @@ function pendingProjectionInput({
   job,
   outcome,
   traceId,
+  review,
   createdAt,
 }: {
   job: JobListing;
   outcome: TerminalProcessedJobOutcome;
   traceId: string;
+  review?: ReviewProjectionTransport;
   createdAt: string;
 }): PendingJobProjectionInput | undefined {
   const status = NOTION_STATUS_BY_OUTCOME[outcome];
   if (!status) return undefined;
   const notion = { job, status, createdAt };
-  return outcome === "inserted"
+  return outcome === "inserted" && review
     ? { kind: "notion-and-review", notion, review: { traceId, createdAt } }
     : { kind: "notion", notion };
 }

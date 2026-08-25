@@ -27,6 +27,10 @@ export default {
       });
     }
 
+    if (path === "/ready") {
+      return Response.json({ ready: await ledger.isReadyForScrape() });
+    }
+
     if (path === "/run-lock") {
       const lock = createD1JobFinderRunLock(environment.JOB_LEDGER);
       const acquired = await lock.acquire("run-1", "2026-08-24T22:00:00.000Z");

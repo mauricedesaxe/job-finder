@@ -45,6 +45,9 @@ const BatchWriteResultSchema = z.array(WriteResultSchema);
 
 export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
   return {
+    async isReadyForScrape() {
+      return true;
+    },
     async findByRawUrl(rawUrl) {
       return parseProcessedJobRow(await binding.prepare(FIND_BY_RAW_URL_SQL).bind(rawUrl).first());
     },
@@ -90,9 +93,9 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
       BatchWriteResultSchema.parse(await binding.batch(statements));
       return projections;
     },
-    async listPendingNotionProjections() {
+    async listPendingNotionProjections(limit = 100) {
       const result = RowsResultSchema.parse(
-        await binding.prepare(LIST_PENDING_NOTION_PROJECTIONS_SQL).all(),
+        await binding.prepare(LIST_PENDING_NOTION_PROJECTIONS_SQL).bind(limit).all(),
       );
       return parsePendingNotionProjectionRows(result.results);
     },
