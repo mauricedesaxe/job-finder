@@ -293,7 +293,44 @@ describe("LangSmith trace acceptance", () => {
     ]);
   });
 
-  test("fails immediately when a trace read returns a non-404 error", async () => {
+  test("retries a rate-limited trace read before persisting accepted work", async () => {
+    const events: string[] = [];
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      events.push("batch");
+      return new Response(null, { status: 202 });
+    });
+    let reads = 0;
+    spyOn(client, "readRun").mockImplementation(async () => {
+      reads++;
+      events.push(`read-${reads}`);
+      if (reads === 1) {
+        throw Object.assign(new Error("rate limited"), { status: 429 });
+      }
+      return {
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        name: "process_job",
+        run_type: "chain",
+        start_time: 1_777_075_200,
+        inputs: {},
+        extra: {},
+      };
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "process_job" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      events.push("persist");
+      return { data: "inserted" };
+    });
+
+    expect(events).toEqual(["batch", "read-1", "read-2", "persist"]);
+  });
+
+  test("fails immediately when a trace read returns 401", async () => {
     const events: string[] = [];
     const client = traceClient((url) => {
       if (url.endsWith("/info")) {
@@ -319,6 +356,59 @@ describe("LangSmith trace acceptance", () => {
 
     expect(events).toEqual(["batch", "read"]);
     expect(persisted).toBe(false);
+  });
+
+  test("retries a rate-limited trace read before running deferred work", async () => {
+    const events: string[] = [];
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      events.push("batch");
+      return new Response(null, { status: 202 });
+    });
+    let reads = 0;
+    spyOn(client, "readRun").mockImplementation(async () => {
+      reads++;
+      if (reads === 2) {
+        events.push("read-rate-limited");
+        throw Object.assign(new Error("rate limited"), { status: 429 });
+      }
+      events.push(reads === 1 ? "read-open" : "read-complete");
+      return {
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        session_id: "22222222-2222-4222-8222-222222222222",
+        name: "process_job",
+        run_type: "chain",
+        start_time: 1_777_075_200,
+        ...(reads === 1 ? {} : { end_time: 1_777_075_201 }),
+        inputs: {},
+        extra: {},
+      };
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "process_job" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      events.push("callback");
+      return {
+        data: "inserted",
+        afterTraceComplete: async () => {
+          events.push("after-complete");
+        },
+      };
+    });
+
+    expect(events).toEqual([
+      "batch",
+      "read-open",
+      "callback",
+      "batch",
+      "read-rate-limited",
+      "read-complete",
+      "after-complete",
+    ]);
   });
 
   test("runs deferred work only after the parent trace completes", async () => {

@@ -367,7 +367,7 @@ async function requireAcceptedTrace(client: Client, traceId: string): Promise<vo
   await client.flush();
   await withRetry(() => client.readRun(traceId), {
     ...TRACE_READ_RETRY_POLICY,
-    shouldRetry: isMissingTrace,
+    shouldRetry: isRetryableTraceRead,
   });
 }
 
@@ -389,7 +389,7 @@ async function requireCompletedTrace(
     {
       ...TRACE_READ_RETRY_POLICY,
       shouldRetry: (error) =>
-        isMissingTrace(error) ||
+        isRetryableTraceRead(error) ||
         (error instanceof Error && "code" in error && error.code === "TRACE_INCOMPLETE"),
     },
   );
@@ -418,8 +418,18 @@ async function rethrowWithExtendedErrorTrace(
   throw error;
 }
 
-function isMissingTrace(error: unknown): boolean {
-  return error instanceof Error && "status" in error && error.status === 404;
+function isRetryableTraceRead(error: unknown): boolean {
+  if (!(error instanceof Error) || !("status" in error)) return false;
+  switch (error.status) {
+    case 404:
+    case 429:
+    case 500:
+    case 502:
+    case 503:
+      return true;
+    default:
+      return false;
+  }
 }
 
 export async function flushPending(): Promise<void> {
