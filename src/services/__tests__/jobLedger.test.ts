@@ -90,7 +90,9 @@ test("rejects malformed stored projections in SQLite", async () => {
 
   const reopenedLedger = createSqliteJobLedger(databasePath);
   try {
-    await expect(reopenedLedger.listPendingNotionProjections()).rejects.toBeInstanceOf(z.ZodError);
+    await expect(reopenedLedger.nextPendingNotionProjectionBatch()).rejects.toBeInstanceOf(
+      z.ZodError,
+    );
   } finally {
     await reopenedLedger.close();
     await rm(directory, { recursive: true, force: true });
@@ -134,7 +136,7 @@ test("rolls back the processed job when its projection cannot be stored", async 
       }),
     ).rejects.toThrow("projection write failed");
     expect(await ledger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
     expect(await ledger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await ledger.close();
@@ -183,7 +185,7 @@ test("rolls back terminal state and both outboxes when review storage fails", as
       }),
     ).rejects.toThrow("review projection write failed");
     expect(await localLedger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
-    expect(await localLedger.listPendingNotionProjections()).toEqual([]);
+    expect(await localLedger.nextPendingNotionProjectionBatch()).toEqual([]);
     expect(await localLedger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await localLedger.close();

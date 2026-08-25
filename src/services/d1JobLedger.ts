@@ -96,7 +96,7 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
       BatchWriteResultSchema.parse(await binding.batch(statements));
       return projections;
     },
-    async listPendingNotionProjections() {
+    async nextPendingNotionProjectionBatch() {
       const result = RowsResultSchema.parse(
         await binding.prepare(LIST_PENDING_NOTION_PROJECTIONS_SQL).all(),
       );

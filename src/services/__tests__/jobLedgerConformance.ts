@@ -298,7 +298,7 @@ export async function runJobLedgerConformanceScenario(
     },
   });
   const pendingReviewBeforeComplete = await ledger.listPendingReviewProjections();
-  const pendingBeforeComplete = await ledger.listPendingNotionProjections();
+  const pendingBeforeComplete = await ledger.nextPendingNotionProjectionBatch();
   await ledger.recordProcessedJob({
     sourceKey: pendingProjection.sourceKey,
     rawUrl: pendingProjection.job.url,
@@ -306,9 +306,9 @@ export async function runJobLedgerConformanceScenario(
     title: "Updated Pending Engineer",
     outcome: "inserted",
   });
-  const pendingAfterOrdinaryUpsert = await ledger.listPendingNotionProjections();
+  const pendingAfterOrdinaryUpsert = await ledger.nextPendingNotionProjectionBatch();
   await ledger.markNotionProjectionComplete(pendingProjection.sourceKey);
-  const pendingAfterComplete = await ledger.listPendingNotionProjections();
+  const pendingAfterComplete = await ledger.nextPendingNotionProjectionBatch();
   await ledger.markReviewProjectionComplete(pendingProjection.sourceKey);
   const pendingReviewAfterComplete = await ledger.listPendingReviewProjections();
   await ledger.recordProcessedJob({
@@ -318,7 +318,7 @@ export async function runJobLedgerConformanceScenario(
     title: "Duplicate Pending Engineer",
     outcome: "duplicated",
   });
-  const duplicatePending = await ledger.listPendingNotionProjections();
+  const duplicatePending = await ledger.nextPendingNotionProjectionBatch();
 
   let missingSourceKeyError = "";
   try {

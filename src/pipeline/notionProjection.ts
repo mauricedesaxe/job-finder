@@ -29,7 +29,7 @@ export async function replayPendingNotionProjections({
   databaseId: string;
 }): Promise<void> {
   while (true) {
-    const projections = await ledger.listPendingNotionProjections();
+    const projections = await ledger.nextPendingNotionProjectionBatch();
     if (projections.length === 0) return;
 
     const errors: unknown[] = [];

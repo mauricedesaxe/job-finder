@@ -91,7 +91,7 @@ export default {
         .run();
 
       try {
-        await ledger.listPendingNotionProjections();
+        await ledger.nextPendingNotionProjectionBatch();
         return Response.json({ rejected: false });
       } catch (error) {
         return Response.json({ rejected: error instanceof ZodError });

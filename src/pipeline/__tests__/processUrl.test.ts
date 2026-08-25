@@ -39,7 +39,7 @@ describe("recordTerminalResult", () => {
       title: "Senior Engineer",
       outcome: "rejected",
     });
-    expect(await ledger.listPendingNotionProjections()).toEqual([
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([
       expect.objectContaining({ job, status: "Auto-Rejected" }),
     ]);
   });
@@ -55,7 +55,7 @@ describe("recordTerminalResult", () => {
     });
 
     expect((await ledger.findByRawUrl(job.url))?.outcome).toBe("duplicated");
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
   });
 
   test("records the parent trace with the terminal result", async () => {
@@ -99,7 +99,7 @@ describe("recordTerminalResult", () => {
             outcome,
             traceId: "trace-123",
           }));
-      expect(await ledger.listPendingNotionProjections()).toEqual([
+      expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([
         expect.objectContaining({ sourceKey: `url:${job.url}`, job, status }),
       ]);
       await ledger.close();

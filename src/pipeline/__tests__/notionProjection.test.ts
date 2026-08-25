@@ -61,7 +61,7 @@ describe("replayPendingNotionProjections", () => {
       await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
 
       expect(creates).toBe(1);
-      expect(await ledger.listPendingNotionProjections()).toEqual([]);
+      expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
     } finally {
       await ledger?.close();
       ledger = undefined;
@@ -90,14 +90,14 @@ describe("replayPendingNotionProjections", () => {
     await expect(
       replayPendingNotionProjections({ ledger, notion, databaseId: "database" }),
     ).rejects.toThrow("Could not replay all pending Notion projections");
-    expect(await ledger.listPendingNotionProjections()).toHaveLength(1);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toHaveLength(1);
 
     await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
     await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
 
     expect(creates).toBe(1);
     expect(queries).toBe(2);
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
   });
 
   test("keeps pending state when the exact URL query fails", async () => {
@@ -113,7 +113,7 @@ describe("replayPendingNotionProjections", () => {
       replayPendingNotionProjections({ ledger, notion, databaseId: "database" }),
     ).rejects.toThrow("Could not replay all pending Notion projections");
 
-    expect(await ledger.listPendingNotionProjections()).toEqual([projection]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([projection]);
   });
 
   test("drains Notion projections in bounded pages", async () => {
@@ -125,7 +125,7 @@ describe("replayPendingNotionProjections", () => {
         url: `https://jobs.example.com/role/${index}`,
       });
     }
-    const listPending = spyOn(ledger, "listPendingNotionProjections");
+    const listPending = spyOn(ledger, "nextPendingNotionProjectionBatch");
     let creates = 0;
     const notion = notionClient({
       create: async () => {
@@ -138,7 +138,7 @@ describe("replayPendingNotionProjections", () => {
 
     expect(creates).toBe(11);
     expect(listPending.mock.calls).toEqual([[], [], []]);
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
   });
 });
 
