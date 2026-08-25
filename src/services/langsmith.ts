@@ -12,6 +12,7 @@ import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
 import { createReviewQueue } from "./reviewQueue";
 
 const log = logger.child({ component: "langsmith" });
+const TRACE_READ_RETRY_POLICY = { maxRetries: 6, baseDelayMs: 100 };
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -364,8 +365,7 @@ export async function traced<T>(
 async function requireAcceptedTrace(client: Client, traceId: string): Promise<void> {
   await client.flush();
   await withRetry(() => client.readRun(traceId), {
-    maxRetries: 2,
-    baseDelayMs: 100,
+    ...TRACE_READ_RETRY_POLICY,
     shouldRetry: isMissingTrace,
   });
 }
@@ -386,8 +386,7 @@ async function requireCompletedTrace(
       return trace;
     },
     {
-      maxRetries: 2,
-      baseDelayMs: 100,
+      ...TRACE_READ_RETRY_POLICY,
       shouldRetry: (error) =>
         isMissingTrace(error) ||
         (error instanceof Error && "code" in error && error.code === "TRACE_INCOMPLETE"),

@@ -166,7 +166,7 @@ describe("LangSmith trace acceptance", () => {
     } finally {
       consoleError.mockRestore();
     }
-  });
+  }, 20_000);
 
   test("keeps concurrent child runs under one root trace", async () => {
     const startedRuns: Array<Record<string, unknown>> = [];
@@ -249,6 +249,76 @@ describe("LangSmith trace acceptance", () => {
     });
 
     expect(events.slice(0, 3)).toEqual(["batch", "read", "persist"]);
+  });
+
+  test("retries missing traces before persisting accepted work", async () => {
+    const events: string[] = [];
+    let reads = 0;
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        events.push("batch");
+        return new Response(null, { status: 202 });
+      }
+      reads++;
+      events.push(`read-${reads}`);
+      if (reads <= 3) return new Response("missing", { status: 404 });
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        name: "process_job",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "process_job" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      events.push("persist");
+      return { data: "inserted" };
+    });
+
+    expect(events.slice(0, 6)).toEqual([
+      "batch",
+      "read-1",
+      "read-2",
+      "read-3",
+      "read-4",
+      "persist",
+    ]);
+  });
+
+  test("fails immediately when a trace read returns a non-404 error", async () => {
+    const events: string[] = [];
+    const client = traceClient((url) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        events.push("batch");
+        return new Response(null, { status: 202 });
+      }
+      events.push("read");
+      return new Response("unauthorized", { status: 401 });
+    });
+    await initTestLangSmith(client);
+
+    let persisted = false;
+    await expect(
+      traced({ name: "process_job" }, async ({ requireAccepted }) => {
+        await requireAccepted();
+        persisted = true;
+        return { data: "inserted" };
+      }),
+    ).rejects.toBeInstanceOf(LangSmithTraceUnavailableError);
+
+    expect(events.slice(0, 3)).toEqual(["batch", "read", "batch"]);
+    expect(persisted).toBe(false);
   });
 
   test("runs deferred work only after the parent trace completes", async () => {
