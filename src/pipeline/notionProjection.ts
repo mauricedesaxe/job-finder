@@ -28,15 +28,20 @@ export async function replayPendingNotionProjections({
   notion: ResilientNotionClient;
   databaseId: string;
 }): Promise<void> {
-  const errors: unknown[] = [];
-  for (const projection of await ledger.listPendingNotionProjections()) {
-    try {
-      await projectPendingNotionProjection({ ledger, notion, databaseId, projection });
-    } catch (error) {
-      errors.push(error);
+  while (true) {
+    const projections = await ledger.nextPendingNotionProjectionBatch();
+    if (projections.length === 0) return;
+
+    const errors: unknown[] = [];
+    for (const projection of projections) {
+      try {
+        await projectPendingNotionProjection({ ledger, notion, databaseId, projection });
+      } catch (error) {
+        errors.push(error);
+      }
     }
-  }
-  if (errors.length > 0) {
-    throw new AggregateError(errors, "Could not replay all pending Notion projections");
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "Could not replay all pending Notion projections");
+    }
   }
 }

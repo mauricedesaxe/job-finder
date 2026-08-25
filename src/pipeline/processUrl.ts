@@ -21,7 +21,6 @@ import {
 } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
 import { enqueueReviewTrace, getPromptReleaseTag, traced } from "../services/langsmith";
-import type { ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -51,11 +50,9 @@ export interface ScrapeStats {
 }
 
 export interface ProcessContext {
-  notion: ResilientNotionClient;
   config: JobFinderConfig;
   ledger: JobLedger;
   recentAppCompanies: ReadonlySet<string>;
-  seenUrls: Set<string>;
   filters?: EvaluationFilter[];
 }
 
@@ -79,10 +76,7 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { ledger, seenUrls } = ctx;
-
-  if (seenUrls.has(url)) return "skipped";
-  seenUrls.add(url);
+  const { ledger } = ctx;
 
   if (await ledger.findByRawUrl(url)) {
     log.debug({ url }, "skipped (exists in ledger)");
@@ -114,8 +108,8 @@ export async function processUrl(
       }),
     },
     async ({ requireAccepted }) => {
-      const { data: result } = await processJobBody(url, keyword, ctx, state);
       const traceId = await requireAccepted();
+      const { data: result } = await processJobBody(url, keyword, ctx, state);
       const afterTraceComplete = await result.prepareTraceCompletion(traceId);
       return { data: result.outcome, afterTraceComplete };
     },
@@ -128,7 +122,7 @@ async function processJobBody(
   ctx: ProcessContext,
   state: ProcessResultState,
 ): Promise<{ data: ProcessJobResult }> {
-  const { config, ledger, notion, recentAppCompanies } = ctx;
+  const { config, ledger, recentAppCompanies } = ctx;
 
   const markdown = await jinaReaderSemaphore.run(() =>
     jinaBreaker.run(() =>
@@ -164,7 +158,6 @@ async function processJobBody(
           ledger,
           job,
           outcome: "rejected",
-          projection: { notion, databaseId: config.notionDatabaseId },
         });
       }
     }
@@ -180,7 +173,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -210,7 +202,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "rejected",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -260,7 +251,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "archived",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -270,7 +260,6 @@ async function processJobBody(
       ledger,
       job,
       outcome: "companyApplied",
-      projection: { notion, databaseId: config.notionDatabaseId },
     });
   }
 
@@ -300,7 +289,6 @@ async function processJobBody(
             outcome,
             traceId,
             review: { enqueue: enqueueReviewTrace },
-            projection: { notion, databaseId: config.notionDatabaseId },
           });
         };
       },

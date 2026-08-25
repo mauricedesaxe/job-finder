@@ -1,3 +1,4 @@
+import { z } from "zod/v4";
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import type { JobFinderConfig } from "./config";
 import { getEvaluationFilters } from "./config/evaluation";
@@ -13,15 +14,26 @@ import { replayCompletedReviewCompanyBlocks } from "./review";
 import { clearAshbyCache } from "./services/ats";
 import { fetchExchangeRates } from "./services/exchangeRates";
 import type { JobLedger } from "./services/jobLedger";
-import { completedReviews, flushPending, initLangSmith } from "./services/langsmith";
+import {
+  completedReviews,
+  flushPending,
+  initLangSmith,
+  LangSmithTraceUnavailableError,
+} from "./services/langsmith";
 import { createNotionClient, type ResilientNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
-import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./services/notionLedgerBackfill";
+import { backfillJobLedger, isJobLedgerReadyForScrape } from "./services/notionLedgerBackfill";
 import { sendRunReport } from "./services/slack";
 
-export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" };
+export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("scrape") }),
+  z.object({ kind: z.literal("reconcile") }),
+  z.object({ kind: z.literal("backfill") }),
+]);
+export type JobFinderRunMode = z.infer<typeof JobFinderRunModeSchema>;
 
 const log = logger.child({ component: "main" });
+const PIPELINE_WORKERS = 8;
 
 export async function runJobFinder({
   mode,
@@ -43,6 +55,15 @@ export async function runJobFinder({
       const stats = await reconcile(notion, config.notionDatabaseId);
       const durationMs = Date.now() - startTime;
       log.info({ stats, durationMs }, "reconciliation complete");
+      return;
+    }
+    case "backfill": {
+      const result = await backfillJobLedger({
+        client: notion,
+        databaseId: config.notionDatabaseId,
+        ledger,
+      });
+      log.info({ ...result, durationMs: Date.now() - startTime }, "job ledger backfill complete");
       return;
     }
     case "scrape":
@@ -72,8 +93,8 @@ async function scrapeJobs({
     openrouterApiKey: config.openrouterApiKey,
   });
 
-  if (!(await ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION))) {
-    throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
+  if (!(await isJobLedgerReadyForScrape(ledger))) {
+    throw new Error("Backfill the job ledger before scraping");
   }
 
   await replayPendingReviewProjections(ledger);
@@ -105,17 +126,14 @@ async function scrapeJobs({
     config.domains.map((domain) => ({ keyword, domain })),
   );
 
-  log.info({ pairs: searchPairs.length }, "phase 1: searching");
-
-  const urlMap = new Map<string, string>();
-
+  log.info({ pairs: searchPairs.length }, "searching");
   const searchResults = await Promise.allSettled(
     searchPairs.map(({ keyword, domain }) =>
       jinaSearchSemaphore.run(async () => {
         const urls = await jinaBreaker.run(() =>
           withRetry(() => searchJobs(keyword, domain, config), {
             shouldRetry: isRetryableJina,
-            onRetry: (a) => log.warn({ keyword, domain, attempt: a }, "search retry"),
+            onRetry: (attempt) => log.warn({ keyword, domain, attempt }, "search retry"),
           }),
         );
         log.info({ domain, keyword, urls: urls.length }, "search complete");
@@ -124,39 +142,21 @@ async function scrapeJobs({
     ),
   );
 
+  const urlMap = new Map<string, string>();
   let searchErrors = 0;
   for (const result of searchResults) {
     if (result.status === "fulfilled") {
       for (const url of result.value.urls) {
-        if (!urlMap.has(url)) {
-          urlMap.set(url, result.value.keyword);
-        }
+        if (!urlMap.has(url)) urlMap.set(url, result.value.keyword);
       }
     } else {
       log.error({ err: result.reason }, "search failed");
       searchErrors++;
     }
   }
-
   log.info({ uniqueUrls: urlMap.size, searchErrors }, "all searches complete");
 
-  const seenUrls = new Set<string>();
-
-  log.info({ urls: urlMap.size }, "phase 2: processing urls");
-
-  const processResults = await Promise.allSettled(
-    Array.from(urlMap.entries()).map(([url, keyword]) =>
-      processUrl(url, keyword, {
-        notion,
-        config,
-        ledger,
-        recentAppCompanies: cache.recentAppCompanies,
-        seenUrls,
-        filters,
-      }),
-    ),
-  );
-
+  const urls = Array.from(urlMap.entries());
   const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
@@ -166,17 +166,42 @@ async function scrapeJobs({
     duplicated: 0,
     errored: 0,
   };
+  let nextUrl = 0;
+  const pipelineState: { fatalError?: LangSmithTraceUnavailableError } = {};
 
-  for (const result of processResults) {
-    if (result.status === "fulfilled") {
-      const key = result.value as ProcessResult;
-      if (key === "companyApplied") stats.companyApplied++;
-      else if (key in stats) stats[key as keyof typeof stats]++;
-    } else {
-      log.error({ err: result.reason }, "url processing failed");
-      stats.errored++;
-    }
-  }
+  await Promise.all(
+    Array.from({ length: Math.min(PIPELINE_WORKERS, urls.length) }, async () => {
+      while (!pipelineState.fatalError && nextUrl < urls.length) {
+        const entry = urls[nextUrl++];
+        if (!entry) return;
+        const [url, keyword] = entry;
+        try {
+          const result = await processUrl(url, keyword, {
+            config,
+            ledger,
+            recentAppCompanies: cache.recentAppCompanies,
+            filters,
+          });
+          recordProcessResult(stats, result);
+        } catch (error) {
+          if (error instanceof LangSmithTraceUnavailableError) {
+            pipelineState.fatalError ??= error;
+            return;
+          }
+          log.error({ url, err: error }, "url processing failed");
+          stats.errored++;
+        }
+      }
+    }),
+  );
+
+  if (pipelineState.fatalError) throw pipelineState.fatalError;
+
+  await replayPendingNotionProjections({
+    ledger,
+    notion,
+    databaseId: config.notionDatabaseId,
+  });
 
   const postReconcileStats = await reconcile(notion, config.notionDatabaseId, "Post-scrape");
 
@@ -200,5 +225,13 @@ async function scrapeJobs({
       },
       durationMs,
     );
+  }
+}
+
+function recordProcessResult(stats: ScrapeStats, result: ProcessResult): void {
+  if (result === "companyApplied") {
+    stats.companyApplied++;
+  } else if (result in stats) {
+    stats[result as keyof ScrapeStats]++;
   }
 }

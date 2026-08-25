@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,7 +61,7 @@ describe("replayPendingNotionProjections", () => {
       await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
 
       expect(creates).toBe(1);
-      expect(await ledger.listPendingNotionProjections()).toEqual([]);
+      expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
     } finally {
       await ledger?.close();
       ledger = undefined;
@@ -90,14 +90,14 @@ describe("replayPendingNotionProjections", () => {
     await expect(
       replayPendingNotionProjections({ ledger, notion, databaseId: "database" }),
     ).rejects.toThrow("Could not replay all pending Notion projections");
-    expect(await ledger.listPendingNotionProjections()).toHaveLength(1);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toHaveLength(1);
 
     await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
     await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
 
     expect(creates).toBe(1);
     expect(queries).toBe(2);
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
   });
 
   test("keeps pending state when the exact URL query fails", async () => {
@@ -113,21 +113,49 @@ describe("replayPendingNotionProjections", () => {
       replayPendingNotionProjections({ ledger, notion, databaseId: "database" }),
     ).rejects.toThrow("Could not replay all pending Notion projections");
 
-    expect(await ledger.listPendingNotionProjections()).toEqual([projection]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([projection]);
+  });
+
+  test("drains Notion projections in bounded pages", async () => {
+    ledger = createSqliteJobLedger(":memory:");
+    for (let index = 0; index < 11; index++) {
+      await seedProjection(ledger, {
+        ...job,
+        title: `Senior Engineer ${index}`,
+        url: `https://jobs.example.com/role/${index}`,
+      });
+    }
+    const listPending = spyOn(ledger, "nextPendingNotionProjectionBatch");
+    let creates = 0;
+    const notion = notionClient({
+      create: async () => {
+        creates++;
+        return { object: "page", id: `page-${creates}` };
+      },
+    });
+
+    await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
+
+    expect(creates).toBe(11);
+    expect(listPending.mock.calls).toEqual([[], [], []]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
   });
 });
 
-async function seedProjection(ledger: ReturnType<typeof createSqliteJobLedger>): Promise<void> {
+async function seedProjection(
+  ledger: ReturnType<typeof createSqliteJobLedger>,
+  queuedJob: JobListing = job,
+): Promise<void> {
   await ledger.recordProcessedJob({
-    rawUrl: job.url,
-    company: job.company,
-    title: job.title,
+    rawUrl: queuedJob.url,
+    company: queuedJob.company,
+    title: queuedJob.title,
     outcome: "inserted",
     processedAt: projection.createdAt,
     projections: {
       kind: "notion",
       notion: {
-        job: projection.job,
+        job: queuedJob,
         status: projection.status,
         createdAt: projection.createdAt,
       },

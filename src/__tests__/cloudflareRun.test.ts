@@ -46,6 +46,17 @@ describe("Worker run routes", () => {
     );
     expect(accepted.status).toBe(202);
     expect(created).toEqual([{ id: "manual-1", params: { mode: { kind: "reconcile" } } }]);
+
+    const backfill = await handleWorkerRequest(
+      new Request("https://worker.example/runs", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ runId: "backfill-1", mode: { kind: "backfill" } }),
+      }),
+      environment,
+    );
+    expect(backfill.status).toBe(202);
+    expect(created.at(-1)).toEqual({ id: "backfill-1", params: { mode: { kind: "backfill" } } });
   });
 
   test("returns the requested ID when createBatch finds an existing Workflow", async () => {

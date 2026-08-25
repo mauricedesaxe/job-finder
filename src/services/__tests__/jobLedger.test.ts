@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
 import type { PendingNotionProjection } from "../jobLedger";
+import {
+  isJobLedgerReadyForScrape,
+  NOTION_JOB_LEDGER_BACKFILL_MIGRATION,
+} from "../notionLedgerBackfill";
 import { createSqliteJobLedger } from "../sqliteJobLedger";
 import {
   JOB_LEDGER_CONFORMANCE_RESULT,
@@ -15,6 +19,17 @@ test("preserves the job ledger contract in SQLite", async () => {
   const ledger = createSqliteJobLedger(":memory:");
   try {
     expect(JOB_LEDGER_CONFORMANCE_RESULT).toEqual(await runJobLedgerConformanceScenario(ledger));
+  } finally {
+    await ledger.close();
+  }
+});
+
+test("requires the Notion backfill before SQLite scraping", async () => {
+  const ledger = createSqliteJobLedger(":memory:");
+  try {
+    expect(await isJobLedgerReadyForScrape(ledger)).toBe(false);
+    await ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, "2026-08-25T00:00:00.000Z");
+    expect(await isJobLedgerReadyForScrape(ledger)).toBe(true);
   } finally {
     await ledger.close();
   }
@@ -78,7 +93,9 @@ test("rejects malformed stored projections in SQLite", async () => {
 
   const reopenedLedger = createSqliteJobLedger(databasePath);
   try {
-    await expect(reopenedLedger.listPendingNotionProjections()).rejects.toBeInstanceOf(z.ZodError);
+    await expect(reopenedLedger.nextPendingNotionProjectionBatch()).rejects.toBeInstanceOf(
+      z.ZodError,
+    );
   } finally {
     await reopenedLedger.close();
     await rm(directory, { recursive: true, force: true });
@@ -122,7 +139,7 @@ test("rolls back the processed job when its projection cannot be stored", async 
       }),
     ).rejects.toThrow("projection write failed");
     expect(await ledger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
-    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.nextPendingNotionProjectionBatch()).toEqual([]);
     expect(await ledger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await ledger.close();
@@ -171,7 +188,7 @@ test("rolls back terminal state and both outboxes when review storage fails", as
       }),
     ).rejects.toThrow("review projection write failed");
     expect(await localLedger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
-    expect(await localLedger.listPendingNotionProjections()).toEqual([]);
+    expect(await localLedger.nextPendingNotionProjectionBatch()).toEqual([]);
     expect(await localLedger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await localLedger.close();

@@ -1,6 +1,7 @@
 import { ZodError } from "zod/v4";
 import type { D1DatabaseBinding } from "../../d1";
 import { createD1JobLedger } from "../../d1JobLedger";
+import { isJobLedgerReadyForScrape } from "../../notionLedgerBackfill";
 import { createD1JobFinderRunLock } from "../../runLock";
 import { runJobLedgerConformanceScenario } from "../jobLedgerConformance";
 
@@ -25,6 +26,10 @@ export default {
         result,
         migration,
       });
+    }
+
+    if (path === "/ready") {
+      return Response.json({ ready: await isJobLedgerReadyForScrape(ledger) });
     }
 
     if (path === "/run-lock") {
@@ -87,7 +92,7 @@ export default {
         .run();
 
       try {
-        await ledger.listPendingNotionProjections();
+        await ledger.nextPendingNotionProjectionBatch();
         return Response.json({ rejected: false });
       } catch (error) {
         return Response.json({ rejected: error instanceof ZodError });

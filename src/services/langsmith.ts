@@ -1,6 +1,7 @@
 import type { AIMessage } from "@langchain/core/messages";
 import { type Runnable, RunnableBinding, type RunnableConfig } from "@langchain/core/runnables";
-import { pull } from "langchain/hub/node";
+import { ChatOpenAI } from "@langchain/openai";
+import { pull } from "langchain/hub";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
@@ -41,6 +42,14 @@ export interface TraceResult<T> {
   data: T;
   usage?: { input: number; output: number; total: number };
   afterTraceComplete?: () => Promise<void>;
+}
+
+export class LangSmithTraceUnavailableError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`LangSmith trace was not accepted: ${detail}`, { cause });
+    this.name = "LangSmithTraceUnavailableError";
+  }
 }
 
 type PromptRunnable = Runnable<Record<string, string>, AIMessage>;
@@ -115,6 +124,7 @@ async function pullPrompt(input: {
     apiKey: input.config.apiKey,
     apiUrl: input.config.endpoint,
     includeModel: true,
+    modelClass: ChatOpenAI,
     secrets: { OPENAI_API_KEY: input.config.openrouterApiKey },
     secretsFromEnv: false,
   });
@@ -297,7 +307,11 @@ export async function traced<T>(
         requireAccepted: async () => {
           const startedTraceId = traceId;
           if (!startedTraceId) throw new Error("LangSmith trace did not start");
-          await requireAcceptedTrace(configured.client, startedTraceId);
+          try {
+            await requireAcceptedTrace(configured.client, startedTraceId);
+          } catch (error) {
+            throw new LangSmithTraceUnavailableError(error);
+          }
           return startedTraceId;
         },
       });

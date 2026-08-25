@@ -6,6 +6,7 @@ import {
   getPromptCommitHash,
   getPromptReleaseTag,
   initLangSmith,
+  LangSmithTraceUnavailableError,
   shutdownLangSmith,
   traced,
 } from "../langsmith";
@@ -158,13 +159,64 @@ describe("LangSmith trace acceptance", () => {
           recorded = true;
           return { data: "inserted" };
         }),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(LangSmithTraceUnavailableError);
 
       expect(recorded).toBe(false);
       expect(consoleError).toHaveBeenCalled();
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  test("keeps concurrent child runs under one root trace", async () => {
+    const startedRuns: Array<Record<string, unknown>> = [];
+    const client = traceClient((url, init) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        const body = init?.body;
+        const text =
+          typeof body === "string"
+            ? body
+            : body instanceof Uint8Array
+              ? new TextDecoder().decode(body)
+              : "";
+        const batch = JSON.parse(text) as { post?: Array<Record<string, unknown>> };
+        startedRuns.push(...(batch.post ?? []));
+        return new Response(null, { status: 202 });
+      }
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        name: "evaluation_fixture",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await traced({ name: "evaluation_fixture" }, async ({ requireAccepted }) => {
+      await requireAccepted();
+      await Promise.all([
+        traced({ name: "filter" }, async () => ({ data: "filter" })),
+        traced({ name: "profile" }, async () => ({ data: "profile" })),
+      ]);
+      return { data: "complete" };
+    });
+    await client.flush();
+
+    const uniqueRuns = [...new Map(startedRuns.map((run) => [run.id, run])).values()];
+    const roots = uniqueRuns.filter((run) => run.parent_run_id == null);
+    expect(roots).toHaveLength(1);
+    const root = roots[0];
+    expect(root?.name).toBe("evaluation_fixture");
+    expect(new Set(uniqueRuns.map((run) => run.trace_id))).toEqual(new Set([root?.id]));
+    expect(uniqueRuns.filter((run) => run.id !== root?.id).every((run) => run.parent_run_id)).toBe(
+      true,
+    );
   });
 
   test("persists work inside the parent after trace acceptance", async () => {

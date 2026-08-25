@@ -1,5 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { withNonRetryingNotionCreate, withNotionResilience } from "../notion/client";
+import {
+  createNotionClient,
+  withNonRetryingNotionCreate,
+  withNotionResilience,
+} from "../notion/client";
 
 function notionError(status: number): Error {
   return Object.assign(new Error(`notion ${status}`), { status });
@@ -41,5 +45,22 @@ describe("withNotionResilience", () => {
     });
     await expect(run).rejects.toMatchObject({ status: 400 });
     expect(calls).toBe(1);
+  });
+});
+
+describe("createNotionClient", () => {
+  test("uses the runtime fetch implementation", async () => {
+    const runtimeFetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ object: "database", id: "database-id" }),
+    );
+
+    try {
+      const client = createNotionClient("token");
+      await client.databases.retrieve({ database_id: "database-id" });
+
+      expect(runtimeFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      runtimeFetch.mockRestore();
+    }
   });
 });

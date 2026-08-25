@@ -29,6 +29,7 @@ import {
   flushPending,
   initLangSmith,
   shutdownLangSmith,
+  traced,
 } from "../src/services/langsmith";
 import { createNotionClient, updateJobStatus } from "../src/services/notion";
 import type { JobListing } from "../src/types";
@@ -114,7 +115,13 @@ async function evaluateOne(item: ToReview): Promise<{ pass: boolean; reason: str
     return { pass: false, reason: structural.reason, stage: "structural", atsSource };
   }
 
-  const evaluation: JobEvaluation = await evaluateJob(job);
+  const evaluation: JobEvaluation = await traced(
+    { name: "reevaluate_job", metadata: { url: item.url } },
+    async ({ requireAccepted }) => {
+      await requireAccepted();
+      return { data: await evaluateJob(job) };
+    },
+  );
   return {
     pass: evaluation.pass,
     reason: evaluation.reason,

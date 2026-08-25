@@ -77,6 +77,19 @@ export async function evaluateJob(
     evaluate?: typeof evaluateSingle;
   },
 ): Promise<JobEvaluation> {
+  return traced({ name: "evaluate_job", metadata: { url: job.url } }, async () => ({
+    data: await evaluateCriteria(job, deps),
+  }));
+}
+
+async function evaluateCriteria(
+  job: JobListing,
+  deps?: {
+    filters?: EvaluationCriteria[];
+    profiles?: EvaluationCriteria[];
+    evaluate?: typeof evaluateSingle;
+  },
+): Promise<JobEvaluation> {
   const filters = deps?.filters ?? getEvaluationFilters();
   const profiles = deps?.profiles ?? EVALUATION_PROFILES;
   const evaluate = deps?.evaluate ?? evaluateSingle;

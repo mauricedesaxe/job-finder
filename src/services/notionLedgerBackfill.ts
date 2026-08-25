@@ -37,6 +37,10 @@ export interface BackfillJobLedgerResult {
   migrationName: string;
 }
 
+export function isJobLedgerReadyForScrape(ledger: JobLedger): Promise<boolean> {
+  return ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION);
+}
+
 export async function backfillJobLedger({
   client,
   databaseId,
