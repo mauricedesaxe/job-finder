@@ -5,7 +5,7 @@ import { pull } from "langchain/hub";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
-import { Semaphore, withRetry } from "../concurrency";
+import { sleep, withRetry } from "../concurrency";
 import { logger } from "../logger";
 import type { CompletedReview } from "../review";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
@@ -13,7 +13,14 @@ import { createReviewQueue } from "./reviewQueue";
 
 const log = logger.child({ component: "langsmith" });
 const TRACE_READ_RETRY_POLICY = { maxRetries: 6, baseDelayMs: 100 };
-const traceReadSemaphore = new Semaphore(2);
+const TRACE_READ_START_INTERVAL_MS = 2_100;
+const TRACE_RUN_PATH =
+  /^\/(?:api\/v1\/)?runs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface TraceReadScheduler {
+  now(): number;
+  sleep(delayMs: number): Promise<void>;
+}
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -80,6 +87,8 @@ interface TraceConfigState {
 
 export interface LangSmithDependencies {
   client?: Client;
+  fetchImplementation?: typeof fetch;
+  traceReadScheduler?: TraceReadScheduler;
   resolvePrompt?: (input: {
     client: Client;
     config: LangSmithConfig;
@@ -94,6 +103,47 @@ export interface LangSmithDependencies {
 }
 
 let state: TraceConfigState | undefined;
+
+function createTraceReadFetch(
+  endpoint: string,
+  fetchImplementation: typeof fetch,
+  scheduler: TraceReadScheduler = {
+    now: Date.now,
+    sleep,
+  },
+): typeof fetch {
+  const endpointOrigin = new URL(endpoint).origin;
+  let nextStartAt = scheduler.now();
+  let startQueue = Promise.resolve();
+  const pacedFetch = async (input: string | URL | Request, init?: RequestInit) => {
+    if (!isTraceReadRequest(endpointOrigin, input, init)) {
+      return fetchImplementation(input, init);
+    }
+
+    const start = startQueue.then(async () => {
+      const delayMs = nextStartAt - scheduler.now();
+      if (delayMs > 0) await scheduler.sleep(delayMs);
+      nextStartAt = scheduler.now() + TRACE_READ_START_INTERVAL_MS;
+    });
+    startQueue = start.catch(() => {});
+    await start;
+    return fetchImplementation(input, init);
+  };
+  return Object.assign(pacedFetch, {
+    preconnect: fetchImplementation.preconnect?.bind(fetchImplementation) ?? (() => {}),
+  });
+}
+
+function isTraceReadRequest(
+  endpointOrigin: string,
+  input: string | URL | Request,
+  init?: RequestInit,
+): boolean {
+  const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+  if (method.toUpperCase() !== "GET") return false;
+  const url = new URL(input instanceof Request ? input.url : input);
+  return url.origin === endpointOrigin && TRACE_RUN_PATH.test(url.pathname);
+}
 
 const ReleaseTagsSchema = z.array(z.object({ tag_name: z.string(), commit_hash: z.string() }));
 
@@ -137,7 +187,17 @@ export async function initLangSmith(
   deps: LangSmithDependencies = {},
 ): Promise<void> {
   const ownsClient = deps.client === undefined;
-  const client = deps.client ?? new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
+  const client =
+    deps.client ??
+    new Client({
+      apiUrl: cfg.endpoint,
+      apiKey: cfg.apiKey,
+      fetchImplementation: createTraceReadFetch(
+        cfg.endpoint,
+        deps.fetchImplementation ?? globalThis.fetch,
+        deps.traceReadScheduler,
+      ),
+    });
   try {
     const resolve = deps.resolvePrompt ?? resolvePrompt;
     const load = deps.pullPrompt ?? pullPrompt;
@@ -366,7 +426,7 @@ export async function traced<T>(
 
 async function requireAcceptedTrace(client: Client, traceId: string): Promise<void> {
   await client.flush();
-  await withRetry(() => traceReadSemaphore.run(() => client.readRun(traceId)), {
+  await withRetry(() => client.readRun(traceId), {
     ...TRACE_READ_RETRY_POLICY,
     shouldRetry: isMissingTrace,
   });
@@ -379,7 +439,7 @@ async function requireCompletedTrace(
   await client.flush();
   return withRetry(
     async () => {
-      const trace = await traceReadSemaphore.run(() => client.readRun(traceId));
+      const trace = await client.readRun(traceId);
       if (!trace.end_time) {
         throw Object.assign(new Error("LangSmith trace is not complete"), {
           code: "TRACE_INCOMPLETE",
