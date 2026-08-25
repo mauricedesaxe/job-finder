@@ -5,7 +5,7 @@ import { pull } from "langchain/hub";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
 import { z } from "zod/v4";
-import { withRetry } from "../concurrency";
+import { Semaphore, withRetry } from "../concurrency";
 import { logger } from "../logger";
 import type { CompletedReview } from "../review";
 import { PROMPT_NAMES, type PromptName, promptRef } from "./promptRegistry";
@@ -13,6 +13,7 @@ import { createReviewQueue } from "./reviewQueue";
 
 const log = logger.child({ component: "langsmith" });
 const TRACE_READ_RETRY_POLICY = { maxRetries: 6, baseDelayMs: 100 };
+const traceReadSemaphore = new Semaphore(2);
 
 export interface LangSmithConfig {
   apiKey: string;
@@ -365,7 +366,7 @@ export async function traced<T>(
 
 async function requireAcceptedTrace(client: Client, traceId: string): Promise<void> {
   await client.flush();
-  await withRetry(() => client.readRun(traceId), {
+  await withRetry(() => traceReadSemaphore.run(() => client.readRun(traceId)), {
     ...TRACE_READ_RETRY_POLICY,
     shouldRetry: isMissingTrace,
   });
@@ -378,7 +379,7 @@ async function requireCompletedTrace(
   await client.flush();
   return withRetry(
     async () => {
-      const trace = await client.readRun(traceId);
+      const trace = await traceReadSemaphore.run(() => client.readRun(traceId));
       if (!trace.end_time) {
         throw Object.assign(new Error("LangSmith trace is not complete"), {
           code: "TRACE_INCOMPLETE",

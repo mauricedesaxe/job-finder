@@ -293,6 +293,43 @@ describe("LangSmith trace acceptance", () => {
     ]);
   });
 
+  test("limits concurrent trace reads while all accepted work completes", async () => {
+    const client = traceClient((url) =>
+      url.endsWith("/info")
+        ? Response.json({ batch_ingest_config: { use_multipart_endpoint: false } })
+        : new Response(null, { status: 202 }),
+    );
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    let accepted = 0;
+    const readRun = spyOn(client, "readRun").mockImplementation(async (traceId) => {
+      activeReads++;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await Bun.sleep(10);
+      activeReads--;
+      return { id: traceId, name: "process_job", run_type: "chain", inputs: {} };
+    });
+    await initTestLangSmith(client);
+
+    try {
+      await Promise.all(
+        Array.from({ length: 6 }, (_, index) =>
+          traced({ name: "process_job" }, async ({ requireAccepted }) => {
+            await requireAccepted();
+            accepted++;
+            return { data: index };
+          }),
+        ),
+      );
+
+      expect(maxActiveReads).toBe(2);
+      expect(activeReads).toBe(0);
+      expect(accepted).toBe(6);
+    } finally {
+      readRun.mockRestore();
+    }
+  });
+
   test("fails immediately when a trace read returns a non-404 error", async () => {
     const events: string[] = [];
     const client = traceClient((url) => {
