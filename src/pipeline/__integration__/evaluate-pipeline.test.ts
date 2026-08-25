@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { basename } from "node:path";
 import { z } from "zod/v4";
 import { Semaphore } from "../../concurrency";
-import { initLangSmith, shutdownLangSmith } from "../../services/langsmith";
+import { initLangSmith, shutdownLangSmith, traced } from "../../services/langsmith";
 import type { JobListing } from "../../types";
 import { evaluateJob, type JobEvaluation } from "../evaluate";
 import { structuralFilter } from "../structuralFilter";
@@ -11,7 +11,9 @@ import { collectFixtures, loadFixture } from "./helpers";
 async function evaluateFullPipeline(job: JobListing): Promise<JobEvaluation> {
   const structural = structuralFilter(job);
   if (!structural.pass) return { pass: false, reason: structural.reason };
-  return evaluateJob(job);
+  return traced({ name: "evaluate_fixture", metadata: { fixture_url: job.url } }, async () => ({
+    data: await evaluateJob(job),
+  }));
 }
 
 const IntegrationConfigSchema = z.object({
