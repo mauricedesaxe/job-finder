@@ -28,6 +28,12 @@ const PendingProjectionSchema = z.object({
   createdAt: z.string(),
 });
 
+const PendingReviewProjectionSchema = z.object({
+  sourceKey: z.string(),
+  traceId: z.string(),
+  createdAt: z.string(),
+});
+
 const ProcessedJobSchema = z.object({
   sourceKey: z.string(),
   rawUrl: z.string().nullable(),
@@ -60,6 +66,13 @@ const ConformanceResultSchema = z.object({
   pendingAfterOrdinaryUpsert: z.array(PendingProjectionSchema),
   pendingAfterComplete: z.array(PendingProjectionSchema),
   duplicatePending: z.array(PendingProjectionSchema),
+  pendingReviewBeforeComplete: z.array(PendingReviewProjectionSchema),
+  pendingReviewAfterComplete: z.array(PendingReviewProjectionSchema),
+  projectionKinds: z.object({
+    none: z.literal("none"),
+    notion: z.literal("notion"),
+    notionAndReview: z.literal("notion-and-review"),
+  }),
 });
 
 const ScenarioResponseSchema = z.object({
@@ -71,7 +84,37 @@ const ScenarioResponseSchema = z.object({
 });
 
 const MalformedResponseSchema = z.object({ rejected: z.boolean() });
-const AtomicResponseSchema = z.object({ rejected: z.boolean(), rolledBack: z.boolean() });
+const CountRowSchema = z.object({ count: z.number() });
+const AtomicResponseSchema = z.object({
+  rejected: z.literal(true),
+  counts: z.tuple([CountRowSchema, CountRowSchema, CountRowSchema]),
+});
+const AcquiredLockSchema = z.object({
+  kind: z.literal("acquired"),
+  workflowInstanceId: z.string(),
+  acquiredAt: z.string(),
+});
+const ContendedLockSchema = z.object({
+  kind: z.literal("contended"),
+  workflowInstanceId: z.string(),
+  acquiredAt: z.string(),
+});
+const RunLockResponseSchema = z.object({
+  acquired: AcquiredLockSchema,
+  contended: ContendedLockSchema,
+  wrongRelease: z.literal(false),
+  released: z.literal(true),
+  reacquired: AcquiredLockSchema,
+});
+const ConcurrentRunLockResponseSchema = z.object({
+  results: z
+    .array(z.discriminatedUnion("kind", [AcquiredLockSchema, ContendedLockSchema]))
+    .length(2),
+});
+const SameOwnerRunLockResponseSchema = z.object({
+  first: AcquiredLockSchema,
+  second: AcquiredLockSchema,
+});
 
 let harness: TestHarness;
 let worker: WorkerHandle;
@@ -104,12 +147,73 @@ test("runs the job ledger adapter in workerd", async () => {
   });
 }, 15_000);
 
-test("records a processed job and projection atomically in D1", async () => {
-  const response = await worker.fetch("/atomic-projection");
+test("acquires, contends, and releases the singleton D1 run lock", async () => {
+  const response = await worker.fetch("/run-lock");
   expect(response.status).toBe(200);
   const body: unknown = await response.json();
-  expect(AtomicResponseSchema.parse(body)).toEqual({ rejected: true, rolledBack: true });
+  expect(RunLockResponseSchema.parse(body)).toEqual({
+    acquired: {
+      kind: "acquired",
+      workflowInstanceId: "run-1",
+      acquiredAt: "2026-08-24T22:00:00.000Z",
+    },
+    contended: {
+      kind: "contended",
+      workflowInstanceId: "run-1",
+      acquiredAt: "2026-08-24T22:00:00.000Z",
+    },
+    wrongRelease: false,
+    released: true,
+    reacquired: {
+      kind: "acquired",
+      workflowInstanceId: "run-2",
+      acquiredAt: "2026-08-24T22:02:00.000Z",
+    },
+  });
 }, 15_000);
+
+test("returns one durable owner for concurrent D1 run-lock acquisition", async () => {
+  const response = await worker.fetch("/run-lock-concurrent");
+  expect(response.status).toBe(200);
+  const body: unknown = await response.json();
+  const { results } = ConcurrentRunLockResponseSchema.parse(body);
+  const acquired = results.filter((result) => result.kind === "acquired");
+  const contended = results.filter((result) => result.kind === "contended");
+  expect(acquired).toHaveLength(1);
+  expect(contended).toHaveLength(1);
+  expect(contended[0]?.workflowInstanceId).toBe(acquired[0]?.workflowInstanceId);
+  expect(contended[0]?.acquiredAt).toBe(acquired[0]?.acquiredAt);
+}, 15_000);
+
+test("reacquires the D1 run lock idempotently for the same owner", async () => {
+  const response = await worker.fetch("/run-lock-same-owner");
+  expect(response.status).toBe(200);
+  const body: unknown = await response.json();
+  expect(SameOwnerRunLockResponseSchema.parse(body)).toEqual({
+    first: {
+      kind: "acquired",
+      workflowInstanceId: "same-owner",
+      acquiredAt: "2026-08-24T22:20:00.000Z",
+    },
+    second: {
+      kind: "acquired",
+      workflowInstanceId: "same-owner",
+      acquiredAt: "2026-08-24T22:20:00.000Z",
+    },
+  });
+}, 15_000);
+
+for (const failedProjection of ["notion", "review"] as const) {
+  test(`rolls back all D1 writes when the ${failedProjection} outbox insert fails`, async () => {
+    const response = await worker.fetch(`/atomic-projection/${failedProjection}`);
+    expect(response.status).toBe(200);
+    const body: unknown = await response.json();
+    expect(AtomicResponseSchema.parse(body)).toEqual({
+      rejected: true,
+      counts: [{ count: 0 }, { count: 0 }, { count: 0 }],
+    });
+  }, 15_000);
+}
 
 test("rejects malformed stored outcomes at the D1 boundary", async () => {
   const response = await worker.fetch("/malformed-outcome");

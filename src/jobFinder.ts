@@ -6,6 +6,7 @@ import { replayPendingNotionProjections } from "./pipeline/notionProjection";
 import { type ProcessResult, processUrl, type ScrapeStats } from "./pipeline/processUrl";
 import { prune } from "./pipeline/prune";
 import { reconcile } from "./pipeline/reconcile";
+import { replayPendingReviewProjections } from "./pipeline/reviewProjection";
 import { searchJobs } from "./pipeline/search";
 import { runPreflight } from "./preflight";
 import { replayCompletedReviewCompanyBlocks } from "./review";
@@ -74,6 +75,8 @@ async function scrapeJobs({
   if (!(await ledger.hasMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION))) {
     throw new Error("Run bun run backfill:job-ledger before scraping with the SQLite ledger");
   }
+
+  await replayPendingReviewProjections(ledger);
 
   await replayPendingNotionProjections({
     ledger,

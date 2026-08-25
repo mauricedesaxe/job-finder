@@ -93,3 +93,21 @@ export const LIST_PENDING_NOTION_PROJECTIONS_SQL = `
 export const MARK_NOTION_PROJECTION_COMPLETE_SQL = `
   DELETE FROM pending_notion_projections WHERE source_key = ?
 `;
+
+export const RECORD_PENDING_REVIEW_PROJECTION_SQL = `
+  INSERT INTO pending_review_projections (source_key, trace_id, created_at)
+  VALUES (?, ?, ?)
+  ON CONFLICT(source_key) DO UPDATE SET
+    trace_id = excluded.trace_id,
+    created_at = excluded.created_at
+`;
+
+export const LIST_PENDING_REVIEW_PROJECTIONS_SQL = `
+  SELECT source_key, trace_id, created_at
+  FROM pending_review_projections
+  ORDER BY created_at, source_key
+`;
+
+export const MARK_REVIEW_PROJECTION_COMPLETE_SQL = `
+  DELETE FROM pending_review_projections WHERE source_key = ?
+`;

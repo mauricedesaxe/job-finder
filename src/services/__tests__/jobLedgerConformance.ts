@@ -3,6 +3,7 @@ import type {
   JobLedger,
   NotionBackfillStats,
   PendingNotionProjection,
+  PendingReviewProjection,
   ProcessedJob,
 } from "../jobLedger";
 
@@ -21,6 +22,13 @@ interface JobLedgerConformanceResult {
   pendingAfterOrdinaryUpsert: PendingNotionProjection[];
   pendingAfterComplete: PendingNotionProjection[];
   duplicatePending: PendingNotionProjection[];
+  pendingReviewBeforeComplete: PendingReviewProjection[];
+  pendingReviewAfterComplete: PendingReviewProjection[];
+  projectionKinds: {
+    none: "none";
+    notion: "notion";
+    notionAndReview: "notion-and-review";
+  };
 }
 
 export const JOB_LEDGER_CONFORMANCE_RESULT: JobLedgerConformanceResult = {
@@ -101,12 +109,25 @@ export const JOB_LEDGER_CONFORMANCE_RESULT: JobLedgerConformanceResult = {
   ],
   pendingAfterComplete: [],
   duplicatePending: [],
+  pendingReviewBeforeComplete: [
+    {
+      sourceKey: "source:pending",
+      traceId: "trace-pending",
+      createdAt: "2026-08-22T14:00:00.000Z",
+    },
+  ],
+  pendingReviewAfterComplete: [],
+  projectionKinds: {
+    none: "none",
+    notion: "notion",
+    notionAndReview: "notion-and-review",
+  },
 };
 
 export async function runJobLedgerConformanceScenario(
   ledger: JobLedger,
 ): Promise<JobLedgerConformanceResult> {
-  await ledger.recordProcessedJob({
+  const noProjections = await ledger.recordProcessedJob({
     rawUrl: "https://jobs.example.com/role?id=1",
     company: "Exact Co",
     title: "Exact Engineer",
@@ -212,6 +233,34 @@ export async function runJobLedgerConformanceScenario(
   await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T12:00:00.000Z");
   await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T13:00:00.000Z");
 
+  const notionOnly = await ledger.recordProcessedJob({
+    sourceKey: "source:notion-only",
+    rawUrl: "https://jobs.example.com/notion-only",
+    company: "Projection Co",
+    title: "Projection Engineer",
+    outcome: "rejected",
+    projections: {
+      kind: "notion",
+      notion: {
+        job: {
+          title: "Projection Engineer",
+          company: "Projection Co",
+          url: "https://jobs.example.com/notion-only",
+          source: "Example",
+          keywordsMatched: ["engineer"],
+          datePosted: null,
+          dateScraped: "2026-08-22",
+          description: "Notion-only projection",
+          location: "Remote",
+          profile: "Backend",
+        },
+        status: "Auto-Rejected",
+        createdAt: "2026-08-22T13:30:00.000Z",
+      },
+    },
+  });
+  await ledger.markNotionProjectionComplete("source:notion-only");
+
   const pendingProjection: PendingNotionProjection = {
     sourceKey: "source:pending",
     job: {
@@ -229,18 +278,26 @@ export async function runJobLedgerConformanceScenario(
     status: "To Review",
     createdAt: "2026-08-22T14:00:00.000Z",
   };
-  await ledger.recordProcessedJob({
+  const notionAndReview = await ledger.recordProcessedJob({
     sourceKey: pendingProjection.sourceKey,
     rawUrl: pendingProjection.job.url,
     company: pendingProjection.job.company,
     title: pendingProjection.job.title,
     outcome: "inserted",
-    pendingNotionProjection: {
-      job: pendingProjection.job,
-      status: pendingProjection.status,
-      createdAt: pendingProjection.createdAt,
+    projections: {
+      kind: "notion-and-review",
+      notion: {
+        job: pendingProjection.job,
+        status: pendingProjection.status,
+        createdAt: pendingProjection.createdAt,
+      },
+      review: {
+        traceId: "trace-pending",
+        createdAt: pendingProjection.createdAt,
+      },
     },
   });
+  const pendingReviewBeforeComplete = await ledger.listPendingReviewProjections();
   const pendingBeforeComplete = await ledger.listPendingNotionProjections();
   await ledger.recordProcessedJob({
     sourceKey: pendingProjection.sourceKey,
@@ -252,6 +309,8 @@ export async function runJobLedgerConformanceScenario(
   const pendingAfterOrdinaryUpsert = await ledger.listPendingNotionProjections();
   await ledger.markNotionProjectionComplete(pendingProjection.sourceKey);
   const pendingAfterComplete = await ledger.listPendingNotionProjections();
+  await ledger.markReviewProjectionComplete(pendingProjection.sourceKey);
+  const pendingReviewAfterComplete = await ledger.listPendingReviewProjections();
   await ledger.recordProcessedJob({
     sourceKey: "source:duplicate-pending",
     rawUrl: "https://jobs.example.com/duplicate-pending",
@@ -272,6 +331,12 @@ export async function runJobLedgerConformanceScenario(
     missingSourceKeyError = error instanceof Error ? error.message : String(error);
   }
 
+  if (noProjections.kind !== "none") throw new Error("Expected no projections");
+  if (notionOnly.kind !== "notion") throw new Error("Expected a Notion projection");
+  if (notionAndReview.kind !== "notion-and-review") {
+    throw new Error("Expected Notion and review projections");
+  }
+
   return {
     exactJob,
     exactMiss,
@@ -287,5 +352,12 @@ export async function runJobLedgerConformanceScenario(
     pendingAfterOrdinaryUpsert,
     pendingAfterComplete,
     duplicatePending,
+    pendingReviewBeforeComplete,
+    pendingReviewAfterComplete,
+    projectionKinds: {
+      none: noProjections.kind,
+      notion: notionOnly.kind,
+      notionAndReview: notionAndReview.kind,
+    },
   };
 }

@@ -1,5 +1,6 @@
 import type {
   ExcludeCompanyInput,
+  PendingJobProjections,
   ProcessedJobOutcome,
   RecordProcessedJobInput,
 } from "./jobLedger";
@@ -42,6 +43,23 @@ export function createProcessedJobWriteRecord(
     lastProcessedAt: processedAt,
     traceId: input.traceId ?? null,
   };
+}
+
+export function createPendingJobProjections(
+  sourceKey: string,
+  input: RecordProcessedJobInput["projections"],
+): PendingJobProjections {
+  if (!input) return { kind: "none" };
+  switch (input.kind) {
+    case "notion":
+      return { kind: "notion", notion: { sourceKey, ...input.notion } };
+    case "notion-and-review":
+      return {
+        kind: "notion-and-review",
+        notion: { sourceKey, ...input.notion },
+        review: { sourceKey, ...input.review },
+      };
+  }
 }
 
 export function createCompanyExclusionWriteRecord(

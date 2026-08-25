@@ -23,15 +23,40 @@ export interface ProcessedJob {
 }
 
 export interface PendingNotionProjectionInput {
-  sourceKey?: never;
   job: JobListing;
   status: JobStatus;
   createdAt: string;
 }
 
-export type PendingNotionProjection = Omit<PendingNotionProjectionInput, "sourceKey"> & {
+export type PendingNotionProjection = PendingNotionProjectionInput & {
   sourceKey: string;
 };
+
+export interface PendingReviewProjectionInput {
+  traceId: string;
+  createdAt: string;
+}
+
+export type PendingReviewProjection = PendingReviewProjectionInput & {
+  sourceKey: string;
+};
+
+export type PendingJobProjectionInput =
+  | { kind: "notion"; notion: PendingNotionProjectionInput }
+  | {
+      kind: "notion-and-review";
+      notion: PendingNotionProjectionInput;
+      review: PendingReviewProjectionInput;
+    };
+
+export type PendingJobProjections =
+  | { kind: "none" }
+  | { kind: "notion"; notion: PendingNotionProjection }
+  | {
+      kind: "notion-and-review";
+      notion: PendingNotionProjection;
+      review: PendingReviewProjection;
+    };
 
 export interface CompanyExclusion {
   company: string;
@@ -46,7 +71,7 @@ export interface RecordProcessedJobInput {
   outcome: ProcessedJobOutcome;
   processedAt?: string;
   traceId?: string;
-  pendingNotionProjection?: PendingNotionProjectionInput;
+  projections?: PendingJobProjectionInput;
 }
 
 export interface ExcludeCompanyInput {
@@ -67,9 +92,11 @@ export interface JobLedger {
   findByRawUrl(rawUrl: string): Promise<ProcessedJob | null>;
   titlesForCompany(company: string): Promise<string[]>;
   findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
-  recordProcessedJob(input: RecordProcessedJobInput): Promise<PendingNotionProjection | null>;
+  recordProcessedJob(input: RecordProcessedJobInput): Promise<PendingJobProjections>;
   listPendingNotionProjections(): Promise<PendingNotionProjection[]>;
   markNotionProjectionComplete(sourceKey: string): Promise<void>;
+  listPendingReviewProjections(): Promise<PendingReviewProjection[]>;
+  markReviewProjectionComplete(sourceKey: string): Promise<void>;
   excludeCompany(input: ExcludeCompanyInput): Promise<void>;
   notionBackfillStats(): Promise<NotionBackfillStats>;
   markMigration(name: string, completedAt: string): Promise<void>;
