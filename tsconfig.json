@@ -11,6 +11,7 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
+    "types": ["bun", "@cloudflare/workers-types"],
     "noEmit": true,
 
     // Best practices

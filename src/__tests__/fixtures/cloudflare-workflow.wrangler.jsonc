@@ -1,0 +1,34 @@
+{
+  "name": "job-finder-workflow-runtime-test",
+  "main": "./cloudflareWorkflowWorker.ts",
+  "compatibility_date": "2026-08-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "JOB_LEDGER",
+      "database_name": "job-finder-workflow-runtime-test",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "../../../migrations"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "job-finder-production-workflow-test",
+      "binding": "PRODUCTION_WORKFLOW",
+      "class_name": "JobFinderWorkflow"
+    },
+    {
+      "name": "job-finder-workflow-route-test",
+      "binding": "JOB_FINDER_WORKFLOW",
+      "class_name": "RuntimeProofWorkflow"
+    },
+    {
+      "name": "job-finder-workflow-runtime-test",
+      "binding": "RUNTIME_PROOF_WORKFLOW",
+      "class_name": "RuntimeProofWorkflow"
+    }
+  ],
+  "vars": {
+    "MANUAL_TRIGGER_SECRET": "test-secret"
+  }
+}
