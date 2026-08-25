@@ -9,7 +9,7 @@ Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever,
 - A [Jina AI](https://jina.ai) API key — used for searching and scraping job pages
 - An [OpenRouter](https://openrouter.ai) API key — used for evaluating, enriching, and deduplicating jobs via LLM (model configurable via `LLM_MODEL` env var, defaults to `google/gemini-2.5-flash`)
 - A [LangSmith](https://smith.langchain.com) API key — every processed job is traced for inspection; usage and cost replace the old in-run token tracker
-- A [Cloudflare](https://dash.cloudflare.com) account with Workers, Workflows, and D1 enabled
+- A [Cloudflare](https://dash.cloudflare.com) Workers Paid account with Workflows and D1 enabled
 
 ## Notion Database Setup
 
@@ -104,25 +104,44 @@ bun run scrape
 ## Deploy to Cloudflare
 
 1. Authenticate Wrangler with `bunx wrangler login`.
-2. Create the proof and production D1 databases named in `wrangler.jsonc`.
-3. Add each required secret to the production environment:
+2. Create the proof and production D1 databases:
 
    ```bash
-   bunx wrangler secret put NOTION_TOKEN --env production
-   bunx wrangler secret put NOTION_DATABASE_ID --env production
-   bunx wrangler secret put JINA_API_KEY --env production
-   bunx wrangler secret put OPENROUTER_API_KEY --env production
-   bunx wrangler secret put LANGSMITH_API_KEY --env production
-   bunx wrangler secret put MANUAL_TRIGGER_SECRET --env production
+   bunx wrangler d1 create job-finder-ledger-proof
+   bunx wrangler d1 create job-finder-ledger
    ```
 
-4. Add optional `SLACK_WEBHOOK_URL`, `LLM_MODEL`, `LANGSMITH_ENDPOINT`, and `LANGSMITH_PROJECT` secrets when needed.
-5. Run `bun run deploy:cloudflare:proof` for an unscheduled proof deployment.
-6. Run `bun run deploy:cloudflare:production` to apply D1 migrations and deploy the scheduled production Workflow.
+3. Replace each environment's `database_id` in `wrangler.jsonc` with the ID returned by its create command.
+4. Add each required secret to the proof environment, then repeat each command with `--env production`:
 
-The production schedule lives in `wrangler.jsonc`. Manual runs use the authenticated `/runs` API, and `GET /runs/{runId}` reports Workflow status.
+   ```bash
+   bunx wrangler secret put NOTION_TOKEN
+   bunx wrangler secret put NOTION_DATABASE_ID
+   bunx wrangler secret put JINA_API_KEY
+   bunx wrangler secret put OPENROUTER_API_KEY
+   bunx wrangler secret put LANGSMITH_API_KEY
+   bunx wrangler secret put MANUAL_TRIGGER_SECRET
+   ```
 
-> **Note:** Avoid modifying the Notion database while the cron job is running. The scraper caches the database state at startup and concurrent edits can cause pagination errors.
+5. Add optional `SLACK_WEBHOOK_URL`, `LLM_MODEL`, `LANGSMITH_ENDPOINT`, and `LANGSMITH_PROJECT` secrets when needed.
+6. Run `bun run deploy:cloudflare:proof` for an unscheduled proof deployment.
+7. Run `bun run deploy:cloudflare:production` to apply D1 migrations and deploy the scheduled production Workflow.
+
+Set `JOB_FINDER_URL` to the deployed Worker URL. Then start a manual reconcile and check its status with the same run ID:
+
+```bash
+curl --request POST "$JOB_FINDER_URL/runs" \
+  --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET" \
+  --header "Content-Type: application/json" \
+  --data '{"runId":"manual-reconcile","mode":{"kind":"reconcile"}}'
+
+curl "$JOB_FINDER_URL/runs/manual-reconcile" \
+  --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET"
+```
+
+The production schedule lives in `wrangler.jsonc`.
+
+> **Note:** Avoid modifying the Notion database while the scheduled Workflow is running. The scraper caches the database state at startup and concurrent edits can cause pagination errors.
 
 ## Architecture
 
