@@ -81,152 +81,59 @@ Match company from URL path (e.g. `ashbyhq.com/company-name/`) against known blo
 
 ---
 
-## 4. Quick-Eval Summary on Notion Page (P1)
+## 4. Role-Quality Filter Gaps (P1)
 
-**Problem.** Walking the To-Review pile in Notion is slow because each entry only shows scraped title/company/location — Alex still has to click into the page and read the body to decide. The `/walk-to-review` skill produces a six-bullet summary (stack, senior signal, comp, location/remote, culture flags, one-line read) that he found "useful and powerful" for quick triage. We want the same summary auto-generated and surfaced at the top of every To-Review Notion page.
+Surfaced during the 2026-05-01 review pass. Each gap has at least one fixture pinned in `src/pipeline/__integration__/fixtures/evaluate/reject/` so a future prompt edit can be validated with the integration suite. Order matches confidence — top entries are clear edits, lower ones need more thought.
 
-### Generation point — enrichment, NOT eval
-
-Run the summary as part of `enrichJob` (`src/pipeline/enrich.ts`), AFTER the evaluation pipeline has already passed the job. Critical reasons:
-
-- The LLM that decides pass/reject must NOT see a directional summary — that would compound a single LLM read into both the verdict and the human-facing recap.
-- The summary is for human triage of jobs that already qualified. Auto-Rejected jobs don't get a summary.
-- Folds into the existing enrichment LLM call as one additional tool-call field — no extra round-trip, no extra network cost beyond ~150-200 output tokens.
-
-### Notion rendering
-
-Render the summary as a native Notion **callout block** at the very top of the description, then the ATS block, then the Jina body:
-
-```
-[ Notion callout: quick-eval summary ]
-## ATS Structured Data (from <source> API)
-- Primary location: ...
-- All listed locations: ...
-- Workplace type: ...
-- Country (HQ): ...
----
-
-<Jina body>
-```
-
-The callout is visually distinct (colored sidebar), signals "this is the bot's read, not part of the listing", and is the first thing Alex sees on opening the page. The ATS block stays as the second block — it's still useful as audit trail and the LLM reading the page in any future reprocess (e.g. reevaluate-to-review.ts) needs it.
-
-`src/services/notion/builders.ts` produces description blocks today via `descriptionToBlocks`. Add a sibling that emits a `callout` block with the summary content (Notion's `callout` block type accepts an icon, color, and rich_text). Front of the description blocks array.
-
-### Summary content shape
-
-Six bullets, fixed order, every page:
-
-1. **Stack** — one short line listing primary languages/frameworks/infra (e.g., "TS + Node, AWS Lambda, DynamoDB, GraphQL/AppSync"). Strip filler.
-2. **Senior signal** — years required vs Alex's 6+ ("5+ years required ✓" / "10+ years required — over the bar" / "not specified").
-3. **Comp** — figure from the body or "not specified". Currency + range as written.
-4. **Location/remote** — what the body says about workplace and geo. ATS facts already live in the ATS block below; this bullet is the body's framing in human language.
-5. **Culture flags** — short comma-separated list of salient signals (agency, internal-platform, architect-only, hybrid-disclosed-in-benefits, AI-tooling-encouraged, etc.). "none observed" if nothing stands out.
-6. **Read** — *factual*, not directional. Names the salient signals; does NOT say "lean pass" / "lean reject". Reason: the human eye should integrate, the LLM should observe. Example: "AI-engineering at a real product company; agency framing absent; comp not in body" — not "lean pass".
-
-The "Read" line being factual is the FP-risk mitigation: a confidently-wrong directional summary would bias Alex toward the wrong verdict; an observation lets him judge.
-
-### Implementation outline
-
-1. **Schema.** Add `summary: z.string()` to the enrichment Zod schema in `src/pipeline/enrich.ts`. Single string with a stable internal format the Notion builder can parse into a callout block (or six structured fields — choose one; six fields gives stricter testing).
-2. **Prompt.** Extend the existing enrichment prompt with the six-bullet contract + N-shot examples drawn from the walkthrough fixtures already in `src/pipeline/__integration__/fixtures/evaluate/`.
-3. **Notion builder.** Add `summaryToCallout(summary): BlockObjectRequest` in `src/services/notion/builders.ts`. Notion API type: `callout` with `icon: { type: "emoji", emoji: "🔍" }` (or similar), `color: "gray_background"`. Front of the blocks list.
-4. **Wire-up.** `processUrl.ts` already calls `enrichJob` and assigns `enriched.description`. Pass `enriched.summary` through to `insertJob` so the builder can prepend the callout.
-5. **Tracker.** `TokenTracker` already wraps the enrichment LLM call — no change needed; cost shows up in the per-run report.
-
-### Failure mode
-
-If the summary field is missing or malformed in the LLM response, log a warning and insert the job without a callout block. Never fail enrichment over a missing summary — the verdict has already been made by that point and the body still gets through.
-
-### Backfill
-
-Standalone script at `scripts/regenerate-summaries.ts`, mirrors the shape of `scripts/reevaluate-to-review.ts`:
-
-- Query all To-Review Notion pages.
-- Skip pages that already have a callout block at the top (idempotent).
-- Re-fetch the body, run summary-only enrichment (no re-eval), prepend the callout.
-- Run after prompt iterations that change the summary contract.
-
-Kept separate from `reevaluate-to-review.ts` because verdict prompts and summary prompts iterate independently; coupling them would force a re-eval whenever you wanted to refresh just the summaries.
-
-### Testing
-
-New `src/pipeline/__integration__/fixtures/summarize/` directory with the same Markdown shape as `evaluate/`, paired with a `evaluate-summarize.test.ts` that runs each fixture through the summarization step and asserts:
-
-- All six fields are present.
-- "Senior signal" mentions a year count or the literal "not specified".
-- "Comp" is either a figure with currency or "not specified".
-- "Read" does not contain directional language ("lean pass", "lean reject", "borderline") — schema-shaped, not text-match.
-- "Culture flags" is a list (possibly empty / "none observed").
-
-Run on every commit via lefthook? No — same as the eval integration suite, gated to `bun run test:integration` because it costs LLM tokens.
-
-### Open questions
-
-- **Should the summary be a single string or six structured fields in the enrichment Zod schema?** Single string is simpler to plumb but harder to validate; six fields lets the Notion builder render each bullet as its own rich_text run and lets the test suite assert per-field. Recommendation: six fields.
-- **Backfill cadence.** Manual-only, or should the auto-pipeline notice a missing summary on existing To-Review entries and refill? Manual-only is simpler; auto-refill creates a "summaries drift quietly" failure mode.
-- **Icon and color.** Visual choice — propose 🔍 with `gray_background`. Rebikeshed cheap.
-
-### Out of scope
-
-- A "Why Match" Notion property update — keep using the existing reason field for now; the callout supersedes it visually for the human.
-- Recomputing the summary on every run — too expensive and it's ephemeral data.
-
----
-
-## 5. Role-Quality Filter Gaps (P1)
-
-Surfaced during the 2026-05-01 walk-to-review pass. Each gap has at least one fixture pinned in `src/pipeline/__integration__/fixtures/evaluate/reject/` so a future prompt edit can be validated with the integration suite. Order matches confidence — top entries are clear edits, lower ones need more thought.
-
-### 5.1 DevOps / Kubernetes-primary roles (clear reject) — DONE 2026-05-01
+### 4.1 DevOps / Kubernetes-primary roles (clear reject) — DONE 2026-05-01
 
 **Evidence:** `reject/boundless-senior-infrastructure-devops.md`, `reject/yuno-platform-engineer-ai.md`. The first is "Senior Software Engineer - Infrastructure" (sounds like SWE) with body pure SRE/DevOps. The second has "AI Agent Infrastructure" branding but the responsibility list is pure messaging/IaC/observability ("when something breaks at 3am").
 
 **Resolution:** Added role-quality rule 8 ("INFRA-OPS-AS-PRIMARY-RESPONSIBILITY"). The first attempt keyed on must-have skills (K8s + Docker + Terraform + Datadog) — that broke `pass/clickup-senior-ai-engineer.md` because AI Platform engineers list those same skills. Second attempt keys on the *responsibility verbs*: "operate", "monitor", "own deployments", "tune observability", "manage clusters" → FAIL; "build", "apply", "deploy features" → PASS. Boundless and Yuno-platform now reject; ClickUp AI Platform still passes.
 
-### 5.2 Any Java requirement (tighten, don't loosen)
+### 4.2 Any Java requirement (tighten, don't loosen)
 
 **Evidence:** No new fixture from this walk; existing `reject/okto-payments-senior-engineer-java.md` covers primary-Java. The current rule passes when "Java/.NET/C#/Scala appears only as nice-to-have, secondary, or as one of many options". Alex stated: "We also must absolutely reject any Java." This contradicts the current fallback.
 
 **Direction:** Tighten rule 1 — required-Java in any tier (must-have, nice-to-have-but-required-on-the-team, "you'll work in a Java-heavy environment") fails. Soft mention ("we also have a few Java services") is still ambiguous; need a couple of new fixtures distinguishing "Java tangentially mentioned" (pass) vs "Java on the team and you'll touch it" (fail). Don't ship before adding those fixtures, or risk over-rejecting clean polyglot stacks.
 
-### 5.3 Interview rounds: 4 is fine, 5 is too much
+### 4.3 Interview rounds: 4 is fine, 5 is too much
 
 **Evidence:** Dataiku (URL `https://boards.greenhouse.io/dataiku/jobs/5963977004`, no fixture saved per user direction). Listed process: 1 recruiter call, 1 tech interview, take-home OR live coding, 2 VPs of Engineering. That is 4 sync rounds (take-home path) or 5 (live-coding path). Alex would have applied to the 4-round variant but not 5.
 
 **Direction:** Change role-quality rule 6 threshold from "4+ synchronous rounds → FAIL" to "5+ synchronous rounds → FAIL". Update the failing example accordingly and add a 4-round pass example. Risk is low since the fail threshold is moving up (rejection rate decreases).
 
-### 5.4 L1 / consensus / microchain protocol depth — DONE 2026-05-01
+### 4.4 L1 / consensus / microchain protocol depth — DONE 2026-05-01
 
 **Evidence:** `reject/linera-software-engineer-rust-l1.md` (microchain L1, Rust-only); `reject/alpen-labs-engineering-lead-l2-systems.md` (Bitcoin L2 / ZK rollups, Rust + EVM + L2 systems programming, lead role).
 
 **Resolution:** Added role-quality rule 9 ("CORE-PROTOCOL CHAIN IMPLEMENTATION"). First attempt keyed on adjacent skills like "consensus algorithms" or "MEV awareness" — that broke `pass/d3-engineer.md` (Solana RWA, mentions consensus algorithms as a 3y experience requirement) and `pass/moonpay-engineer.md` (wallet/payment with MEV awareness desired). Second attempt keys on whether the company itself IS the chain ("first blockchain optimized for...", "scalable Bitcoin ecosystem", "high-performance OS for Ethereum") AND the role builds it ("contribute to architecture of blockchain protocols", "production-grade infrastructure for our protocol"). Application-layer roles on existing chains pass even when consensus/MEV appears in the body. The existing `feedback_stack_depth_signals` memory now matches the prompt.
 
-### 5.5 Lever single-country with multi-continent operations language (false positive in remote filter)
+### 4.5 Lever single-country with multi-continent operations language (false positive in remote filter)
 
 **Evidence:** `pass/ats/jeeves-mexico-ats-body-multi-continent.md`. Lever metadata is unambiguous (`country=MX`, `locations=["Mexico"]`, `team="Engineering - LatAm"`). The body says "operates across 20+ countries including Brazil, Canada, Colombia, Mexico, the United Kingdom, across Europe, and the United States" — but that is *company operations / customer reach*, not *hiring scope*. The remote filter passed the listing under rule A by reading the operations language as a multi-continent team signal.
 
 **Note:** Alex called this a pass on the basis that the operations language is enough; he's willing to apply even though hiring scope is LatAm-only. The fixture is therefore in `pass/ats/`, NOT `reject/ats/`. The gap in the prompt is whether rule A should distinguish "company operates in X" from "team distributed across X" — currently it doesn't, and the user's call here is that conflating them is acceptable. Track as a *known false-positive shape* worth revisiting if multiple Mexico-only listings start landing in To-Review.
 
-### 5.6 Careers-index pages and "General Application" titles — DONE 2026-05-01
+### 4.6 Careers-index pages and "General Application" titles — DONE 2026-05-01
 
 **Evidence:** `reject/ethena-labs-general-application.md` (title "Ethena Labs - Join the Team! General Application" — the existing `^\s*general application\b` pattern was anchored to start and missed the company-prefixed form), `reject/reown-walletconnect-careers-index.md` (URL `apply.workable.com/walletconnect/` — a careers root that lists multiple jobs, no individual posting).
 
 **Resolution:** Extended `structuralFilter` to (a) match "general application" / "join the team" / talent-pool framing anywhere in the title (no longer anchored), and (b) reject root career-index URLs across Workable / Lever / Greenhouse / Ashby (no individual posting segment). Both fixtures now reject before reaching the LLM.
 
-### 5.7 Hybrid buried in benefits — DONE 2026-05-01
+### 4.7 Hybrid buried in benefits — DONE 2026-05-01
 
 **Evidence:** `reject/openup-senior-ai-engineer-hybrid.md`. Body says "Flexible work model (hybrid and options for remote work)" in the perks section; previous prompt missed it because the literal "hybrid" appeared away from the work-model header.
 
 **Resolution:** Strengthened the remote filter to fail when "hybrid" is the framing default and remote is a qualified option ("options for", "with flexibility for"). Soft-pass example added for "Remote / Hybrid (Warsaw)" where hybrid and remote are parallel options — first attempt over-rejected `pass/vecten-ai-native-fullstack.md` which uses that pattern.
 
-### 5.8 Cheap-shop staffing FPs — DONE 2026-05-01
+### 4.8 Cheap-shop staffing FPs — DONE 2026-05-01
 
 **Evidence:** `reject/pavago-senior-backend.md`, `reject/huzzle-founding-engineer-staffing-framing.md`, `reject/via-hatchit-cryptography-engineer.md`, `reject/south-geeks-latam-staffing.md`. All four shared placement-framing language ("Our client is", "we connect [skill] with companies", "[Recruiter] is partnering with [Client]") that a naive rule would reject. But that naive rule was tried and reverted because it broke `pass/mlabs-engineer.md` and `pass/infinity-constellation-senior-fullstack.md` (legitimate consultancies / holding-cos that use the same framing).
 
 **Resolution:** Added `cheap-shop-placement` as a 4th LLM filter in `getEvaluationFilters()`. The filter defines 8 cheap-shop signals (recruiter-placement framing, recruiter-shop self-description, recruiter-name in title, junior-bar-as-senior, comp-obscured + placement, cheap-country-only talent pool, low-code-required, contractor + foreign client hours) and fails only when ≥ 2 stack. Pavago has 4 signals, Huzzle 3, South Geeks 3, Via-Hatch 2 — all reject. MLabs has only S1 (comp disclosed cancels S5) and Infinity has none — both still pass. The filter prompt asks the LLM to list signals in its reason field for auditability ("Signals: S1, S4. Count: 2. FAIL.").
 
-### 5.9 Remaining FP gaps to chase next (target ≤ 10%)
+### 4.9 Remaining FP gaps to chase next (target ≤ 10%)
 
 After the cheap-shop filter landed, FP sits at 7.5–10% across runs. The remaining steady-state FPs are not staffing-shaped:
 

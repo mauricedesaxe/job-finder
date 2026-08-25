@@ -7,10 +7,6 @@
 //   bun scripts/mark-status.ts Rejected \
 //     https://jobs.lever.co/example/abc-123 \
 //     https://jobs.ashbyhq.com/example/def-456
-//
-// Useful as a companion to /walk-to-review: once verdicts are saved as
-// fixtures, use this to reflect them in Notion (To Review → Rejected /
-// Applied / Skipped, etc).
 import { createNotionClient, type ResilientNotionClient, updateJobStatus } from "../src/services/notion";
 import { JOB_STATUSES, type JobStatus } from "../src/types";
 
