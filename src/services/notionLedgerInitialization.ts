@@ -7,19 +7,19 @@ import type {
 } from "./jobLedger";
 import { normalizeJobLedgerText } from "./jobLedgerRecord";
 import type { ResilientNotionClient } from "./notion/client";
-import { extractRichText, type RichTextItem } from "./notion/helpers";
+import { extractRichText, type RichTextItem, toDateString } from "./notion/helpers";
 
 export const NOTION_COMPANY_STATE_IMPORT_MIGRATION = "notion-company-state-import-v2";
 const COMPANY_BLOCKED_STATUS = "Company Blocked" as const;
 
-export interface InitializeJobLedgerFromNotionOptions {
+interface InitializeJobLedgerFromNotionOptions {
   client: ResilientNotionClient;
   databaseId: string;
   ledger: JobLedger;
   completedAt?: string;
 }
 
-export type InitializeJobLedgerFromNotionResult =
+type InitializeJobLedgerFromNotionResult =
   | {
       kind: "initialized";
       stats: SelectiveNotionImportStats;
@@ -45,7 +45,7 @@ export async function initializeJobLedgerFromNotion({
     return { kind: "already-initialized" };
   }
 
-  const cutoff = monthsAgo(REAPPLY_WINDOW_MONTHS, new Date(completedAt)).toISOString().slice(0, 10);
+  const cutoff = toDateString(monthsAgo(REAPPLY_WINDOW_MONTHS, new Date(completedAt)));
   const snapshot = await readNotionCompanyState(client, databaseId, cutoff);
   const actualStats = await ledger.migrateNotionCompanyState({
     states: snapshot.states,

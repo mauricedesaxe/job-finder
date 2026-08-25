@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 import type { D1DatabaseBinding } from "./d1";
-import type { ImportedNotionCompanyState, JobLedger, PendingNotionProjection } from "./jobLedger";
+import type { JobLedger, PendingNotionProjection } from "./jobLedger";
 import {
   companyExclusionWriteValues,
   createCompanyExclusionWriteRecord,
@@ -133,7 +133,11 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
         binding.prepare(DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL),
       ];
       for (const state of states) {
-        statements.push(importedNotionCompanyStateStatement(binding, state, importedAt));
+        statements.push(
+          binding
+            .prepare(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL)
+            .bind(...importedNotionCompanyStateWriteValues(state, importedAt)),
+        );
       }
       statements.push(binding.prepare(IMPORTED_NOTION_COMPANY_STATE_STATS_SQL));
 
@@ -153,16 +157,6 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
       return parseMigrationRow(await binding.prepare(HAS_MIGRATION_SQL).bind(name).first());
     },
   };
-}
-
-function importedNotionCompanyStateStatement(
-  binding: D1DatabaseBinding,
-  state: ImportedNotionCompanyState,
-  importedAt: string,
-) {
-  return binding
-    .prepare(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL)
-    .bind(...importedNotionCompanyStateWriteValues(state, importedAt));
 }
 
 function pendingNotionProjectionStatement(
