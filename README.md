@@ -127,15 +127,17 @@ bun run scrape
 6. Run `bun run deploy:cloudflare:proof` for an unscheduled proof deployment.
 7. Run `bun run deploy:cloudflare:production` to apply D1 migrations and deploy the scheduled production Workflow.
 
-Set `JOB_FINDER_URL` to the deployed Worker URL. Then start a manual reconcile and check its status with the same run ID:
+Export `JOB_FINDER_URL` with the deployed Worker URL and `MANUAL_TRIGGER_SECRET` with the matching secret. Then start a manual reconcile and check its status with the generated run ID:
 
 ```bash
+RUN_ID="manual-reconcile-$(date +%s)"
+
 curl --request POST "$JOB_FINDER_URL/runs" \
   --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET" \
   --header "Content-Type: application/json" \
-  --data '{"runId":"manual-reconcile","mode":{"kind":"reconcile"}}'
+  --data "{\"runId\":\"$RUN_ID\",\"mode\":{\"kind\":\"reconcile\"}}"
 
-curl "$JOB_FINDER_URL/runs/manual-reconcile" \
+curl "$JOB_FINDER_URL/runs/$RUN_ID" \
   --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET"
 ```
 
