@@ -293,41 +293,22 @@ describe("LangSmith trace acceptance", () => {
     ]);
   });
 
-  test("limits concurrent trace reads while all accepted work completes", async () => {
-    const client = traceClient((url) =>
-      url.endsWith("/info")
-        ? Response.json({ batch_ingest_config: { use_multipart_endpoint: false } })
-        : new Response(null, { status: 202 }),
-    );
-    let activeReads = 0;
-    let maxActiveReads = 0;
-    let accepted = 0;
-    const readRun = spyOn(client, "readRun").mockImplementation(async (traceId) => {
-      activeReads++;
-      maxActiveReads = Math.max(maxActiveReads, activeReads);
-      await Bun.sleep(10);
-      activeReads--;
-      return { id: traceId, name: "process_job", run_type: "chain", inputs: {} };
-    });
-    await initTestLangSmith(client);
+  test("paces physical trace GET starts for supported endpoints", async () => {
+    expect(
+      await physicalTraceReadStarts({ endpoint: "https://example.test", failFirst: false }),
+    ).toEqual([0, 2_100, 4_200]);
+    expect(
+      await physicalTraceReadStarts({
+        endpoint: "https://example.test/api/v1",
+        failFirst: false,
+      }),
+    ).toEqual([0, 2_100, 4_200]);
+  });
 
-    try {
-      await Promise.all(
-        Array.from({ length: 6 }, (_, index) =>
-          traced({ name: "process_job" }, async ({ requireAccepted }) => {
-            await requireAccepted();
-            accepted++;
-            return { data: index };
-          }),
-        ),
-      );
-
-      expect(maxActiveReads).toBe(2);
-      expect(activeReads).toBe(0);
-      expect(accepted).toBe(6);
-    } finally {
-      readRun.mockRestore();
-    }
+  test("paces SDK retries after a failed physical trace GET", async () => {
+    expect(
+      await physicalTraceReadStarts({ endpoint: "https://example.test", failFirst: true }),
+    ).toEqual([0, 2_100, 4_200, 6_300]);
   });
 
   test("fails immediately when a trace read returns a non-404 error", async () => {
@@ -478,4 +459,77 @@ async function initTestLangSmith(client: Client): Promise<void> {
       pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
     },
   );
+}
+
+async function physicalTraceReadStarts(input: {
+  endpoint: string;
+  failFirst: boolean;
+}): Promise<number[]> {
+  let now = 0;
+  let traceReadAttempts = 0;
+  const traceReadStarts: number[] = [];
+  const testFetch = Object.assign(
+    async (request: string | URL | Request) => {
+      const url = new URL(String(request));
+      if (/^\/(?:api\/v1\/)?runs\/[0-9a-f-]{36}$/.test(url.pathname)) {
+        traceReadStarts.push(now);
+        traceReadAttempts++;
+        if (input.failFirst && traceReadAttempts === 1) {
+          return new Response("rate limited", { status: 429 });
+        }
+        const traceId = url.pathname.split("/").at(-1);
+        return Response.json({
+          id: traceId,
+          trace_id: traceId,
+          name: "process_job",
+          run_type: "chain",
+          start_time: "2026-08-24T00:00:00Z",
+          inputs: {},
+          extra: {},
+        });
+      }
+      if (url.pathname.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      return new Response(null, { status: 202 });
+    },
+    { preconnect: (_url: string | URL) => {} },
+  );
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(testFetch);
+
+  try {
+    await initLangSmith(
+      {
+        apiKey: "key",
+        endpoint: input.endpoint,
+        project: "test",
+        openrouterApiKey: "router",
+      },
+      {
+        fetchImplementation: testFetch,
+        traceReadScheduler: {
+          now: () => now,
+          sleep: async (delayMs: number) => {
+            now += delayMs;
+          },
+        },
+        resolvePrompt: async ({ name }) => ({
+          releaseTags: [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
+        }),
+        pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
+      },
+    );
+    await Promise.all(
+      Array.from({ length: 3 }, (_, index) =>
+        traced({ name: "process_job" }, async ({ requireAccepted }) => {
+          await requireAccepted();
+          return { data: index };
+        }),
+      ),
+    );
+    return traceReadStarts;
+  } finally {
+    shutdownLangSmith();
+    fetch.mockRestore();
+  }
 }
