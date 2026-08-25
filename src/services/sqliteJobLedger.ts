@@ -92,7 +92,7 @@ export function createSqliteJobLedger(
   const recordPendingNotionProjection = database.query<never, [string, string, string, string]>(
     RECORD_PENDING_NOTION_PROJECTION_SQL,
   );
-  const listPendingNotionProjections = database.query<Record<string, unknown>, [number]>(
+  const listPendingNotionProjections = database.query<Record<string, unknown>, []>(
     LIST_PENDING_NOTION_PROJECTIONS_SQL,
   );
   const markNotionProjectionComplete = database.query<never, [string]>(
@@ -158,8 +158,8 @@ export function createSqliteJobLedger(
     async recordProcessedJob(input) {
       return recordProcessedJobAtomically(input);
     },
-    async listPendingNotionProjections(limit = 100) {
-      return parsePendingNotionProjectionRows(listPendingNotionProjections.all(limit));
+    async listPendingNotionProjections() {
+      return parsePendingNotionProjectionRows(listPendingNotionProjections.all());
     },
     async markNotionProjectionComplete(sourceKey) {
       markNotionProjectionComplete.run(sourceKey);

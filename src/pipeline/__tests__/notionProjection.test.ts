@@ -137,7 +137,7 @@ describe("replayPendingNotionProjections", () => {
     await replayPendingNotionProjections({ ledger, notion, databaseId: "database" });
 
     expect(creates).toBe(11);
-    expect(listPending.mock.calls).toEqual([[10], [10], [10]]);
+    expect(listPending.mock.calls).toEqual([[], [], []]);
     expect(await ledger.listPendingNotionProjections()).toEqual([]);
   });
 });

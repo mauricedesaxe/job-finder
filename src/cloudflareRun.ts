@@ -10,6 +10,7 @@ export const WorkflowRunIdSchema = z
 export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("scrape") }),
   z.object({ kind: z.literal("reconcile") }),
+  z.object({ kind: z.literal("backfill") }),
 ]);
 
 export const WorkflowPayloadSchema = z.object({

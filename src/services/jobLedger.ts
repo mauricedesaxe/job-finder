@@ -94,7 +94,7 @@ export interface JobLedger {
   titlesForCompany(company: string): Promise<string[]>;
   findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
   recordProcessedJob(input: RecordProcessedJobInput): Promise<PendingJobProjections>;
-  listPendingNotionProjections(limit?: number): Promise<PendingNotionProjection[]>;
+  listPendingNotionProjections(): Promise<PendingNotionProjection[]>;
   markNotionProjectionComplete(sourceKey: string): Promise<void>;
   listPendingReviewProjections(): Promise<PendingReviewProjection[]>;
   markReviewProjectionComplete(sourceKey: string): Promise<void>;

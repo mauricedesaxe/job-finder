@@ -21,9 +21,10 @@ import {
 } from "./services/langsmith";
 import { createNotionClient, type ResilientNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
+import { backfillJobLedger } from "./services/notionLedgerBackfill";
 import { sendRunReport } from "./services/slack";
 
-export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" };
+export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" } | { kind: "backfill" };
 
 const log = logger.child({ component: "main" });
 const PIPELINE_WORKERS = 8;
@@ -48,6 +49,15 @@ export async function runJobFinder({
       const stats = await reconcile(notion, config.notionDatabaseId);
       const durationMs = Date.now() - startTime;
       log.info({ stats, durationMs }, "reconciliation complete");
+      return;
+    }
+    case "backfill": {
+      const result = await backfillJobLedger({
+        client: notion,
+        databaseId: config.notionDatabaseId,
+        ledger,
+      });
+      log.info({ ...result, durationMs: Date.now() - startTime }, "job ledger backfill complete");
       return;
     }
     case "scrape":
@@ -78,7 +88,7 @@ async function scrapeJobs({
   });
 
   if (!(await ledger.isReadyForScrape())) {
-    throw new Error("Run bun run backfill:job-ledger before scraping");
+    throw new Error("Backfill the job ledger before scraping");
   }
 
   await replayPendingReviewProjections(ledger);
@@ -110,8 +120,37 @@ async function scrapeJobs({
     config.domains.map((domain) => ({ keyword, domain })),
   );
 
-  log.info({ pairs: searchPairs.length }, "searching and processing");
-  const seenUrls = new Set<string>();
+  log.info({ pairs: searchPairs.length }, "searching");
+  const searchResults = await Promise.allSettled(
+    searchPairs.map(({ keyword, domain }) =>
+      jinaSearchSemaphore.run(async () => {
+        const urls = await jinaBreaker.run(() =>
+          withRetry(() => searchJobs(keyword, domain, config), {
+            shouldRetry: isRetryableJina,
+            onRetry: (attempt) => log.warn({ keyword, domain, attempt }, "search retry"),
+          }),
+        );
+        log.info({ domain, keyword, urls: urls.length }, "search complete");
+        return { keyword, urls };
+      }),
+    ),
+  );
+
+  const urlMap = new Map<string, string>();
+  let searchErrors = 0;
+  for (const result of searchResults) {
+    if (result.status === "fulfilled") {
+      for (const url of result.value.urls) {
+        if (!urlMap.has(url)) urlMap.set(url, result.value.keyword);
+      }
+    } else {
+      log.error({ err: result.reason }, "search failed");
+      searchErrors++;
+    }
+  }
+  log.info({ uniqueUrls: urlMap.size, searchErrors }, "all searches complete");
+
+  const urls = Array.from(urlMap.entries());
   const stats: ScrapeStats = {
     inserted: 0,
     skipped: 0,
@@ -121,63 +160,36 @@ async function scrapeJobs({
     duplicated: 0,
     errored: 0,
   };
-  let nextSearchPair = 0;
-  let searchErrors = 0;
-  let uniqueUrls = 0;
+  let nextUrl = 0;
   const pipelineState: { fatalError?: LangSmithTraceUnavailableError } = {};
 
   await Promise.all(
-    Array.from({ length: Math.min(PIPELINE_WORKERS, searchPairs.length) }, async () => {
-      while (!pipelineState.fatalError && nextSearchPair < searchPairs.length) {
-        const pair = searchPairs[nextSearchPair++];
-        if (!pair) return;
-
-        let urls: string[];
+    Array.from({ length: Math.min(PIPELINE_WORKERS, urls.length) }, async () => {
+      while (!pipelineState.fatalError && nextUrl < urls.length) {
+        const entry = urls[nextUrl++];
+        if (!entry) return;
+        const [url, keyword] = entry;
         try {
-          urls = await jinaSearchSemaphore.run(() =>
-            jinaBreaker.run(() =>
-              withRetry(() => searchJobs(pair.keyword, pair.domain, config), {
-                shouldRetry: isRetryableJina,
-                onRetry: (attempt) => log.warn({ ...pair, attempt }, "search retry"),
-              }),
-            ),
-          );
-          log.info({ ...pair, urls: urls.length }, "search complete");
+          const result = await processUrl(url, keyword, {
+            config,
+            ledger,
+            recentAppCompanies: cache.recentAppCompanies,
+            filters,
+          });
+          recordProcessResult(stats, result);
         } catch (error) {
-          log.error({ ...pair, err: error }, "search failed");
-          searchErrors++;
-          continue;
-        }
-
-        for (const url of urls) {
-          const seen = seenUrls.has(url);
-          if (!seen) uniqueUrls++;
-          try {
-            const result = await processUrl(url, pair.keyword, {
-              notion,
-              config,
-              ledger,
-              recentAppCompanies: cache.recentAppCompanies,
-              seenUrls,
-              filters,
-            });
-            recordProcessResult(stats, result);
-          } catch (error) {
-            if (error instanceof LangSmithTraceUnavailableError) {
-              pipelineState.fatalError ??= error;
-              return;
-            }
-            log.error({ url, err: error }, "url processing failed");
-            stats.errored++;
+          if (error instanceof LangSmithTraceUnavailableError) {
+            pipelineState.fatalError ??= error;
+            return;
           }
+          log.error({ url, err: error }, "url processing failed");
+          stats.errored++;
         }
       }
     }),
   );
 
   if (pipelineState.fatalError) throw pipelineState.fatalError;
-
-  log.info({ uniqueUrls, searchErrors }, "all searches complete");
 
   await replayPendingNotionProjections({
     ledger,
@@ -202,7 +214,7 @@ async function scrapeJobs({
       postReconcileStats,
       pruneStats,
       {
-        urlCount: uniqueUrls,
+        urlCount: urlMap.size,
         searchErrors,
       },
       durationMs,

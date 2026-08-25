@@ -134,6 +134,12 @@ afterAll(async () => {
   await harness.close();
 });
 
+test("requires the Notion backfill before D1 scraping", async () => {
+  const response = await worker.fetch("/ready");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ ready: false });
+});
+
 test("runs the job ledger adapter in workerd", async () => {
   const response = await worker.fetch("/scenario");
   expect(response.status).toBe(200);
@@ -147,7 +153,7 @@ test("runs the job ledger adapter in workerd", async () => {
   });
 }, 15_000);
 
-test("allows a clean D1 ledger to scrape", async () => {
+test("allows a backfilled D1 ledger to scrape", async () => {
   const response = await worker.fetch("/ready");
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ready: true });

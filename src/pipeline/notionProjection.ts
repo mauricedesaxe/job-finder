@@ -1,8 +1,6 @@
 import type { JobLedger, PendingNotionProjection } from "../services/jobLedger";
 import { checkDuplicateUrl, insertJob, type ResilientNotionClient } from "../services/notion";
 
-const NOTION_PROJECTION_PAGE_SIZE = 10;
-
 export async function projectPendingNotionProjection({
   ledger,
   notion,
@@ -31,7 +29,7 @@ export async function replayPendingNotionProjections({
   databaseId: string;
 }): Promise<void> {
   while (true) {
-    const projections = await ledger.listPendingNotionProjections(NOTION_PROJECTION_PAGE_SIZE);
+    const projections = await ledger.listPendingNotionProjections();
     if (projections.length === 0) return;
 
     const errors: unknown[] = [];

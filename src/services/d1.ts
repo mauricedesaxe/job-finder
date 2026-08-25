@@ -1,4 +1,4 @@
-export type D1Value = string | number | null;
+export type D1Value = string | null;
 
 export interface D1PreparedStatement {
   bind(...values: D1Value[]): D1PreparedStatement;

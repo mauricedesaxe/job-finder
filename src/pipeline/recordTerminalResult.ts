@@ -37,9 +37,8 @@ const NOTION_STATUS_BY_OUTCOME = {
 
 export async function recordTerminalResult(input: RecordTerminalResultInput): Promise<void> {
   const { ledger, job, outcome, traceId } = input;
-  const review = "review" in input ? input.review : undefined;
   const createdAt = new Date().toISOString();
-  const projections = pendingProjectionInput({ job, outcome, traceId, review, createdAt });
+  const projections = pendingProjectionInput(input, createdAt);
   const stored = await ledger.recordProcessedJob({
     rawUrl: job.url,
     company: job.company,
@@ -54,7 +53,7 @@ export async function recordTerminalResult(input: RecordTerminalResultInput): Pr
       if (stored.kind !== "none") throw new Error("Duplicated job stored unexpected projections");
       return;
     case "inserted":
-      if (stored.kind !== "notion-and-review" || !input.review) {
+      if (stored.kind !== "notion-and-review") {
         throw new Error("Inserted job did not store both pending projections");
       }
       await projectPendingReviewProjection({
@@ -73,23 +72,14 @@ export async function recordTerminalResult(input: RecordTerminalResultInput): Pr
   }
 }
 
-function pendingProjectionInput({
-  job,
-  outcome,
-  traceId,
-  review,
-  createdAt,
-}: {
-  job: JobListing;
-  outcome: TerminalProcessedJobOutcome;
-  traceId: string;
-  review?: ReviewProjectionTransport;
-  createdAt: string;
-}): PendingJobProjectionInput | undefined {
+function pendingProjectionInput(
+  { job, outcome, traceId }: RecordTerminalResultInput,
+  createdAt: string,
+): PendingJobProjectionInput | undefined {
   const status = NOTION_STATUS_BY_OUTCOME[outcome];
   if (!status) return undefined;
   const notion = { job, status, createdAt };
-  return outcome === "inserted" && review
+  return outcome === "inserted"
     ? { kind: "notion-and-review", notion, review: { traceId, createdAt } }
     : { kind: "notion", notion };
 }

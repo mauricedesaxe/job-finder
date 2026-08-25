@@ -21,7 +21,6 @@ import {
 } from "../services/ats";
 import type { JobLedger } from "../services/jobLedger";
 import { enqueueReviewTrace, getPromptReleaseTag, traced } from "../services/langsmith";
-import type { ResilientNotionClient } from "../services/notion";
 import { checkFuzzyDuplicate } from "./dedup";
 import { enrichJob } from "./enrich";
 import { evaluateJob } from "./evaluate";
@@ -51,11 +50,9 @@ export interface ScrapeStats {
 }
 
 export interface ProcessContext {
-  notion: ResilientNotionClient;
   config: JobFinderConfig;
   ledger: JobLedger;
   recentAppCompanies: ReadonlySet<string>;
-  seenUrls: Set<string>;
   filters?: EvaluationFilter[];
 }
 
@@ -79,10 +76,7 @@ export async function processUrl(
   keyword: string,
   ctx: ProcessContext,
 ): Promise<ProcessResult> {
-  const { ledger, seenUrls } = ctx;
-
-  if (seenUrls.has(url)) return "skipped";
-  seenUrls.add(url);
+  const { ledger } = ctx;
 
   if (await ledger.findByRawUrl(url)) {
     log.debug({ url }, "skipped (exists in ledger)");
