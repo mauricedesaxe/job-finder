@@ -22,7 +22,7 @@ import {
 } from "./services/langsmith";
 import { createNotionClient, type ResilientNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
-import { backfillJobLedger } from "./services/notionLedgerBackfill";
+import { backfillJobLedger, isJobLedgerReadyForScrape } from "./services/notionLedgerBackfill";
 import { sendRunReport } from "./services/slack";
 
 export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
@@ -93,7 +93,7 @@ async function scrapeJobs({
     openrouterApiKey: config.openrouterApiKey,
   });
 
-  if (!(await ledger.isReadyForScrape())) {
+  if (!(await isJobLedgerReadyForScrape(ledger))) {
     throw new Error("Backfill the job ledger before scraping");
   }
 

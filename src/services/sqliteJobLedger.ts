@@ -41,7 +41,6 @@ import {
   RECORD_PROCESSED_JOB_SQL,
   TITLES_FOR_COMPANY_SQL,
 } from "./jobLedgerSql";
-import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./notionLedgerBackfill";
 
 const JOB_LEDGER_SCHEMA = [
   "0001_job_ledger.sql",
@@ -143,9 +142,6 @@ export function createSqliteJobLedger(
   }
 
   return {
-    async isReadyForScrape() {
-      return parseMigrationRow(hasMigration.get(NOTION_JOB_LEDGER_BACKFILL_MIGRATION));
-    },
     async findByRawUrl(rawUrl) {
       return parseProcessedJobRow(findByRawUrl.get(rawUrl));
     },

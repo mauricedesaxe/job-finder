@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod/v4";
 import type { PendingNotionProjection } from "../jobLedger";
-import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "../notionLedgerBackfill";
+import {
+  isJobLedgerReadyForScrape,
+  NOTION_JOB_LEDGER_BACKFILL_MIGRATION,
+} from "../notionLedgerBackfill";
 import { createSqliteJobLedger } from "../sqliteJobLedger";
 import {
   JOB_LEDGER_CONFORMANCE_RESULT,
@@ -24,9 +27,9 @@ test("preserves the job ledger contract in SQLite", async () => {
 test("requires the Notion backfill before SQLite scraping", async () => {
   const ledger = createSqliteJobLedger(":memory:");
   try {
-    expect(await ledger.isReadyForScrape()).toBe(false);
+    expect(await isJobLedgerReadyForScrape(ledger)).toBe(false);
     await ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, "2026-08-25T00:00:00.000Z");
-    expect(await ledger.isReadyForScrape()).toBe(true);
+    expect(await isJobLedgerReadyForScrape(ledger)).toBe(true);
   } finally {
     await ledger.close();
   }

@@ -34,7 +34,6 @@ import {
   RECORD_PROCESSED_JOB_SQL,
   TITLES_FOR_COMPANY_SQL,
 } from "./jobLedgerSql";
-import { NOTION_JOB_LEDGER_BACKFILL_MIGRATION } from "./notionLedgerBackfill";
 
 const RowsResultSchema = z.object({
   success: z.literal(true),
@@ -46,11 +45,6 @@ const BatchWriteResultSchema = z.array(WriteResultSchema);
 
 export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
   return {
-    async isReadyForScrape() {
-      return parseMigrationRow(
-        await binding.prepare(HAS_MIGRATION_SQL).bind(NOTION_JOB_LEDGER_BACKFILL_MIGRATION).first(),
-      );
-    },
     async findByRawUrl(rawUrl) {
       return parseProcessedJobRow(await binding.prepare(FIND_BY_RAW_URL_SQL).bind(rawUrl).first());
     },

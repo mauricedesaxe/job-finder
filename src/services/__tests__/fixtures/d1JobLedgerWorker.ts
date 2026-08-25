@@ -1,6 +1,7 @@
 import { ZodError } from "zod/v4";
 import type { D1DatabaseBinding } from "../../d1";
 import { createD1JobLedger } from "../../d1JobLedger";
+import { isJobLedgerReadyForScrape } from "../../notionLedgerBackfill";
 import { createD1JobFinderRunLock } from "../../runLock";
 import { runJobLedgerConformanceScenario } from "../jobLedgerConformance";
 
@@ -28,7 +29,7 @@ export default {
     }
 
     if (path === "/ready") {
-      return Response.json({ ready: await ledger.isReadyForScrape() });
+      return Response.json({ ready: await isJobLedgerReadyForScrape(ledger) });
     }
 
     if (path === "/run-lock") {

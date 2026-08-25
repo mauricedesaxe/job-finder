@@ -89,7 +89,6 @@ export interface NotionBackfillStats {
 }
 
 export interface JobLedger {
-  isReadyForScrape(): Promise<boolean>;
   findByRawUrl(rawUrl: string): Promise<ProcessedJob | null>;
   titlesForCompany(company: string): Promise<string[]>;
   findCompanyExclusion(company: string): Promise<CompanyExclusion | null>;
