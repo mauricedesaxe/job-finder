@@ -108,8 +108,8 @@ export async function processUrl(
       }),
     },
     async ({ requireAccepted }) => {
-      const { data: result } = await processJobBody(url, keyword, ctx, state);
       const traceId = await requireAccepted();
+      const { data: result } = await processJobBody(url, keyword, ctx, state);
       const afterTraceComplete = await result.prepareTraceCompletion(traceId);
       return { data: result.outcome, afterTraceComplete };
     },
