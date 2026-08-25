@@ -5,7 +5,7 @@ Priority: P0 = do first, P1 = do next.
 
 ## Current state
 
-CLI script (`bun src/index.ts`) deployed as a Railway cron job (weekly, Wednesday ~09:00 Romania time). Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (82 evaluate fixtures: 42 pass / 40 reject; 8 remote fixtures + 12 ATS-aware). Latest measurement: FP ≈ 7-10%, FN ≈ 5%.
+Production runs as a Cloudflare Workflow with a D1 ledger. Structured logging with pino, Slack run reports and fatal error alerts, resilience stack (circuit breakers, retry with exponential backoff, rate limiters, semaphores), preflight schema validation, reconcile-only mode (`--reconcile-only`), location eligibility filter for remote-from-Romania, four evaluation profiles (crypto-web3, fintech-trading, senior-fullstack-react, ai-engineering), ATS-native enrichment for ashby/lever/greenhouse (behind `enableAtsEnrichment` flag), and integration tests with independent FP/FN thresholds (82 evaluate fixtures: 42 pass / 40 reject; 8 remote fixtures + 12 ATS-aware). Latest measurement: FP ≈ 7-10%, FN ≈ 5%.
 
 ---
 
@@ -235,4 +235,3 @@ After the cheap-shop filter landed, FP sits at 7.5–10% across runs. The remain
 - `reject/tem-senior-staff-agent-platform.md` — borderline. Senior Staff Agent Platform at an energy startup; combines product-engineering verbs ("ship flagship agentic capabilities") with operational ones ("runbook/on-call ownership"). Sometimes flips run-to-run.
 
 The errored "no function tool_call in response" cases (e.g. `lazer-engineer`, `vanta-senior-engineer` in some runs) are model-side flakes counted as wrong-direction by the suite. ROADMAP §1 tracks per-fixture flakiness measurement to separate these from real misclassifications.
-
