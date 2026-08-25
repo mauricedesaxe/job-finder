@@ -1,3 +1,5 @@
+import { sleep } from "./sleep";
+
 export interface RetryOptions {
   maxRetries?: number;
   baseDelayMs?: number;
@@ -42,7 +44,7 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
       if (attempt < maxRetries && shouldRetry(err)) {
         const delay = baseDelayMs * 2 ** attempt;
         onRetry?.(attempt + 1, err);
-        await Bun.sleep(delay);
+        await sleep(delay);
         continue;
       }
       throw err;

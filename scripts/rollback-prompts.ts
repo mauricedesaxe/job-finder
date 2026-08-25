@@ -1,4 +1,5 @@
-import { config } from "../src/config";
+import { loadCliConfig } from "../src/config";
+
 import {
   createPromptTagClient,
   moveProductionAtomically,
@@ -6,6 +7,7 @@ import {
 } from "../src/services/promptAdmin";
 import { PROMPT_NAMES } from "../src/services/promptRegistry";
 
+const config = loadCliConfig();
 const release = process.argv[2];
 if (!release || !/^release-\d{4}-\d{2}-\d{2}-\d+$/.test(release)) throw new Error("Usage: bun scripts/rollback-prompts.ts release-YYYY-MM-DD-N");
 const adminConfig = { endpoint: config.langsmithEndpoint, apiKey: config.langsmithApiKey };

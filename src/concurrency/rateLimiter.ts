@@ -1,3 +1,5 @@
+import { sleep } from "./sleep";
+
 export class RateLimiter {
   private tokens: number;
   private lastRefill: number;
@@ -24,7 +26,7 @@ export class RateLimiter {
       return;
     }
     const waitMs = ((1 - this.tokens) / this.tokensPerSecond) * 1000;
-    await Bun.sleep(waitMs);
+    await sleep(waitMs);
     this.refill();
     this.tokens--;
   }

@@ -13,6 +13,7 @@ export {
   withRetry,
 } from "./retry";
 export { Semaphore } from "./semaphore";
+export { sleep } from "./sleep";
 
 // Shared service limiters — all concurrent work goes through these
 
