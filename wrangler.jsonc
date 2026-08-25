@@ -45,7 +45,8 @@
         {
           "name": "job-finder",
           "binding": "JOB_FINDER_WORKFLOW",
-          "class_name": "JobFinderWorkflow"
+          "class_name": "JobFinderWorkflow",
+          "schedules": ["0 7 * * 3"]
         }
       ],
       "vars": {
