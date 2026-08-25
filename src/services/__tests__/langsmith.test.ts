@@ -495,8 +495,6 @@ async function physicalTraceReadStarts(input: {
     },
     { preconnect: (_url: string | URL) => {} },
   );
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(testFetch);
-
   try {
     await initLangSmith(
       {
@@ -530,6 +528,5 @@ async function physicalTraceReadStarts(input: {
     return traceReadStarts;
   } finally {
     shutdownLangSmith();
-    fetch.mockRestore();
   }
 }
