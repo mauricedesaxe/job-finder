@@ -347,6 +347,7 @@ export async function traced<T>(
   try {
     await wrapped();
   } catch (error) {
+    if (error instanceof LangSmithTraceUnavailableError) throw error;
     await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
   }
   if (!result) throw new Error("tracing returned without a result");

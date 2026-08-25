@@ -317,7 +317,7 @@ describe("LangSmith trace acceptance", () => {
       }),
     ).rejects.toBeInstanceOf(LangSmithTraceUnavailableError);
 
-    expect(events.slice(0, 3)).toEqual(["batch", "read", "batch"]);
+    expect(events).toEqual(["batch", "read"]);
     expect(persisted).toBe(false);
   });
 
