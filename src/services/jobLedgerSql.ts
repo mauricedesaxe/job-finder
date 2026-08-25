@@ -21,8 +21,8 @@ export const DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL = `
 
 export const INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL = `
   INSERT INTO imported_notion_company_state (
-    normalized_company, kind, company, source_key, imported_at, application_date
-  ) VALUES (?, ?, ?, ?, ?, ?)
+    normalized_company, kind, company, imported_at, application_date
+  ) VALUES (?, ?, ?, ?, ?)
 `;
 
 export const MARK_MIGRATION_SQL = `

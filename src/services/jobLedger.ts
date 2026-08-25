@@ -84,20 +84,21 @@ export type ImportedNotionCompanyState =
   | {
       kind: "blocked";
       company: string;
-      sourceKey: string;
-      importedAt: string;
     }
   | {
       kind: "recent-application";
       company: string;
-      sourceKey: string;
-      importedAt: string;
       applicationDate: string;
     };
 
 export interface SelectiveNotionImportStats {
   blockedCompanies: number;
   recentApplications: number;
+}
+
+export interface MigrateNotionCompanyStateInput {
+  states: ImportedNotionCompanyState[];
+  importedAt: string;
 }
 
 export interface JobLedger {
@@ -110,8 +111,8 @@ export interface JobLedger {
   listPendingReviewProjections(): Promise<PendingReviewProjection[]>;
   markReviewProjectionComplete(sourceKey: string): Promise<void>;
   excludeCompany(input: ExcludeCompanyInput): Promise<void>;
-  replaceImportedNotionCompanyState(
-    states: ImportedNotionCompanyState[],
+  migrateNotionCompanyState(
+    input: MigrateNotionCompanyStateInput,
   ): Promise<SelectiveNotionImportStats>;
   markMigration(name: string, completedAt: string): Promise<void>;
   hasMigration(name: string): Promise<boolean>;

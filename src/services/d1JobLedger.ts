@@ -126,14 +126,14 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
           .run(),
       );
     },
-    async replaceImportedNotionCompanyState(states) {
+    async migrateNotionCompanyState({ states, importedAt }) {
       const statements = [
         binding.prepare(DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL),
         binding.prepare(DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL),
         binding.prepare(DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL),
       ];
       for (const state of states) {
-        statements.push(importedNotionCompanyStateStatement(binding, state));
+        statements.push(importedNotionCompanyStateStatement(binding, state, importedAt));
       }
       statements.push(binding.prepare(IMPORTED_NOTION_COMPANY_STATE_STATS_SQL));
 
@@ -158,10 +158,11 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
 function importedNotionCompanyStateStatement(
   binding: D1DatabaseBinding,
   state: ImportedNotionCompanyState,
+  importedAt: string,
 ) {
   return binding
     .prepare(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL)
-    .bind(...importedNotionCompanyStateWriteValues(state));
+    .bind(...importedNotionCompanyStateWriteValues(state, importedAt));
 }
 
 function pendingNotionProjectionStatement(

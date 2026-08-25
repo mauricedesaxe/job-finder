@@ -110,24 +110,17 @@ export function companyExclusionWriteValues(
 
 export function importedNotionCompanyStateWriteValues(
   state: ImportedNotionCompanyState,
-): [string, ImportedNotionCompanyState["kind"], string, string, string, string | null] {
+  importedAt: string,
+): [string, ImportedNotionCompanyState["kind"], string, string, string | null] {
   switch (state.kind) {
     case "blocked":
-      return [
-        normalizeJobLedgerText(state.company),
-        state.kind,
-        state.company,
-        state.sourceKey,
-        state.importedAt,
-        null,
-      ];
+      return [normalizeJobLedgerText(state.company), state.kind, state.company, importedAt, null];
     case "recent-application":
       return [
         normalizeJobLedgerText(state.company),
         state.kind,
         state.company,
-        state.sourceKey,
-        state.importedAt,
+        importedAt,
         state.applicationDate,
       ];
   }

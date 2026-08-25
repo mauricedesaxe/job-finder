@@ -5,6 +5,7 @@ import { URL as NodeUrl } from "node:url";
 import type {
   ImportedNotionCompanyState,
   JobLedger,
+  MigrateNotionCompanyStateInput,
   PendingNotionProjection,
   ProcessedJobOutcome,
   RecordProcessedJobInput,
@@ -82,7 +83,7 @@ export function createSqliteJobLedger(
   );
   const insertImportedNotionCompanyState = database.query<
     never,
-    [string, ImportedNotionCompanyState["kind"], string, string, string, string | null]
+    [string, ImportedNotionCompanyState["kind"], string, string, string | null]
   >(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL);
   const markMigration = database.query<never, [string, string]>(MARK_MIGRATION_SQL);
   const hasMigration = database.query<Record<string, unknown>, [string]>(HAS_MIGRATION_SQL);
@@ -152,13 +153,15 @@ export function createSqliteJobLedger(
     }
     return projections;
   });
-  const replaceImportedNotionCompanyStateAtomically = database.transaction(
-    (states: ImportedNotionCompanyState[]) => {
+  const migrateNotionCompanyStateAtomically = database.transaction(
+    ({ states, importedAt }: MigrateNotionCompanyStateInput) => {
       deleteLegacyNotionProcessedJobs.run();
       deleteLegacyNotionCompanyExclusions.run();
       deleteImportedNotionCompanyState.run();
       for (const state of states) {
-        insertImportedNotionCompanyState.run(...importedNotionCompanyStateWriteValues(state));
+        insertImportedNotionCompanyState.run(
+          ...importedNotionCompanyStateWriteValues(state, importedAt),
+        );
       }
       const stats = parseSelectiveNotionImportStats(importedNotionCompanyStateStats.get());
       if (!stats) throw new Error("Could not read imported Notion company state statistics");
@@ -205,8 +208,8 @@ export function createSqliteJobLedger(
       const record = createCompanyExclusionWriteRecord(input);
       excludeCompany.run(...companyExclusionWriteValues(record));
     },
-    async replaceImportedNotionCompanyState(states) {
-      return replaceImportedNotionCompanyStateAtomically(states);
+    async migrateNotionCompanyState(input) {
+      return migrateNotionCompanyStateAtomically(input);
     },
     async markMigration(name, completedAt) {
       markMigration.run(name, completedAt);

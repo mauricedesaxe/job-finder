@@ -234,35 +234,22 @@ export async function runJobLedgerConformanceScenario(
     excludedAt: "2026-08-22T12:00:00.000Z",
   });
 
-  await ledger.replaceImportedNotionCompanyState([
-    {
-      kind: "blocked",
-      company: "Stale Import",
-      sourceKey: "notion:stale",
-      importedAt: "2026-08-22T12:00:00.000Z",
-    },
-  ]);
-  const importedStats = await ledger.replaceImportedNotionCompanyState([
-    {
-      kind: "blocked",
-      company: "Acme Labs",
-      sourceKey: "notion:block-overlap",
-      importedAt: "2026-08-22T13:00:00.000Z",
-    },
-    {
-      kind: "blocked",
-      company: "Imported Block",
-      sourceKey: "notion:block-imported",
-      importedAt: "2026-08-22T13:00:00.000Z",
-    },
-    {
-      kind: "recent-application",
-      company: "Recent Company",
-      sourceKey: "notion:recent",
-      importedAt: "2026-08-22T13:00:00.000Z",
-      applicationDate: "2026-08-20",
-    },
-  ]);
+  await ledger.migrateNotionCompanyState({
+    states: [{ kind: "blocked", company: "Stale Import" }],
+    importedAt: "2026-08-22T12:00:00.000Z",
+  });
+  const importedStats = await ledger.migrateNotionCompanyState({
+    states: [
+      { kind: "blocked", company: "Acme Labs" },
+      { kind: "blocked", company: "Imported Block" },
+      {
+        kind: "recent-application",
+        company: "Recent Company",
+        applicationDate: "2026-08-20",
+      },
+    ],
+    importedAt: "2026-08-22T13:00:00.000Z",
+  });
 
   await ledger.markMigration("notion-company-state-import-v2", "2026-08-22T12:00:00.000Z");
   await ledger.markMigration("notion-company-state-import-v2", "2026-08-22T13:00:00.000Z");

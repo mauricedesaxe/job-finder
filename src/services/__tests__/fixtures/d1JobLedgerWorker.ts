@@ -194,14 +194,10 @@ async function atomicImportReplacementFailure(
   environment: TestEnvironment,
   ledger: ReturnType<typeof createD1JobLedger>,
 ) {
-  await ledger.replaceImportedNotionCompanyState([
-    {
-      kind: "blocked",
-      company: "Existing Atomic Import",
-      sourceKey: "notion:atomic-import-existing",
-      importedAt: "2026-08-25T12:00:00.000Z",
-    },
-  ]);
+  await ledger.migrateNotionCompanyState({
+    states: [{ kind: "blocked", company: "Existing Atomic Import" }],
+    importedAt: "2026-08-25T12:00:00.000Z",
+  });
   await ledger.recordProcessedJob({
     sourceKey: "notion:atomic-legacy-job",
     rawUrl: "https://jobs.example.com/atomic-legacy",
@@ -229,14 +225,10 @@ async function atomicImportReplacementFailure(
 
   let rejected = false;
   try {
-    await ledger.replaceImportedNotionCompanyState([
-      {
-        kind: "blocked",
-        company: "Replacement Atomic Import",
-        sourceKey: "notion:atomic-import-replacement",
-        importedAt: "2026-08-25T13:00:00.000Z",
-      },
-    ]);
+    await ledger.migrateNotionCompanyState({
+      states: [{ kind: "blocked", company: "Replacement Atomic Import" }],
+      importedAt: "2026-08-25T13:00:00.000Z",
+    });
   } catch {
     rejected = true;
   }
@@ -252,6 +244,9 @@ async function atomicImportReplacementFailure(
       (await ledger.findCompanyExclusion("atomic runtime exclusion")) !== null,
   };
   await environment.JOB_LEDGER.prepare("DROP TRIGGER reject_imported_state_replacement").run();
-  await ledger.replaceImportedNotionCompanyState([]);
+  await ledger.migrateNotionCompanyState({
+    states: [],
+    importedAt: "2026-08-25T14:00:00.000Z",
+  });
   return result;
 }

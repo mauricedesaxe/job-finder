@@ -10,6 +10,7 @@ import type { ResilientNotionClient } from "./notion/client";
 import { extractRichText, type RichTextItem } from "./notion/helpers";
 
 export const NOTION_COMPANY_STATE_IMPORT_MIGRATION = "notion-company-state-import-v2";
+const COMPANY_BLOCKED_STATUS = "Company Blocked" as const;
 
 export interface InitializeJobLedgerFromNotionOptions {
   client: ResilientNotionClient;
@@ -22,12 +23,8 @@ export type InitializeJobLedgerFromNotionResult =
   | {
       kind: "initialized";
       stats: SelectiveNotionImportStats;
-      migrationName: string;
     }
-  | {
-      kind: "already-initialized";
-      migrationName: string;
-    };
+  | { kind: "already-initialized" };
 
 interface NotionCompanyStateSnapshot {
   states: ImportedNotionCompanyState[];
@@ -45,29 +42,27 @@ export async function initializeJobLedgerFromNotion({
   completedAt = new Date().toISOString(),
 }: InitializeJobLedgerFromNotionOptions): Promise<InitializeJobLedgerFromNotionResult> {
   if (await ledger.hasMigration(NOTION_COMPANY_STATE_IMPORT_MIGRATION)) {
-    return {
-      kind: "already-initialized",
-      migrationName: NOTION_COMPANY_STATE_IMPORT_MIGRATION,
-    };
+    return { kind: "already-initialized" };
   }
 
-  const cutoff = formatDate(monthsAgo(REAPPLY_WINDOW_MONTHS, new Date(completedAt)));
-  const snapshot = await readNotionCompanyState(client, databaseId, completedAt, cutoff);
-  const actualStats = await ledger.replaceImportedNotionCompanyState(snapshot.states);
+  const cutoff = monthsAgo(REAPPLY_WINDOW_MONTHS, new Date(completedAt)).toISOString().slice(0, 10);
+  const snapshot = await readNotionCompanyState(client, databaseId, cutoff);
+  const actualStats = await ledger.migrateNotionCompanyState({
+    states: snapshot.states,
+    importedAt: completedAt,
+  });
   verifyImport(snapshot.stats, actualStats);
   await ledger.markMigration(NOTION_COMPANY_STATE_IMPORT_MIGRATION, completedAt);
 
   return {
     kind: "initialized",
     stats: actualStats,
-    migrationName: NOTION_COMPANY_STATE_IMPORT_MIGRATION,
   };
 }
 
 async function readNotionCompanyState(
   client: ResilientNotionClient,
   databaseId: string,
-  importedAt: string,
   cutoff: string,
 ): Promise<NotionCompanyStateSnapshot> {
   const blockedCompanies = new Map<
@@ -86,7 +81,7 @@ async function readNotionCompanyState(
       start_cursor: cursor,
       filter: {
         or: [
-          { property: "Status", select: { equals: "Company Blocked" } },
+          { property: "Status", select: { equals: COMPANY_BLOCKED_STATUS } },
           { property: "Application Date", date: { on_or_after: cutoff } },
         ],
       },
@@ -99,13 +94,10 @@ async function readNotionCompanyState(
       if (!company) continue;
 
       const normalizedCompany = normalizeJobLedgerText(company);
-      const sourceKey = `notion:${page.id}`;
-      if (propertySelect(page.properties.Status) === "Company Blocked") {
+      if (propertySelect(page.properties.Status) === COMPANY_BLOCKED_STATUS) {
         blockedCompanies.set(normalizedCompany, {
           kind: "blocked",
           company,
-          sourceKey,
-          importedAt,
         });
       }
 
@@ -116,8 +108,6 @@ async function readNotionCompanyState(
           recentApplications.set(normalizedCompany, {
             kind: "recent-application",
             company,
-            sourceKey,
-            importedAt,
             applicationDate,
           });
         }
@@ -190,8 +180,4 @@ function verifyImport(
   throw new Error(
     `Notion company state initialization verification failed. ${mismatches.join(", ")}`,
   );
-}
-
-function formatDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
 }

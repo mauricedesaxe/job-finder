@@ -135,12 +135,8 @@ describe("initializeJobLedgerFromNotion", () => {
     expect(first).toEqual({
       kind: "initialized",
       stats: { blockedCompanies: 2, recentApplications: 4 },
-      migrationName: NOTION_COMPANY_STATE_IMPORT_MIGRATION,
     });
-    expect(second).toEqual({
-      kind: "already-initialized",
-      migrationName: NOTION_COMPANY_STATE_IMPORT_MIGRATION,
-    });
+    expect(second).toEqual({ kind: "already-initialized" });
     expect(source.queryCalls).toHaveLength(2);
     expect(source.queryCalls[0]?.filter).toEqual({
       or: [
@@ -166,7 +162,7 @@ describe("initializeJobLedgerFromNotion", () => {
     const database = new Database(databasePath, { readonly: true });
     const rows = database
       .query(
-        "SELECT normalized_company, kind, source_key, application_date FROM imported_notion_company_state ORDER BY normalized_company, kind",
+        "SELECT normalized_company, kind, imported_at, application_date FROM imported_notion_company_state ORDER BY normalized_company, kind",
       )
       .all();
     const processedJobs = database.query("SELECT COUNT(*) AS count FROM processed_jobs").get();
@@ -179,37 +175,37 @@ describe("initializeJobLedgerFromNotion", () => {
       {
         normalized_company: "blocked co",
         kind: "blocked",
-        source_key: "notion:blocked",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: null,
       },
       {
         normalized_company: "both co",
         kind: "blocked",
-        source_key: "notion:both",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: null,
       },
       {
         normalized_company: "both co",
         kind: "recent-application",
-        source_key: "notion:both",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: "2026-05-01",
       },
       {
         normalized_company: "cutoff co",
         kind: "recent-application",
-        source_key: "notion:cutoff",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: "2026-02-25",
       },
       {
         normalized_company: "dupe co",
         kind: "recent-application",
-        source_key: "notion:dupe-new",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: "2026-04-05",
       },
       {
         normalized_company: "recent co",
         kind: "recent-application",
-        source_key: "notion:recent",
+        imported_at: "2026-08-25T12:00:00.000Z",
         application_date: "2026-03-01",
       },
     ]);
@@ -240,7 +236,7 @@ describe("initializeJobLedgerFromNotion", () => {
     ledger = createSqliteJobLedger(":memory:");
     const failingLedger: JobLedger = {
       ...ledger,
-      replaceImportedNotionCompanyState: async () => ({
+      migrateNotionCompanyState: async () => ({
         blockedCompanies: 0,
         recentApplications: 0,
       }),

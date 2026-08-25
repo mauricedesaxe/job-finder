@@ -200,14 +200,10 @@ test("rolls back SQLite imported state replacement when an insert fails", async 
   const directory = await mkdtemp(join(tmpdir(), "job-ledger-import-atomic-"));
   const databasePath = join(directory, "ledger.sqlite");
   let ledger = createSqliteJobLedger(databasePath);
-  await ledger.replaceImportedNotionCompanyState([
-    {
-      kind: "blocked",
-      company: "Existing Block",
-      sourceKey: "notion:existing",
-      importedAt: "2026-08-25T00:00:00.000Z",
-    },
-  ]);
+  await ledger.migrateNotionCompanyState({
+    states: [{ kind: "blocked", company: "Existing Block" }],
+    importedAt: "2026-08-25T00:00:00.000Z",
+  });
   await ledger.close();
 
   const database = new Database(databasePath);
@@ -223,14 +219,10 @@ test("rolls back SQLite imported state replacement when an insert fails", async 
   ledger = createSqliteJobLedger(databasePath);
   try {
     await expect(
-      ledger.replaceImportedNotionCompanyState([
-        {
-          kind: "blocked",
-          company: "Replacement Block",
-          sourceKey: "notion:replacement",
-          importedAt: "2026-08-25T01:00:00.000Z",
-        },
-      ]),
+      ledger.migrateNotionCompanyState({
+        states: [{ kind: "blocked", company: "Replacement Block" }],
+        importedAt: "2026-08-25T01:00:00.000Z",
+      }),
     ).rejects.toThrow("imported state write failed");
     expect(await ledger.findCompanyExclusion("existing block")).not.toBeNull();
     expect(await ledger.findCompanyExclusion("replacement block")).toBeNull();
