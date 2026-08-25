@@ -1,7 +1,13 @@
 /** Returns a Date `months` calendar-months before `from` (defaults to now). */
 export function monthsAgo(months: number, from: Date = new Date()): Date {
   const d = new Date(from);
-  d.setMonth(d.getMonth() - months);
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() - months);
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDayOfTargetMonth));
   return d;
 }
 

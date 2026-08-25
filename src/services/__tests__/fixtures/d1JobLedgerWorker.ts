@@ -1,7 +1,7 @@
 import { ZodError } from "zod/v4";
 import type { D1DatabaseBinding } from "../../d1";
 import { createD1JobLedger } from "../../d1JobLedger";
-import { isJobLedgerReadyForScrape } from "../../notionLedgerBackfill";
+import { isJobLedgerReadyForScrape } from "../../notionLedgerInitialization";
 import { createD1JobFinderRunLock } from "../../runLock";
 import { runJobLedgerConformanceScenario } from "../jobLedgerConformance";
 
@@ -19,7 +19,7 @@ export default {
       const migration = await environment.JOB_LEDGER.prepare(
         "SELECT COUNT(*) AS count, completed_at FROM job_ledger_migrations WHERE name = ?",
       )
-        .bind("notion-job-ledger-backfill-v1")
+        .bind("notion-company-state-import-v2")
         .first();
 
       return Response.json({
@@ -69,6 +69,10 @@ export default {
 
     if (path === "/atomic-projection/review") {
       return Response.json(await atomicProjectionFailure(environment, ledger, "review"));
+    }
+
+    if (path === "/atomic-import-replacement") {
+      return Response.json(await atomicImportReplacementFailure(environment, ledger));
     }
 
     if (path === "/malformed-projection") {
@@ -184,4 +188,70 @@ async function atomicProjectionFailure(
   );
   await environment.JOB_LEDGER.prepare(`DROP TRIGGER reject_${failedProjection}_projection`).run();
   return { rejected, counts };
+}
+
+async function atomicImportReplacementFailure(
+  environment: TestEnvironment,
+  ledger: ReturnType<typeof createD1JobLedger>,
+) {
+  await ledger.replaceImportedNotionCompanyState([
+    {
+      kind: "blocked",
+      company: "Existing Atomic Import",
+      sourceKey: "notion:atomic-import-existing",
+      importedAt: "2026-08-25T12:00:00.000Z",
+    },
+  ]);
+  await ledger.recordProcessedJob({
+    sourceKey: "notion:atomic-legacy-job",
+    rawUrl: "https://jobs.example.com/atomic-legacy",
+    company: "Atomic Legacy Job",
+    title: "Legacy Engineer",
+    outcome: "historical",
+    processedAt: "2026-08-25T12:00:00.000Z",
+  });
+  await ledger.excludeCompany({
+    company: "Atomic Legacy Exclusion",
+    excludedAt: "2026-08-25T12:00:00.000Z",
+    sourceKey: "notion:atomic-legacy-exclusion",
+  });
+  await ledger.excludeCompany({
+    company: "Atomic Runtime Exclusion",
+    excludedAt: "2026-08-25T12:00:00.000Z",
+  });
+  await environment.JOB_LEDGER.prepare(
+    `CREATE TRIGGER reject_imported_state_replacement
+     BEFORE INSERT ON imported_notion_company_state
+     BEGIN
+       SELECT RAISE(ABORT, 'imported state replacement failed');
+     END`,
+  ).run();
+
+  let rejected = false;
+  try {
+    await ledger.replaceImportedNotionCompanyState([
+      {
+        kind: "blocked",
+        company: "Replacement Atomic Import",
+        sourceKey: "notion:atomic-import-replacement",
+        importedAt: "2026-08-25T13:00:00.000Z",
+      },
+    ]);
+  } catch {
+    rejected = true;
+  }
+
+  const result = {
+    rejected,
+    importedStateSurvived: (await ledger.findCompanyExclusion("existing atomic import")) !== null,
+    legacyJobSurvived:
+      (await ledger.findByRawUrl("https://jobs.example.com/atomic-legacy")) !== null,
+    legacyExclusionSurvived:
+      (await ledger.findCompanyExclusion("atomic legacy exclusion")) !== null,
+    runtimeExclusionSurvived:
+      (await ledger.findCompanyExclusion("atomic runtime exclusion")) !== null,
+  };
+  await environment.JOB_LEDGER.prepare("DROP TRIGGER reject_imported_state_replacement").run();
+  await ledger.replaceImportedNotionCompanyState([]);
+  return result;
 }

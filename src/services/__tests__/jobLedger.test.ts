@@ -7,8 +7,8 @@ import { z } from "zod/v4";
 import type { PendingNotionProjection } from "../jobLedger";
 import {
   isJobLedgerReadyForScrape,
-  NOTION_JOB_LEDGER_BACKFILL_MIGRATION,
-} from "../notionLedgerBackfill";
+  NOTION_COMPANY_STATE_IMPORT_MIGRATION,
+} from "../notionLedgerInitialization";
 import { createSqliteJobLedger } from "../sqliteJobLedger";
 import {
   JOB_LEDGER_CONFORMANCE_RESULT,
@@ -24,11 +24,11 @@ test("preserves the job ledger contract in SQLite", async () => {
   }
 });
 
-test("requires the Notion backfill before SQLite scraping", async () => {
+test("requires Notion initialization before SQLite scraping", async () => {
   const ledger = createSqliteJobLedger(":memory:");
   try {
     expect(await isJobLedgerReadyForScrape(ledger)).toBe(false);
-    await ledger.markMigration(NOTION_JOB_LEDGER_BACKFILL_MIGRATION, "2026-08-25T00:00:00.000Z");
+    await ledger.markMigration(NOTION_COMPANY_STATE_IMPORT_MIGRATION, "2026-08-25T00:00:00.000Z");
     expect(await isJobLedgerReadyForScrape(ledger)).toBe(true);
   } finally {
     await ledger.close();
@@ -192,6 +192,50 @@ test("rolls back terminal state and both outboxes when review storage fails", as
     expect(await localLedger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await localLedger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rolls back SQLite imported state replacement when an insert fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "job-ledger-import-atomic-"));
+  const databasePath = join(directory, "ledger.sqlite");
+  let ledger = createSqliteJobLedger(databasePath);
+  await ledger.replaceImportedNotionCompanyState([
+    {
+      kind: "blocked",
+      company: "Existing Block",
+      sourceKey: "notion:existing",
+      importedAt: "2026-08-25T00:00:00.000Z",
+    },
+  ]);
+  await ledger.close();
+
+  const database = new Database(databasePath);
+  database.run(`
+    CREATE TRIGGER reject_imported_state
+    BEFORE INSERT ON imported_notion_company_state
+    BEGIN
+      SELECT RAISE(ABORT, 'imported state write failed');
+    END
+  `);
+  database.close();
+
+  ledger = createSqliteJobLedger(databasePath);
+  try {
+    await expect(
+      ledger.replaceImportedNotionCompanyState([
+        {
+          kind: "blocked",
+          company: "Replacement Block",
+          sourceKey: "notion:replacement",
+          importedAt: "2026-08-25T01:00:00.000Z",
+        },
+      ]),
+    ).rejects.toThrow("imported state write failed");
+    expect(await ledger.findCompanyExclusion("existing block")).not.toBeNull();
+    expect(await ledger.findCompanyExclusion("replacement block")).toBeNull();
+  } finally {
+    await ledger.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

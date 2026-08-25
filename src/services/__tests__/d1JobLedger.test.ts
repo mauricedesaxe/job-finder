@@ -53,13 +53,12 @@ const ConformanceResultSchema = z.object({
   titles: z.array(z.string()),
   urlLessTitles: z.array(z.string()),
   exclusion: z.object({ company: z.string(), excludedAt: z.string() }).nullable(),
-  notionStats: z.object({
-    sourceRows: z.number(),
-    urls: z.number(),
-    companyTitlePairs: z.number(),
-    urlLessRows: z.number(),
-    exclusions: z.number(),
+  importedStats: z.object({
+    blockedCompanies: z.number(),
+    recentApplications: z.number(),
   }),
+  importedExclusion: z.object({ company: z.string(), excludedAt: z.string() }).nullable(),
+  legacyNotionExclusion: z.object({ company: z.string(), excludedAt: z.string() }).nullable(),
   hasMigration: z.boolean(),
   missingSourceKeyError: z.string(),
   pendingBeforeComplete: z.array(PendingProjectionSchema),
@@ -88,6 +87,13 @@ const CountRowSchema = z.object({ count: z.number() });
 const AtomicResponseSchema = z.object({
   rejected: z.literal(true),
   counts: z.tuple([CountRowSchema, CountRowSchema, CountRowSchema]),
+});
+const AtomicImportReplacementResponseSchema = z.object({
+  rejected: z.literal(true),
+  importedStateSurvived: z.literal(true),
+  legacyJobSurvived: z.literal(true),
+  legacyExclusionSurvived: z.literal(true),
+  runtimeExclusionSurvived: z.literal(true),
 });
 const AcquiredLockSchema = z.object({
   kind: z.literal("acquired"),
@@ -134,7 +140,7 @@ afterAll(async () => {
   await harness.close();
 });
 
-test("requires the Notion backfill before D1 scraping", async () => {
+test("requires Notion initialization before D1 scraping", async () => {
   const response = await worker.fetch("/ready");
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ready: false });
@@ -153,7 +159,7 @@ test("runs the job ledger adapter in workerd", async () => {
   });
 }, 15_000);
 
-test("allows a backfilled D1 ledger to scrape", async () => {
+test("allows an initialized D1 ledger to scrape", async () => {
   const response = await worker.fetch("/ready");
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ready: true });
@@ -226,6 +232,19 @@ for (const failedProjection of ["notion", "review"] as const) {
     });
   }, 15_000);
 }
+
+test("rolls back D1 legacy cleanup and imported replacement together", async () => {
+  const response = await worker.fetch("/atomic-import-replacement");
+  expect(response.status).toBe(200);
+  const body: unknown = await response.json();
+  expect(AtomicImportReplacementResponseSchema.parse(body)).toEqual({
+    rejected: true,
+    importedStateSurvived: true,
+    legacyJobSurvived: true,
+    legacyExclusionSurvived: true,
+    runtimeExclusionSurvived: true,
+  });
+}, 15_000);
 
 test("rejects malformed stored outcomes at the D1 boundary", async () => {
   const response = await worker.fetch("/malformed-outcome");

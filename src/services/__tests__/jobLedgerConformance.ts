@@ -1,10 +1,10 @@
 import type {
   CompanyExclusion,
   JobLedger,
-  NotionBackfillStats,
   PendingNotionProjection,
   PendingReviewProjection,
   ProcessedJob,
+  SelectiveNotionImportStats,
 } from "../jobLedger";
 
 interface JobLedgerConformanceResult {
@@ -15,7 +15,9 @@ interface JobLedgerConformanceResult {
   titles: string[];
   urlLessTitles: string[];
   exclusion: CompanyExclusion | null;
-  notionStats: NotionBackfillStats;
+  importedStats: SelectiveNotionImportStats;
+  importedExclusion: CompanyExclusion | null;
+  legacyNotionExclusion: CompanyExclusion | null;
   hasMigration: boolean;
   missingSourceKeyError: string;
   pendingBeforeComplete: PendingNotionProjection[];
@@ -55,18 +57,20 @@ export const JOB_LEDGER_CONFORMANCE_RESULT: JobLedgerConformanceResult = {
     traceId: null,
   },
   titles: ["Alpha Engineer", "alpha engineer", "Product Engineer", "Senior Engineer"],
-  urlLessTitles: ["Legacy Engineer"],
+  urlLessTitles: [],
   exclusion: {
     company: "  Acme   Labs ",
     excludedAt: "2026-08-22T10:00:00.000Z",
   },
-  notionStats: {
-    sourceRows: 2,
-    urls: 1,
-    companyTitlePairs: 1,
-    urlLessRows: 1,
-    exclusions: 1,
+  importedStats: {
+    blockedCompanies: 2,
+    recentApplications: 1,
   },
+  importedExclusion: {
+    company: "Imported Block",
+    excludedAt: "2026-08-22T13:00:00.000Z",
+  },
+  legacyNotionExclusion: null,
   hasMigration: true,
   missingSourceKeyError: "A source key is required when a processed job has no URL",
   pendingBeforeComplete: [
@@ -221,7 +225,7 @@ export async function runJobLedgerConformanceScenario(
     excludedAt: "2026-08-22T10:00:00.000Z",
   });
   await ledger.excludeCompany({
-    company: "acme labs",
+    company: "Legacy Notion Exclusion",
     excludedAt: "2026-08-22T11:00:00.000Z",
     sourceKey: "notion:block-1",
   });
@@ -230,8 +234,38 @@ export async function runJobLedgerConformanceScenario(
     excludedAt: "2026-08-22T12:00:00.000Z",
   });
 
-  await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T12:00:00.000Z");
-  await ledger.markMigration("notion-job-ledger-backfill-v1", "2026-08-22T13:00:00.000Z");
+  await ledger.replaceImportedNotionCompanyState([
+    {
+      kind: "blocked",
+      company: "Stale Import",
+      sourceKey: "notion:stale",
+      importedAt: "2026-08-22T12:00:00.000Z",
+    },
+  ]);
+  const importedStats = await ledger.replaceImportedNotionCompanyState([
+    {
+      kind: "blocked",
+      company: "Acme Labs",
+      sourceKey: "notion:block-overlap",
+      importedAt: "2026-08-22T13:00:00.000Z",
+    },
+    {
+      kind: "blocked",
+      company: "Imported Block",
+      sourceKey: "notion:block-imported",
+      importedAt: "2026-08-22T13:00:00.000Z",
+    },
+    {
+      kind: "recent-application",
+      company: "Recent Company",
+      sourceKey: "notion:recent",
+      importedAt: "2026-08-22T13:00:00.000Z",
+      applicationDate: "2026-08-20",
+    },
+  ]);
+
+  await ledger.markMigration("notion-company-state-import-v2", "2026-08-22T12:00:00.000Z");
+  await ledger.markMigration("notion-company-state-import-v2", "2026-08-22T13:00:00.000Z");
 
   const notionOnly = await ledger.recordProcessedJob({
     sourceKey: "source:notion-only",
@@ -345,8 +379,10 @@ export async function runJobLedgerConformanceScenario(
     titles: await ledger.titlesForCompany(" acme labs "),
     urlLessTitles: await ledger.titlesForCompany("acme"),
     exclusion: await ledger.findCompanyExclusion("ACME LABS"),
-    notionStats: await ledger.notionBackfillStats(),
-    hasMigration: await ledger.hasMigration("notion-job-ledger-backfill-v1"),
+    importedStats,
+    importedExclusion: await ledger.findCompanyExclusion("imported block"),
+    legacyNotionExclusion: await ledger.findCompanyExclusion("legacy notion exclusion"),
+    hasMigration: await ledger.hasMigration("notion-company-state-import-v2"),
     missingSourceKeyError,
     pendingBeforeComplete,
     pendingAfterOrdinaryUpsert,
