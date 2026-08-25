@@ -2,10 +2,11 @@
 
 Guidance for Claude Code (and any other agent) working in this repository.
 
-This is a single-app Bun project. There is no monorepo, no database, no
-frontend. The thing this repo does is scrape job boards, run them through an
-LLM evaluation pipeline, and write qualified jobs to Notion. Everything else
-exists to make that loop reliable, observable, and cheap.
+This is a single-app Bun project deployed to Cloudflare Workers. There is no
+monorepo or frontend. The app scrapes job boards, evaluates listings with an
+LLM, stores machine state in D1, sends qualified jobs to LangSmith review, and
+reconciles pursued jobs into Notion. Everything else makes that loop reliable,
+observable, and cheap.
 
 The bar for changes is: the next run is at least as trustworthy as the last
 one. False positives in evaluation cost more than false negatives, so we err
@@ -40,7 +41,7 @@ A linear pipeline. Each stage is a module under `src/pipeline/`; cross-cutting
 concerns live alongside.
 
 ```
-search → scrape → structuralFilter → dedup → enrich → evaluate → reconcile → Notion
+search → scrape → structuralFilter → evaluate → enrich → dedup → D1 outboxes
 ```
 
 ```
@@ -49,7 +50,7 @@ src/
     __tests__/     unit tests
     __integration__/  full-pipeline tests + .md fixtures
   services/        external integrations (LLM, Notion, ATS, Slack, exchangeRates, http)
-    llm.ts         the only place that talks to OpenAI/OpenRouter
+    langsmith.ts   prompt releases, OpenRouter execution, and traces
     notion/        client + queries + mutations + builders + helpers
     ats/           dispatcher for greenhouse/lever/ashby
   concurrency/     reusable primitives — Semaphore, RateLimiter, CircuitBreaker, retry
@@ -57,22 +58,23 @@ src/
   scripts/ (top-level) one-off operational scripts (reevaluate, migrate, etc.)
 ```
 
-`src/index.ts` is the entrypoint that wires the stages together for the
-`scrape` and `reconcile` commands.
+`src/index.ts` wires the CLI commands. `src/cloudflare.ts` runs the same pipeline
+inside the scheduled and manually triggered Cloudflare Workflow.
 
 ## Hard rules
 
 - **Conventional commits.** Enforced by the `commit-msg` hook. Types:
-  `feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert`. The squash
-  commit on merge becomes a line in the auto-generated release notes — write it
-  like a release note, not a diary entry.
+  `feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert`. Pull request
+  titles feed the generated release notes. Keep commit subjects ready for
+  permanent `main` history.
 - **Atomic commits.** One logical change per commit. Don't fold unrelated
   cleanup into a feature commit.
 - **Never bypass hooks.** No `--no-verify`. If lefthook fails, the underlying
   problem is the bug, not the hook.
-- **Env vars only via `src/config`.** All `process.env` access lives in
-  `config/schema.ts`, validated by Zod, frozen at startup. The app refuses to
-  start with bad config — that is the point.
+- **Application env vars only via `src/config`.** Production `process.env`
+  access lives in `config/schema.ts`, validated by Zod and frozen at startup.
+  Scripts may read their own task-specific flags, and tests may construct
+  environment fixtures.
 - **Structured logging via Pino child loggers.** Pass structured fields
   (`log.info({ url, attempt }, "search retry")`), not interpolated strings.
   Never log secrets.
@@ -85,7 +87,7 @@ src/
   exact version. No `^`, no `~`. Updates are deliberate, lockfile-checked, and
   land in their own commit.
 - **Modules are domain models.** A file's name describes the subject it
-  owns (`exchangeRates.ts`, `notionCache.ts`, `tokenTracker.ts`). If a
+  owns (`exchangeRates.ts`, `notionLedgerInitialization.ts`, `runLock.ts`). If a
   candidate filename describes a role rather than a piece of the domain,
   push back on the design — you probably haven't decided what it is yet.
 
@@ -164,10 +166,10 @@ fluent nonsense. The pipeline keeps working anyway because composition
 — structural filter, AND-ed filters, OR-ed profiles, fixture-pinned
 thresholds — enforces decisions; the LLM only informs them.
 
-- **All LLM calls go through `services/llm.ts`.** It owns the OpenRouter
-  client. No direct `openai` imports anywhere else.
-- **Token usage is tracked.** Every call logs token usage via `TokenTracker`.
-  If you add a new LLM call site, wire the tracker through.
+- **All LLM calls go through `services/langsmith.ts`.** It pulls immutable
+  prompt releases from LangSmith and executes them through OpenRouter.
+- **LangSmith traces own usage and cost.** Every processed job requires an
+  accepted root trace with model, token, cost, latency, prompt, and retry data.
 - **LLM bursts are bounded.** Stack `Semaphore` → `CircuitBreaker` →
   `withRetry` from `src/concurrency/`. Don't reinvent.
 - **Failure modes are defined.** Timeout, malformed `tool_call`, rate limit —
@@ -177,25 +179,28 @@ thresholds — enforces decisions; the LLM only informs them.
   rules, and the AND/OR composition enforce decisions; the LLM informs them.
   A single LLM hallucination should change at most one job's outcome, never the
   pipeline's behaviour.
-- **Prompt changes ship with fixtures.** New prompt behaviour (added
-  criterion, changed N-shot example) gets a fixture that exercises it — both a
-  passing case and a rejecting case.
+- **Prompt behavior is promoted through LangSmith experiments.** Keep passing
+  and rejecting cases separate, repeat critical false-positive cases, and move
+  one immutable release tag across the complete prompt set.
 
-## Notion as database
+## Notion as CRM
 
-Notion is the system of record. Treat it accordingly.
+Notion owns application records. D1 owns machine state and pending writes.
 
 - **All Notion access goes through `services/notion`.** Builders compose
   page properties, mutations write, queries read, helpers normalise. No raw
   `@notionhq/client` calls outside this directory.
-- **One cache per run.** `notionCache.ts` pre-loads what we need; mutations
-  flow through `NotionCacheUpdater` so the in-memory view stays consistent.
+- **One selective initialization per run.** Import blocked companies and recent
+  applications from Notion. Do not rebuild processed-job history from it.
+- **Notion writes drain from D1.** A terminal result and its pending projection
+  commit atomically, then replay removes the projection after a confirmed write.
 - **Reconcile is idempotent.** A second `reconcile()` call must not change
   steady state. Both pre-scrape and post-scrape passes run every full run.
 - **Notion is rate-limited and eventually consistent.** Expect 429s. Retries
   go through `withRetry`. Don't assume read-after-write within a run.
-- **Dedup canonicalises URLs.** See `pipeline/dedup.ts`. New job sources need
-  their URL shape considered there before they're trusted as unique.
+- **Dedup stores exact raw URLs in D1.** It also fuzzy-matches normalized company
+  and title pairs. New job sources need their URL shape considered before they
+  are trusted as unique.
 
 ## Concurrency primitives
 
@@ -210,17 +215,20 @@ Upstream calls are stacked: `Semaphore.run(() => Breaker.run(() => withRetry(...
 The order matters — the semaphore bounds total in-flight work, the breaker
 fails fast on a sick upstream, retries handle transient flakes inside that.
 
-## Git workflow
+## Version control workflow
 
+- **Jujutsu drives local version control.** Use colocated jj with bookmarks
+  named `<type>/<#>-<slug>`.
 - **Conventional commits**, atomic, per logical change.
-- **Branches** are flat: `feat-ats-dispatcher`, not `feature/ats-dispatcher`.
-- **Squash merge to `main` triggers a release.** `.github/workflows/release.yml`
-  cuts a CalVer tag and a GitHub Release with auto-generated notes from commit
-  messages. The squash commit title shows up verbatim in those notes — write
-  it for the reader.
-- **Solo dev workflow.** No required reviews. Self-review with `/review`
+- **Rebase merge to `main` triggers a release.** `.github/workflows/release.yml`
+  cuts a CalVer tag and a GitHub Release with generated notes from the landed
+  pull requests. Keep both PR titles and commit subjects release-ready.
+- **Verify every release after merge.** Wait for the latest `release.yml` run
+  on `main`. Report a failed workflow. On success, report the CalVer tag and
+  GitHub Release URL.
+- **Solo dev workflow.** No required reviews. Self-review with `/lazar-review`
   before merge.
-- `Co-Authored-By` trailers are fine.
+- Human `Co-Authored-By` trailers are fine. Do not add AI attribution trailers.
 
 ## Style
 
