@@ -124,42 +124,48 @@ export async function initLangSmith(
   cfg: LangSmithConfig,
   deps: LangSmithDependencies = {},
 ): Promise<void> {
+  const ownsClient = deps.client === undefined;
   const client = deps.client ?? new Client({ apiUrl: cfg.endpoint, apiKey: cfg.apiKey });
-  const resolve = deps.resolvePrompt ?? resolvePrompt;
-  const load = deps.pullPrompt ?? pullPrompt;
-  const versions = await Promise.all(
-    PROMPT_NAMES.map(async (name) => {
-      const version = await resolve({ client, config: cfg, name });
-      return [name, version] as const;
-    }),
-  );
-  const commonReleaseTags = versions.reduce(
-    (common, [, version]) => {
-      for (const releaseTag of common) {
-        if (!version.releaseTags.some((tag) => tag.name === releaseTag)) {
-          common.delete(releaseTag);
+  try {
+    const resolve = deps.resolvePrompt ?? resolvePrompt;
+    const load = deps.pullPrompt ?? pullPrompt;
+    const versions = await Promise.all(
+      PROMPT_NAMES.map(async (name) => {
+        const version = await resolve({ client, config: cfg, name });
+        return [name, version] as const;
+      }),
+    );
+    const commonReleaseTags = versions.reduce(
+      (common, [, version]) => {
+        for (const releaseTag of common) {
+          if (!version.releaseTags.some((tag) => tag.name === releaseTag)) {
+            common.delete(releaseTag);
+          }
         }
-      }
-      return common;
-    },
-    new Set(versions[0]?.[1].releaseTags.map((tag) => tag.name)),
-  );
-  const releaseTag = [...commonReleaseTags].sort().at(-1);
-  if (!releaseTag) throw new Error("Production prompts have mixed releases");
-  const resolved = await Promise.all(
-    versions.map(async ([name, version]) => {
-      const release = version.releaseTags.find((tag) => tag.name === releaseTag);
-      if (!release) throw new Error(`Prompt ${name} is missing release ${releaseTag}`);
-      const runnable = await load({ client, config: cfg, name, commitHash: release.commitHash });
-      return [name, { commitHash: release.commitHash, releaseTag, runnable }] as const;
-    }),
-  );
-  state = {
-    client,
-    project: cfg.project,
-    prompts: new Map(resolved),
-    reviewQueue: createReviewQueue(client),
-  };
+        return common;
+      },
+      new Set(versions[0]?.[1].releaseTags.map((tag) => tag.name)),
+    );
+    const releaseTag = [...commonReleaseTags].sort().at(-1);
+    if (!releaseTag) throw new Error("Production prompts have mixed releases");
+    const resolved = await Promise.all(
+      versions.map(async ([name, version]) => {
+        const release = version.releaseTags.find((tag) => tag.name === releaseTag);
+        if (!release) throw new Error(`Prompt ${name} is missing release ${releaseTag}`);
+        const runnable = await load({ client, config: cfg, name, commitHash: release.commitHash });
+        return [name, { commitHash: release.commitHash, releaseTag, runnable }] as const;
+      }),
+    );
+    state = {
+      client,
+      project: cfg.project,
+      prompts: new Map(resolved),
+      reviewQueue: createReviewQueue(client),
+    };
+  } catch (error) {
+    if (ownsClient) client.cleanup();
+    throw error;
+  }
 }
 
 function configuredPrompt(name: PromptName): ResolvedPrompt {
@@ -181,6 +187,11 @@ export function getPromptReleaseTag(): string {
 export async function enqueueReviewTrace(traceId: string): Promise<void> {
   if (!state) throw new Error("LangSmith is not initialized");
   await state.reviewQueue.enqueue(traceId);
+}
+
+export async function enqueueReviewTraceIfMissing(traceId: string): Promise<void> {
+  if (!state) throw new Error("LangSmith is not initialized");
+  await state.reviewQueue.enqueueIfMissing(traceId);
 }
 
 export function completedReviews(): AsyncIterable<CompletedReview> {

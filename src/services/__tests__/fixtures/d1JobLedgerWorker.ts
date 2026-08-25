@@ -1,19 +1,11 @@
 import { ZodError } from "zod/v4";
+import type { D1DatabaseBinding } from "../../d1";
 import { createD1JobLedger } from "../../d1JobLedger";
+import { createD1JobFinderRunLock } from "../../runLock";
 import { runJobLedgerConformanceScenario } from "../jobLedgerConformance";
 
-interface TestD1Statement {
-  bind(...values: (string | null)[]): TestD1Statement;
-  first(): Promise<unknown>;
-  all(): Promise<unknown>;
-  run(): Promise<unknown>;
-}
-
 interface TestEnvironment {
-  JOB_LEDGER: {
-    prepare(query: string): TestD1Statement;
-    batch(statements: TestD1Statement[]): Promise<unknown>;
-  };
+  JOB_LEDGER: D1DatabaseBinding;
 }
 
 export default {
@@ -35,51 +27,43 @@ export default {
       });
     }
 
-    if (path === "/atomic-projection") {
-      await environment.JOB_LEDGER.prepare(
-        `CREATE TRIGGER reject_pending_projection
-         BEFORE INSERT ON pending_notion_projections
-         BEGIN
-           SELECT RAISE(ABORT, 'projection write failed');
-         END`,
-      ).run();
+    if (path === "/run-lock") {
+      const lock = createD1JobFinderRunLock(environment.JOB_LEDGER);
+      const acquired = await lock.acquire("run-1", "2026-08-24T22:00:00.000Z");
+      const contended = await lock.acquire("run-2", "2026-08-24T22:01:00.000Z");
+      const wrongRelease = await lock.release("run-2");
+      const released = await lock.release("run-1");
+      const reacquired = await lock.acquire("run-2", "2026-08-24T22:02:00.000Z");
+      await lock.release("run-2");
+      return Response.json({ acquired, contended, wrongRelease, released, reacquired });
+    }
 
-      let rejected = false;
-      try {
-        await ledger.recordProcessedJob({
-          sourceKey: "source:atomic",
-          rawUrl: "https://jobs.example.com/atomic",
-          company: "Atomic Co",
-          title: "Atomic Engineer",
-          outcome: "inserted",
-          pendingNotionProjection: {
-            job: {
-              title: "Atomic Engineer",
-              company: "Atomic Co",
-              url: "https://jobs.example.com/atomic",
-              source: "Example",
-              keywordsMatched: ["engineer"],
-              datePosted: null,
-              dateScraped: "2026-08-24",
-              description: "Atomic projection",
-              location: "Remote",
-              profile: "Backend",
-            },
-            status: "To Review",
-            createdAt: "2026-08-24T10:00:00.000Z",
-          },
-        });
-      } catch {
-        rejected = true;
-      }
+    if (path === "/run-lock-concurrent") {
+      const lock = createD1JobFinderRunLock(environment.JOB_LEDGER);
+      const results = await Promise.all([
+        lock.acquire("concurrent-1", "2026-08-24T22:10:00.000Z"),
+        lock.acquire("concurrent-2", "2026-08-24T22:10:01.000Z"),
+      ]);
+      const owner = results.find((result) => result.kind === "acquired");
+      if (!owner) throw new Error("Concurrent acquisition returned no owner");
+      await lock.release(owner.workflowInstanceId);
+      return Response.json({ results });
+    }
 
-      const processed = await environment.JOB_LEDGER.prepare(
-        "SELECT source_key FROM processed_jobs WHERE source_key = ?",
-      )
-        .bind("source:atomic")
-        .first();
-      await environment.JOB_LEDGER.prepare("DROP TRIGGER reject_pending_projection").run();
-      return Response.json({ rejected, rolledBack: processed === null });
+    if (path === "/run-lock-same-owner") {
+      const lock = createD1JobFinderRunLock(environment.JOB_LEDGER);
+      const first = await lock.acquire("same-owner", "2026-08-24T22:20:00.000Z");
+      const second = await lock.acquire("same-owner", "2026-08-24T22:21:00.000Z");
+      await lock.release("same-owner");
+      return Response.json({ first, second });
+    }
+
+    if (path === "/atomic-projection/notion") {
+      return Response.json(await atomicProjectionFailure(environment, ledger, "notion"));
+    }
+
+    if (path === "/atomic-projection/review") {
+      return Response.json(await atomicProjectionFailure(environment, ledger, "review"));
     }
 
     if (path === "/malformed-projection") {
@@ -133,3 +117,66 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+async function atomicProjectionFailure(
+  environment: TestEnvironment,
+  ledger: ReturnType<typeof createD1JobLedger>,
+  failedProjection: "notion" | "review",
+) {
+  const table =
+    failedProjection === "notion" ? "pending_notion_projections" : "pending_review_projections";
+  await environment.JOB_LEDGER.prepare(
+    `CREATE TRIGGER reject_${failedProjection}_projection
+     BEFORE INSERT ON ${table}
+     BEGIN
+       SELECT RAISE(ABORT, '${failedProjection} projection write failed');
+     END`,
+  ).run();
+
+  const sourceKey = `source:atomic-${failedProjection}`;
+  let rejected = false;
+  try {
+    await ledger.recordProcessedJob({
+      sourceKey,
+      rawUrl: `https://jobs.example.com/atomic-${failedProjection}`,
+      company: "Atomic Co",
+      title: "Atomic Engineer",
+      outcome: "inserted",
+      projections: {
+        kind: "notion-and-review",
+        notion: {
+          job: {
+            title: "Atomic Engineer",
+            company: "Atomic Co",
+            url: `https://jobs.example.com/atomic-${failedProjection}`,
+            source: "Example",
+            keywordsMatched: ["engineer"],
+            datePosted: null,
+            dateScraped: "2026-08-24",
+            description: "Atomic projection",
+            location: "Remote",
+            profile: "Backend",
+          },
+          status: "To Review",
+          createdAt: "2026-08-24T10:00:00.000Z",
+        },
+        review: {
+          traceId: `trace-atomic-${failedProjection}`,
+          createdAt: "2026-08-24T10:00:00.000Z",
+        },
+      },
+    });
+  } catch {
+    rejected = true;
+  }
+
+  const counts = await Promise.all(
+    ["processed_jobs", "pending_notion_projections", "pending_review_projections"].map((name) =>
+      environment.JOB_LEDGER.prepare(`SELECT COUNT(*) AS count FROM ${name} WHERE source_key = ?`)
+        .bind(sourceKey)
+        .first(),
+    ),
+  );
+  await environment.JOB_LEDGER.prepare(`DROP TRIGGER reject_${failedProjection}_projection`).run();
+  return { rejected, counts };
+}

@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { projectPendingReviewProjection } from "../../pipeline/reviewProjection";
 import { ReviewSnapshotSchema } from "../../review";
 import { createReviewQueue, JOB_REVIEW_QUEUE_NAME } from "../reviewQueue";
+import { createSqliteJobLedger } from "../sqliteJobLedger";
 
 const traceId = "trace-123";
 const reviewedAt = "2026-08-24T10:30:00.000Z";
@@ -162,6 +164,7 @@ test("rejects reviews whose snapshot trace differs from the queue run", async ()
 
 test("creates the review queue and enqueues the trace with extended retention", async () => {
   const calls: string[] = [];
+  let itemLists = 0;
   const queue = createReviewQueue({
     ...unreadReviewData,
     createFeedbackConfig: async ({ feedbackKey }) => {
@@ -194,6 +197,7 @@ test("creates the review queue and enqueues the trace with extended retention", 
           expect(options?.maxRetries).toBe(0);
         },
         async *list() {
+          itemLists++;
           yield* [];
         },
       },
@@ -204,6 +208,7 @@ test("creates the review queue and enqueues the trace with extended retention", 
 
   expect(calls).toContain("queue:job-finder-job-review");
   expect(calls).toContain("enqueue:queue-123:trace-123");
+  expect(itemLists).toBe(0);
 });
 
 test("reuses an existing queue and its initialized queue id", async () => {
@@ -299,6 +304,60 @@ test("retries queue initialization after a transient failure", async () => {
   await queue.enqueue(traceId);
 
   expect(attempts).toBe(2);
+});
+
+test("skips a duplicate external write when an outbox replay finds the trace", async () => {
+  let queued = false;
+  let writes = 0;
+  const queue = createReviewQueue({
+    ...unreadReviewData,
+    createFeedbackConfig: async () => {},
+    async *listAnnotationQueues() {
+      yield { id: "existing-queue" };
+    },
+    createAnnotationQueue: async () => ({ id: "new-queue" }),
+    updateAnnotationQueue: async () => {},
+    annotationQueues: {
+      items: {
+        create: async () => {
+          writes++;
+          queued = true;
+        },
+        async *list(_queueId, { status }) {
+          if (queued && status === "needs_my_review") yield { run_id: traceId };
+        },
+      },
+    },
+  });
+
+  const ledger = createSqliteJobLedger(":memory:");
+  try {
+    const stored = await ledger.recordProcessedJob({
+      rawUrl: snapshot.job.url,
+      company: snapshot.job.company,
+      title: snapshot.job.title,
+      outcome: "inserted",
+      projections: {
+        kind: "notion-and-review",
+        notion: { job: snapshot.job, status: "To Review", createdAt: reviewedAt },
+        review: { traceId, createdAt: reviewedAt },
+      },
+    });
+    if (stored.kind !== "notion-and-review") throw new Error("Expected pending projections");
+
+    await queue.enqueue(traceId);
+    expect(await ledger.listPendingReviewProjections()).toEqual([stored.review]);
+    await projectPendingReviewProjection({
+      ledger,
+      projection: stored.review,
+      enqueue: queue.enqueueIfMissing,
+    });
+
+    expect(writes).toBe(1);
+    expect(await ledger.listPendingReviewProjections()).toEqual([]);
+  } finally {
+    await ledger.close();
+  }
 });
 
 test("propagates an ambiguous queue failure when the run is absent", async () => {

@@ -4,6 +4,7 @@ import {
   type CompanyExclusion,
   type NotionBackfillStats,
   type PendingNotionProjection,
+  type PendingReviewProjection,
   PROCESSED_JOB_OUTCOMES,
   type ProcessedJob,
 } from "./jobLedger";
@@ -35,6 +36,12 @@ const NotionBackfillStatsSchema = z.object({
 });
 
 const MigrationRowSchema = z.object({ name: z.string() });
+
+const PendingReviewProjectionRowSchema = z.object({
+  source_key: z.string(),
+  trace_id: z.string().min(1),
+  created_at: z.iso.datetime(),
+});
 
 const PendingNotionProjectionRowSchema = z.object({
   source_key: z.string(),
@@ -89,4 +96,15 @@ export function parsePendingNotionProjectionRows(value: unknown): PendingNotionP
         createdAt: row.created_at,
       };
     });
+}
+
+export function parsePendingReviewProjectionRows(value: unknown): PendingReviewProjection[] {
+  return z
+    .array(PendingReviewProjectionRowSchema)
+    .parse(value)
+    .map((row) => ({
+      sourceKey: row.source_key,
+      traceId: row.trace_id,
+      createdAt: row.created_at,
+    }));
 }

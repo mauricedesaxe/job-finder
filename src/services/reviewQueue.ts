@@ -122,6 +122,7 @@ interface ReviewQueueClient {
 
 export function createReviewQueue(client: ReviewQueueClient): {
   enqueue(traceId: string): Promise<void>;
+  enqueueIfMissing(traceId: string): Promise<void>;
   completedReviews(): AsyncIterable<CompletedReview>;
 } {
   let queueId: Promise<string> | undefined;
@@ -129,18 +130,12 @@ export function createReviewQueue(client: ReviewQueueClient): {
   return {
     async enqueue(traceId) {
       const id = await getQueueId();
-      try {
-        await client.annotationQueues.items.create(
-          id,
-          {
-            extend_trace_retention: true,
-            items: [{ item_type: "RUN", run_id: traceId }],
-          },
-          { maxRetries: 0 },
-        );
-      } catch (error) {
-        if (!(await queueContainsRun(client, id, traceId))) throw error;
-      }
+      await enqueue(id, traceId);
+    },
+    async enqueueIfMissing(traceId) {
+      const id = await getQueueId();
+      if (await queueContainsRun(client, id, traceId)) return;
+      await enqueue(id, traceId);
     },
     async *completedReviews() {
       const id = await getQueueId();
@@ -153,6 +148,21 @@ export function createReviewQueue(client: ReviewQueueClient): {
       }
     },
   };
+
+  async function enqueue(id: string, traceId: string): Promise<void> {
+    try {
+      await client.annotationQueues.items.create(
+        id,
+        {
+          extend_trace_retention: true,
+          items: [{ item_type: "RUN", run_id: traceId }],
+        },
+        { maxRetries: 0 },
+      );
+    } catch (error) {
+      if (!(await queueContainsRun(client, id, traceId))) throw error;
+    }
+  }
 
   async function getQueueId(): Promise<string> {
     queueId ??= findOrCreateQueue(client);

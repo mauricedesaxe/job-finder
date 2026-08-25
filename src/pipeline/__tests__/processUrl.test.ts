@@ -72,6 +72,7 @@ describe("recordTerminalResult", () => {
       job,
       outcome: "inserted",
       traceId: "trace-123",
+      review: { enqueue: async () => undefined },
       projection: { notion: notionClient(), databaseId: "database" },
     });
 
@@ -98,13 +99,22 @@ describe("recordTerminalResult", () => {
       });
 
       await expect(
-        recordTerminalResult({
-          ledger,
-          job,
-          outcome,
-          traceId: "trace-123",
-          projection: { notion, databaseId: "database" },
-        }),
+        outcome === "inserted"
+          ? recordTerminalResult({
+              ledger,
+              job,
+              outcome,
+              traceId: "trace-123",
+              review: { enqueue: async () => undefined },
+              projection: { notion, databaseId: "database" },
+            })
+          : recordTerminalResult({
+              ledger,
+              job,
+              outcome,
+              traceId: "trace-123",
+              projection: { notion, databaseId: "database" },
+            }),
       ).rejects.toThrow("Notion unavailable");
       expect(await ledger.listPendingNotionProjections()).toEqual([
         expect.objectContaining({ sourceKey: `url:${job.url}`, job, status }),

@@ -294,12 +294,12 @@ async function processJobBody(
         state.outcome = outcome;
         state.reviewSnapshot = snapshot;
         return async () => {
-          await enqueueReviewTrace(traceId);
           await recordTerminalResult({
             ledger,
             job,
             outcome,
             traceId,
+            review: { enqueue: enqueueReviewTrace },
             projection: { notion, databaseId: config.notionDatabaseId },
           });
         };

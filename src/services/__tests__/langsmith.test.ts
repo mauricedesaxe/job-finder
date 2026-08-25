@@ -86,6 +86,30 @@ describe("LangSmith prompt resolution", () => {
     ).rejects.toThrow("mixed releases");
   });
 
+  test("cleans a newly created client when initialization fails", async () => {
+    const cleanup = spyOn(Client.prototype, "cleanup").mockImplementation(() => {});
+    try {
+      await expect(
+        initLangSmith(
+          {
+            apiKey: "key",
+            endpoint: "https://example.test",
+            project: "test",
+            openrouterApiKey: "router",
+          },
+          {
+            resolvePrompt: async () => {
+              throw new Error("prompt resolution failed");
+            },
+          },
+        ),
+      ).rejects.toThrow("prompt resolution failed");
+      expect(cleanup).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup.mockRestore();
+    }
+  });
+
   test("selects the common release when unchanged prompts retain older tags", async () => {
     await initLangSmith(
       {

@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { URL as NodeUrl } from "node:url";
 import type {
   JobLedger,
   PendingNotionProjection,
@@ -10,6 +11,7 @@ import type {
 import {
   companyExclusionWriteValues,
   createCompanyExclusionWriteRecord,
+  createPendingJobProjections,
   createProcessedJobWriteRecord,
   normalizeJobLedgerText,
   processedJobWriteValues,
@@ -19,6 +21,7 @@ import {
   parseMigrationRow,
   parseNotionBackfillStats,
   parsePendingNotionProjectionRows,
+  parsePendingReviewProjectionRows,
   parseProcessedJobRow,
   parseTitleRows,
 } from "./jobLedgerRows";
@@ -28,16 +31,23 @@ import {
   FIND_COMPANY_EXCLUSION_SQL,
   HAS_MIGRATION_SQL,
   LIST_PENDING_NOTION_PROJECTIONS_SQL,
+  LIST_PENDING_REVIEW_PROJECTIONS_SQL,
   MARK_MIGRATION_SQL,
   MARK_NOTION_PROJECTION_COMPLETE_SQL,
+  MARK_REVIEW_PROJECTION_COMPLETE_SQL,
   NOTION_BACKFILL_STATS_SQL,
   RECORD_PENDING_NOTION_PROJECTION_SQL,
+  RECORD_PENDING_REVIEW_PROJECTION_SQL,
   RECORD_PROCESSED_JOB_SQL,
   TITLES_FOR_COMPANY_SQL,
 } from "./jobLedgerSql";
 
-const JOB_LEDGER_SCHEMA = ["0001_job_ledger.sql", "0002_pending_notion_projections.sql"]
-  .map((name) => readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8"))
+const JOB_LEDGER_SCHEMA = [
+  "0001_job_ledger.sql",
+  "0002_pending_notion_projections.sql",
+  "0003_run_lock_and_pending_review_projections.sql",
+]
+  .map((name) => readFileSync(new NodeUrl(`../../migrations/${name}`, import.meta.url), "utf8"))
   .join("\n");
 
 export function createSqliteJobLedger(
@@ -87,6 +97,15 @@ export function createSqliteJobLedger(
   const markNotionProjectionComplete = database.query<never, [string]>(
     MARK_NOTION_PROJECTION_COMPLETE_SQL,
   );
+  const recordPendingReviewProjection = database.query<never, [string, string, string]>(
+    RECORD_PENDING_REVIEW_PROJECTION_SQL,
+  );
+  const listPendingReviewProjections = database.query<Record<string, unknown>, []>(
+    LIST_PENDING_REVIEW_PROJECTIONS_SQL,
+  );
+  const markReviewProjectionComplete = database.query<never, [string]>(
+    MARK_REVIEW_PROJECTION_COMPLETE_SQL,
+  );
   const excludeCompany = database.query<never, [string, string, string, string | null]>(
     EXCLUDE_COMPANY_SQL,
   );
@@ -94,22 +113,33 @@ export function createSqliteJobLedger(
   const recordProcessedJobAtomically = database.transaction((input: RecordProcessedJobInput) => {
     const record = createProcessedJobWriteRecord(input);
     recordProcessedJob.run(...processedJobWriteValues(record));
-    if (!input.pendingNotionProjection) return null;
 
-    const projection: PendingNotionProjection = {
-      sourceKey: record.sourceKey,
-      job: input.pendingNotionProjection.job,
-      status: input.pendingNotionProjection.status,
-      createdAt: input.pendingNotionProjection.createdAt,
-    };
+    const projections = createPendingJobProjections(record.sourceKey, input.projections);
+    switch (projections.kind) {
+      case "none":
+        break;
+      case "notion":
+        recordNotionProjection(projections.notion);
+        break;
+      case "notion-and-review":
+        recordNotionProjection(projections.notion);
+        recordPendingReviewProjection.run(
+          projections.review.sourceKey,
+          projections.review.traceId,
+          projections.review.createdAt,
+        );
+        break;
+    }
+    return projections;
+  });
+  function recordNotionProjection(projection: PendingNotionProjection): void {
     recordPendingNotionProjection.run(
       projection.sourceKey,
       JSON.stringify(projection.job),
       projection.status,
       projection.createdAt,
     );
-    return projection;
-  });
+  }
 
   return {
     async findByRawUrl(rawUrl) {
@@ -129,6 +159,12 @@ export function createSqliteJobLedger(
     },
     async markNotionProjectionComplete(sourceKey) {
       markNotionProjectionComplete.run(sourceKey);
+    },
+    async listPendingReviewProjections() {
+      return parsePendingReviewProjectionRows(listPendingReviewProjections.all());
+    },
+    async markReviewProjectionComplete(sourceKey) {
+      markReviewProjectionComplete.run(sourceKey);
     },
     async excludeCompany(input) {
       const record = createCompanyExclusionWriteRecord(input);

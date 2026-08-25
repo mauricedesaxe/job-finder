@@ -111,16 +111,70 @@ test("rolls back the processed job when its projection cannot be stored", async 
         company: pendingNotionProjection.job.company,
         title: pendingNotionProjection.job.title,
         outcome: "inserted",
-        pendingNotionProjection: {
-          job: pendingNotionProjection.job,
-          status: pendingNotionProjection.status,
-          createdAt: pendingNotionProjection.createdAt,
+        projections: {
+          kind: "notion",
+          notion: {
+            job: pendingNotionProjection.job,
+            status: pendingNotionProjection.status,
+            createdAt: pendingNotionProjection.createdAt,
+          },
         },
       }),
     ).rejects.toThrow("projection write failed");
     expect(await ledger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
+    expect(await ledger.listPendingNotionProjections()).toEqual([]);
+    expect(await ledger.listPendingReviewProjections()).toEqual([]);
   } finally {
     await ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rolls back terminal state and both outboxes when review storage fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "job-ledger-review-atomic-"));
+  const databasePath = join(directory, "ledger.sqlite");
+  let localLedger = createSqliteJobLedger(databasePath);
+  await localLedger.close();
+
+  const database = new Database(databasePath);
+  database.run(`
+    CREATE TRIGGER reject_pending_review_projection
+    BEFORE INSERT ON pending_review_projections
+    BEGIN
+      SELECT RAISE(ABORT, 'review projection write failed');
+    END
+  `);
+  database.close();
+
+  localLedger = createSqliteJobLedger(databasePath);
+  const pendingNotionProjection = pendingProjection("source:review-atomic");
+  try {
+    await expect(
+      localLedger.recordProcessedJob({
+        sourceKey: pendingNotionProjection.sourceKey,
+        rawUrl: pendingNotionProjection.job.url,
+        company: pendingNotionProjection.job.company,
+        title: pendingNotionProjection.job.title,
+        outcome: "inserted",
+        projections: {
+          kind: "notion-and-review",
+          notion: {
+            job: pendingNotionProjection.job,
+            status: pendingNotionProjection.status,
+            createdAt: pendingNotionProjection.createdAt,
+          },
+          review: {
+            traceId: "trace-review-atomic",
+            createdAt: pendingNotionProjection.createdAt,
+          },
+        },
+      }),
+    ).rejects.toThrow("review projection write failed");
+    expect(await localLedger.findByRawUrl(pendingNotionProjection.job.url)).toBeNull();
+    expect(await localLedger.listPendingNotionProjections()).toEqual([]);
+    expect(await localLedger.listPendingReviewProjections()).toEqual([]);
+  } finally {
+    await localLedger.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

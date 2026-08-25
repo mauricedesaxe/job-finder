@@ -124,10 +124,13 @@ async function seedProjection(ledger: ReturnType<typeof createSqliteJobLedger>):
     title: job.title,
     outcome: "inserted",
     processedAt: projection.createdAt,
-    pendingNotionProjection: {
-      job: projection.job,
-      status: projection.status,
-      createdAt: projection.createdAt,
+    projections: {
+      kind: "notion",
+      notion: {
+        job: projection.job,
+        status: projection.status,
+        createdAt: projection.createdAt,
+      },
     },
   });
 }
