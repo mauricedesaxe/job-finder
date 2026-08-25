@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { JobFinderRunModeSchema } from "./jobFinder";
 import type { JobFinderRunLock } from "./services/runLock";
 
 export const WorkflowRunIdSchema = z
@@ -6,12 +7,6 @@ export const WorkflowRunIdSchema = z
   .min(1)
   .max(100)
   .regex(/^[a-zA-Z0-9_][a-zA-Z0-9-_]*$/);
-
-export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("scrape") }),
-  z.object({ kind: z.literal("reconcile") }),
-  z.object({ kind: z.literal("backfill") }),
-]);
 
 export const WorkflowPayloadSchema = z.object({
   mode: JobFinderRunModeSchema,

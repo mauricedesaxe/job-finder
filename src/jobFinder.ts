@@ -1,3 +1,4 @@
+import { z } from "zod/v4";
 import { isRetryableJina, jinaBreaker, jinaSearchSemaphore, withRetry } from "./concurrency";
 import type { JobFinderConfig } from "./config";
 import { getEvaluationFilters } from "./config/evaluation";
@@ -24,7 +25,12 @@ import { buildNotionCache } from "./services/notionCache";
 import { backfillJobLedger } from "./services/notionLedgerBackfill";
 import { sendRunReport } from "./services/slack";
 
-export type JobFinderRunMode = { kind: "scrape" } | { kind: "reconcile" } | { kind: "backfill" };
+export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("scrape") }),
+  z.object({ kind: z.literal("reconcile") }),
+  z.object({ kind: z.literal("backfill") }),
+]);
+export type JobFinderRunMode = z.infer<typeof JobFinderRunModeSchema>;
 
 const log = logger.child({ component: "main" });
 const PIPELINE_WORKERS = 8;
