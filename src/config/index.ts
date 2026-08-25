@@ -5,5 +5,12 @@ export {
   type EvaluationProfile,
   getEvaluationFilters,
 } from "./evaluation";
-export { config, type JobFinderConfig } from "./schema";
+export {
+  type CliConfig,
+  type JobFinderConfig,
+  type JobFinderEnvironment,
+  loadCliConfig,
+  parseCliConfig,
+  parseJobFinderConfig,
+} from "./schema";
 export { SEARCH_DOMAINS, SEARCH_KEYWORDS } from "./search";
