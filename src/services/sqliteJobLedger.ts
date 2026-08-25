@@ -3,7 +3,9 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { URL as NodeUrl } from "node:url";
 import type {
+  ImportedNotionCompanyState,
   JobLedger,
+  MigrateNotionCompanyStateInput,
   PendingNotionProjection,
   ProcessedJobOutcome,
   RecordProcessedJobInput,
@@ -13,29 +15,34 @@ import {
   createCompanyExclusionWriteRecord,
   createPendingJobProjections,
   createProcessedJobWriteRecord,
+  importedNotionCompanyStateWriteValues,
   normalizeJobLedgerText,
   processedJobWriteValues,
 } from "./jobLedgerRecord";
 import {
   parseCompanyExclusionRow,
   parseMigrationRow,
-  parseNotionBackfillStats,
   parsePendingNotionProjectionRows,
   parsePendingReviewProjectionRows,
   parseProcessedJobRow,
+  parseSelectiveNotionImportStats,
   parseTitleRows,
 } from "./jobLedgerRows";
 import {
+  DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL,
+  DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL,
+  DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL,
   EXCLUDE_COMPANY_SQL,
   FIND_BY_RAW_URL_SQL,
   FIND_COMPANY_EXCLUSION_SQL,
   HAS_MIGRATION_SQL,
+  IMPORTED_NOTION_COMPANY_STATE_STATS_SQL,
+  INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL,
   LIST_PENDING_NOTION_PROJECTIONS_SQL,
   LIST_PENDING_REVIEW_PROJECTIONS_SQL,
   MARK_MIGRATION_SQL,
   MARK_NOTION_PROJECTION_COMPLETE_SQL,
   MARK_REVIEW_PROJECTION_COMPLETE_SQL,
-  NOTION_BACKFILL_STATS_SQL,
   RECORD_PENDING_NOTION_PROJECTION_SQL,
   RECORD_PENDING_REVIEW_PROJECTION_SQL,
   RECORD_PROCESSED_JOB_SQL,
@@ -46,6 +53,7 @@ const JOB_LEDGER_SCHEMA = [
   "0001_job_ledger.sql",
   "0002_pending_notion_projections.sql",
   "0003_run_lock_and_pending_review_projections.sql",
+  "0004_imported_notion_company_state.sql",
 ]
   .map((name) => readFileSync(new NodeUrl(`../../migrations/${name}`, import.meta.url), "utf8"))
   .join("\n");
@@ -61,16 +69,29 @@ export function createSqliteJobLedger(
   database.run("PRAGMA foreign_keys = ON");
   database.exec(JOB_LEDGER_SCHEMA);
 
-  const notionBackfillStats = database.query<Record<string, unknown>, []>(
-    NOTION_BACKFILL_STATS_SQL,
+  const importedNotionCompanyStateStats = database.query<Record<string, unknown>, []>(
+    IMPORTED_NOTION_COMPANY_STATE_STATS_SQL,
   );
+  const deleteLegacyNotionProcessedJobs = database.query<never, []>(
+    DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL,
+  );
+  const deleteLegacyNotionCompanyExclusions = database.query<never, []>(
+    DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL,
+  );
+  const deleteImportedNotionCompanyState = database.query<never, []>(
+    DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL,
+  );
+  const insertImportedNotionCompanyState = database.query<
+    never,
+    [string, ImportedNotionCompanyState["kind"], string, string, string | null]
+  >(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL);
   const markMigration = database.query<never, [string, string]>(MARK_MIGRATION_SQL);
   const hasMigration = database.query<Record<string, unknown>, [string]>(HAS_MIGRATION_SQL);
   const findByRawUrl = database.query<Record<string, unknown>, [string]>(FIND_BY_RAW_URL_SQL);
   const titlesForCompany = database.query<Record<string, unknown>, [string]>(
     TITLES_FOR_COMPANY_SQL,
   );
-  const findCompanyExclusion = database.query<Record<string, unknown>, [string]>(
+  const findCompanyExclusion = database.query<Record<string, unknown>, [string, string]>(
     FIND_COMPANY_EXCLUSION_SQL,
   );
   const recordProcessedJob = database.query<
@@ -132,6 +153,21 @@ export function createSqliteJobLedger(
     }
     return projections;
   });
+  const migrateNotionCompanyStateAtomically = database.transaction(
+    ({ states, importedAt }: MigrateNotionCompanyStateInput) => {
+      deleteLegacyNotionProcessedJobs.run();
+      deleteLegacyNotionCompanyExclusions.run();
+      deleteImportedNotionCompanyState.run();
+      for (const state of states) {
+        insertImportedNotionCompanyState.run(
+          ...importedNotionCompanyStateWriteValues(state, importedAt),
+        );
+      }
+      const stats = parseSelectiveNotionImportStats(importedNotionCompanyStateStats.get());
+      if (!stats) throw new Error("Could not read imported Notion company state statistics");
+      return stats;
+    },
+  );
   function recordNotionProjection(projection: PendingNotionProjection): void {
     recordPendingNotionProjection.run(
       projection.sourceKey,
@@ -149,7 +185,9 @@ export function createSqliteJobLedger(
       return parseTitleRows(titlesForCompany.all(normalizeJobLedgerText(company)));
     },
     async findCompanyExclusion(company) {
-      return parseCompanyExclusionRow(findCompanyExclusion.get(normalizeJobLedgerText(company)));
+      return parseCompanyExclusionRow(
+        findCompanyExclusion.get(normalizeJobLedgerText(company), normalizeJobLedgerText(company)),
+      );
     },
     async recordProcessedJob(input) {
       return recordProcessedJobAtomically(input);
@@ -170,10 +208,8 @@ export function createSqliteJobLedger(
       const record = createCompanyExclusionWriteRecord(input);
       excludeCompany.run(...companyExclusionWriteValues(record));
     },
-    async notionBackfillStats() {
-      const stats = parseNotionBackfillStats(notionBackfillStats.get());
-      if (!stats) throw new Error("Could not read Notion backfill statistics");
-      return stats;
+    async migrateNotionCompanyState(input) {
+      return migrateNotionCompanyStateAtomically(input);
     },
     async markMigration(name, completedAt) {
       markMigration.run(name, completedAt);

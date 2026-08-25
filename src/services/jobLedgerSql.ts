@@ -1,19 +1,28 @@
 const NOTION_PROJECTION_PAGE_SIZE = 10;
 
-export const NOTION_BACKFILL_STATS_SQL = `
+export const IMPORTED_NOTION_COMPANY_STATE_STATS_SQL = `
   SELECT
-    (SELECT COUNT(*) FROM processed_jobs WHERE source_key LIKE 'notion:%') AS sourceRows,
-    (SELECT COUNT(DISTINCT raw_url) FROM processed_jobs
-      WHERE source_key LIKE 'notion:%' AND raw_url IS NOT NULL) AS urls,
-    (SELECT COUNT(*) FROM (
-      SELECT normalized_company, normalized_title
-      FROM processed_jobs
-      WHERE source_key LIKE 'notion:%'
-      GROUP BY normalized_company, normalized_title
-    )) AS companyTitlePairs,
-    (SELECT COUNT(*) FROM processed_jobs
-      WHERE source_key LIKE 'notion:%' AND raw_url IS NULL) AS urlLessRows,
-    (SELECT COUNT(*) FROM company_exclusions WHERE source_key LIKE 'notion:%') AS exclusions
+    COALESCE(SUM(CASE WHEN kind = 'blocked' THEN 1 ELSE 0 END), 0) AS blockedCompanies,
+    COALESCE(SUM(CASE WHEN kind = 'recent-application' THEN 1 ELSE 0 END), 0) AS recentApplications
+  FROM imported_notion_company_state
+`;
+
+export const DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL = `
+  DELETE FROM processed_jobs WHERE source_key LIKE 'notion:%'
+`;
+
+export const DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL = `
+  DELETE FROM company_exclusions WHERE source_key LIKE 'notion:%'
+`;
+
+export const DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL = `
+  DELETE FROM imported_notion_company_state
+`;
+
+export const INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL = `
+  INSERT INTO imported_notion_company_state (
+    normalized_company, kind, company, imported_at, application_date
+  ) VALUES (?, ?, ?, ?, ?)
 `;
 
 export const MARK_MIGRATION_SQL = `
@@ -42,8 +51,17 @@ export const TITLES_FOR_COMPANY_SQL = `
 
 export const FIND_COMPANY_EXCLUSION_SQL = `
   SELECT company, excluded_at
-  FROM company_exclusions
-  WHERE normalized_company = ?
+  FROM (
+    SELECT company, excluded_at, 0 AS priority
+    FROM company_exclusions
+    WHERE normalized_company = ?
+    UNION ALL
+    SELECT company, imported_at AS excluded_at, 1 AS priority
+    FROM imported_notion_company_state
+    WHERE normalized_company = ? AND kind = 'blocked'
+  )
+  ORDER BY priority
+  LIMIT 1
 `;
 
 export const RECORD_PROCESSED_JOB_SQL = `

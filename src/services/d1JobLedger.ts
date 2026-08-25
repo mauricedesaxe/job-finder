@@ -6,29 +6,34 @@ import {
   createCompanyExclusionWriteRecord,
   createPendingJobProjections,
   createProcessedJobWriteRecord,
+  importedNotionCompanyStateWriteValues,
   normalizeJobLedgerText,
   processedJobWriteValues,
 } from "./jobLedgerRecord";
 import {
   parseCompanyExclusionRow,
   parseMigrationRow,
-  parseNotionBackfillStats,
   parsePendingNotionProjectionRows,
   parsePendingReviewProjectionRows,
   parseProcessedJobRow,
+  parseSelectiveNotionImportStats,
   parseTitleRows,
 } from "./jobLedgerRows";
 import {
+  DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL,
+  DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL,
+  DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL,
   EXCLUDE_COMPANY_SQL,
   FIND_BY_RAW_URL_SQL,
   FIND_COMPANY_EXCLUSION_SQL,
   HAS_MIGRATION_SQL,
+  IMPORTED_NOTION_COMPANY_STATE_STATS_SQL,
+  INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL,
   LIST_PENDING_NOTION_PROJECTIONS_SQL,
   LIST_PENDING_REVIEW_PROJECTIONS_SQL,
   MARK_MIGRATION_SQL,
   MARK_NOTION_PROJECTION_COMPLETE_SQL,
   MARK_REVIEW_PROJECTION_COMPLETE_SQL,
-  NOTION_BACKFILL_STATS_SQL,
   RECORD_PENDING_NOTION_PROJECTION_SQL,
   RECORD_PENDING_REVIEW_PROJECTION_SQL,
   RECORD_PROCESSED_JOB_SQL,
@@ -58,7 +63,7 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
       return parseCompanyExclusionRow(
         await binding
           .prepare(FIND_COMPANY_EXCLUSION_SQL)
-          .bind(normalizeJobLedgerText(company))
+          .bind(normalizeJobLedgerText(company), normalizeJobLedgerText(company))
           .first(),
       );
     },
@@ -121,11 +126,26 @@ export function createD1JobLedger(binding: D1DatabaseBinding): JobLedger {
           .run(),
       );
     },
-    async notionBackfillStats() {
-      const stats = parseNotionBackfillStats(
-        await binding.prepare(NOTION_BACKFILL_STATS_SQL).first(),
-      );
-      if (!stats) throw new Error("Could not read Notion backfill statistics");
+    async migrateNotionCompanyState({ states, importedAt }) {
+      const statements = [
+        binding.prepare(DELETE_LEGACY_NOTION_PROCESSED_JOBS_SQL),
+        binding.prepare(DELETE_LEGACY_NOTION_COMPANY_EXCLUSIONS_SQL),
+        binding.prepare(DELETE_IMPORTED_NOTION_COMPANY_STATE_SQL),
+      ];
+      for (const state of states) {
+        statements.push(
+          binding
+            .prepare(INSERT_IMPORTED_NOTION_COMPANY_STATE_SQL)
+            .bind(...importedNotionCompanyStateWriteValues(state, importedAt)),
+        );
+      }
+      statements.push(binding.prepare(IMPORTED_NOTION_COMPANY_STATE_STATS_SQL));
+
+      const results = z.array(z.unknown()).parse(await binding.batch(statements));
+      BatchWriteResultSchema.parse(results);
+      const statsResult = RowsResultSchema.parse(results.at(-1));
+      const stats = parseSelectiveNotionImportStats(statsResult.results[0]);
+      if (!stats) throw new Error("Could not read imported Notion company state statistics");
       return stats;
     },
     async markMigration(name, completedAt) {

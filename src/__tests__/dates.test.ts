@@ -7,6 +7,11 @@ describe("monthsAgo", () => {
     expect(monthsAgo(6, from).toISOString().split("T")[0]).toBe("2025-11-27");
   });
 
+  test("clamps month-end dates to the target month", () => {
+    const from = new Date("2026-08-31T00:00:00.000Z");
+    expect(monthsAgo(6, from).toISOString().split("T")[0]).toBe("2026-02-28");
+  });
+
   test("does not mutate the input date", () => {
     const from = new Date("2026-05-27T00:00:00.000Z");
     monthsAgo(6, from);

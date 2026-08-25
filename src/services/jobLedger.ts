@@ -80,12 +80,25 @@ export interface ExcludeCompanyInput {
   sourceKey?: string;
 }
 
-export interface NotionBackfillStats {
-  sourceRows: number;
-  urls: number;
-  companyTitlePairs: number;
-  urlLessRows: number;
-  exclusions: number;
+export type ImportedNotionCompanyState =
+  | {
+      kind: "blocked";
+      company: string;
+    }
+  | {
+      kind: "recent-application";
+      company: string;
+      applicationDate: string;
+    };
+
+export interface SelectiveNotionImportStats {
+  blockedCompanies: number;
+  recentApplications: number;
+}
+
+export interface MigrateNotionCompanyStateInput {
+  states: ImportedNotionCompanyState[];
+  importedAt: string;
 }
 
 export interface JobLedger {
@@ -98,7 +111,9 @@ export interface JobLedger {
   listPendingReviewProjections(): Promise<PendingReviewProjection[]>;
   markReviewProjectionComplete(sourceKey: string): Promise<void>;
   excludeCompany(input: ExcludeCompanyInput): Promise<void>;
-  notionBackfillStats(): Promise<NotionBackfillStats>;
+  migrateNotionCompanyState(
+    input: MigrateNotionCompanyStateInput,
+  ): Promise<SelectiveNotionImportStats>;
   markMigration(name: string, completedAt: string): Promise<void>;
   hasMigration(name: string): Promise<boolean>;
 }

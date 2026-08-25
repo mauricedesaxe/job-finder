@@ -2,11 +2,11 @@ import { z } from "zod/v4";
 import { JobListingSchema, JobStatusSchema } from "../types";
 import {
   type CompanyExclusion,
-  type NotionBackfillStats,
   type PendingNotionProjection,
   type PendingReviewProjection,
   PROCESSED_JOB_OUTCOMES,
   type ProcessedJob,
+  type SelectiveNotionImportStats,
 } from "./jobLedger";
 
 const ProcessedJobRowSchema = z.object({
@@ -27,12 +27,9 @@ const CompanyExclusionRowSchema = z.object({
 
 const TitleRowsSchema = z.array(z.object({ title: z.string() }));
 
-const NotionBackfillStatsSchema = z.object({
-  sourceRows: z.number().int().nonnegative(),
-  urls: z.number().int().nonnegative(),
-  companyTitlePairs: z.number().int().nonnegative(),
-  urlLessRows: z.number().int().nonnegative(),
-  exclusions: z.number().int().nonnegative(),
+const SelectiveNotionImportStatsSchema = z.object({
+  blockedCompanies: z.number().int().nonnegative(),
+  recentApplications: z.number().int().nonnegative(),
 });
 
 const MigrationRowSchema = z.object({ name: z.string() });
@@ -75,8 +72,8 @@ export function parseTitleRows(value: unknown): string[] {
   return TitleRowsSchema.parse(value).map((row) => row.title);
 }
 
-export function parseNotionBackfillStats(value: unknown): NotionBackfillStats | null {
-  return NotionBackfillStatsSchema.nullable().parse(value);
+export function parseSelectiveNotionImportStats(value: unknown): SelectiveNotionImportStats | null {
+  return SelectiveNotionImportStatsSchema.nullable().parse(value);
 }
 
 export function parseMigrationRow(value: unknown): boolean {

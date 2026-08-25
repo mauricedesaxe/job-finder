@@ -22,7 +22,10 @@ import {
 } from "./services/langsmith";
 import { createNotionClient, type ResilientNotionClient } from "./services/notion";
 import { buildNotionCache } from "./services/notionCache";
-import { backfillJobLedger, isJobLedgerReadyForScrape } from "./services/notionLedgerBackfill";
+import {
+  initializeJobLedgerFromNotion,
+  isJobLedgerReadyForScrape,
+} from "./services/notionLedgerInitialization";
 import { sendRunReport } from "./services/slack";
 
 export const JobFinderRunModeSchema = z.discriminatedUnion("kind", [
@@ -58,12 +61,15 @@ export async function runJobFinder({
       return;
     }
     case "backfill": {
-      const result = await backfillJobLedger({
+      const result = await initializeJobLedgerFromNotion({
         client: notion,
         databaseId: config.notionDatabaseId,
         ledger,
       });
-      log.info({ ...result, durationMs: Date.now() - startTime }, "job ledger backfill complete");
+      log.info(
+        { ...result, durationMs: Date.now() - startTime },
+        "job ledger initialization complete",
+      );
       return;
     }
     case "scrape":
@@ -94,7 +100,7 @@ async function scrapeJobs({
   });
 
   if (!(await isJobLedgerReadyForScrape(ledger))) {
-    throw new Error("Backfill the job ledger before scraping");
+    throw new Error("Initialize the job ledger before scraping");
   }
 
   await replayPendingReviewProjections(ledger);
