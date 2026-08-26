@@ -15,7 +15,7 @@ const log = logger.child({ component: "langsmith" });
 const TRACE_READ_RETRY_POLICY = { maxRetries: 6, baseDelayMs: 100 };
 const TRACE_READ_START_INTERVAL_MS = 2_100;
 const TRACE_RUN_PATH =
-  /^\/(?:api\/v1\/)?runs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  /^\/api\/v2\/runs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface TraceReadScheduler {
   now(): number;
@@ -38,8 +38,10 @@ export interface PromptTool<T> {
 export interface TraceOptions {
   name: string;
   runType?: "chain" | "llm";
+  inputs?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   finalMeta?: () => Record<string, unknown>;
+  finalOutputs?: () => Record<string, unknown>;
   model?: { name: string; temperature?: number };
 }
 
@@ -80,7 +82,8 @@ interface ResolvedPrompt {
 
 interface TraceConfigState {
   client: Client;
-  project: string;
+  projectId: string;
+  projectName: string;
   prompts: Map<PromptName, ResolvedPrompt>;
   reviewQueue: ReturnType<typeof createReviewQueue>;
 }
@@ -100,6 +103,7 @@ export interface LangSmithDependencies {
     name: PromptName;
     commitHash: string;
   }) => Promise<PromptRunnable>;
+  resolveProjectId?: (client: Client, projectName: string) => Promise<string>;
 }
 
 let state: TraceConfigState | undefined;
@@ -182,6 +186,11 @@ async function pullPrompt(input: {
   });
 }
 
+async function resolveProjectId(client: Client, projectName: string): Promise<string> {
+  const project = await client.readProject({ projectName });
+  return z.string().uuid().parse(project.id);
+}
+
 export async function initLangSmith(
   cfg: LangSmithConfig,
   deps: LangSmithDependencies = {},
@@ -201,12 +210,15 @@ export async function initLangSmith(
   try {
     const resolve = deps.resolvePrompt ?? resolvePrompt;
     const load = deps.pullPrompt ?? pullPrompt;
-    const versions = await Promise.all(
-      PROMPT_NAMES.map(async (name) => {
-        const version = await resolve({ client, config: cfg, name });
-        return [name, version] as const;
-      }),
-    );
+    const [projectId, versions] = await Promise.all([
+      (deps.resolveProjectId ?? resolveProjectId)(client, cfg.project),
+      Promise.all(
+        PROMPT_NAMES.map(async (name) => {
+          const version = await resolve({ client, config: cfg, name });
+          return [name, version] as const;
+        }),
+      ),
+    ]);
     const commonReleaseTags = versions.reduce(
       (common, [, version]) => {
         for (const releaseTag of common) {
@@ -230,7 +242,8 @@ export async function initLangSmith(
     );
     state = {
       client,
-      project: cfg.project,
+      projectId,
+      projectName: cfg.project,
       prompts: new Map(resolved),
       reviewQueue: createReviewQueue(client),
     };
@@ -361,16 +374,17 @@ export async function traced<T>(
     ).data;
   }
   const configured = state;
+  const finalOutputs = opts.finalOutputs;
   let result: TraceResult<T> | undefined;
   let traceId: string | undefined;
   const wrapped = traceable(
-    async (): Promise<Record<string, unknown>> => {
+    async (_inputs: Record<string, unknown>): Promise<Record<string, unknown>> => {
       result = await fn({
         requireAccepted: async () => {
           const startedTraceId = traceId;
           if (!startedTraceId) throw new Error("LangSmith trace did not start");
           try {
-            await requireAcceptedTrace(configured.client, startedTraceId);
+            await requireAcceptedTrace(configured.client, configured.projectId, startedTraceId);
           } catch (error) {
             throw new LangSmithTraceUnavailableError(error);
           }
@@ -383,9 +397,10 @@ export async function traced<T>(
       name: opts.name,
       run_type: opts.runType ?? "chain",
       client: configured.client,
-      project_name: configured.project,
+      project_name: configured.projectName,
       tracingEnabled: true,
       metadata: opts.metadata,
+      processOutputs: finalOutputs ? () => finalOutputs() : undefined,
       on_start: (runTree) => {
         if (runTree) traceId = runTree.id;
       },
@@ -406,27 +421,31 @@ export async function traced<T>(
     },
   );
   try {
-    await wrapped();
+    await wrapped(opts.inputs ?? {});
   } catch (error) {
     if (error instanceof LangSmithTraceUnavailableError) throw error;
-    await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
+    await rethrowWithExtendedErrorTrace(configured.client, configured.projectId, traceId, error);
   }
   if (!result) throw new Error("tracing returned without a result");
   if (result.afterTraceComplete) {
     if (!traceId) throw new Error("LangSmith trace did not start");
-    await requireCompletedTrace(configured.client, traceId);
+    await requireCompletedTrace(configured.client, configured.projectId, traceId);
     try {
       await result.afterTraceComplete();
     } catch (error) {
-      await rethrowWithExtendedErrorTrace(configured.client, traceId, error);
+      await rethrowWithExtendedErrorTrace(configured.client, configured.projectId, traceId, error);
     }
   }
   return result.data;
 }
 
-async function requireAcceptedTrace(client: Client, traceId: string): Promise<void> {
+async function requireAcceptedTrace(
+  client: Client,
+  projectId: string,
+  traceId: string,
+): Promise<void> {
   await client.flush();
-  await withRetry(() => client.readRun(traceId), {
+  await withRetry(() => readTrace(client, projectId, traceId), {
     ...TRACE_READ_RETRY_POLICY,
     shouldRetry: isMissingTrace,
   });
@@ -434,12 +453,13 @@ async function requireAcceptedTrace(client: Client, traceId: string): Promise<vo
 
 async function requireCompletedTrace(
   client: Client,
+  projectId: string,
   traceId: string,
-): Promise<Awaited<ReturnType<Client["readRun"]>>> {
+): Promise<Awaited<ReturnType<Client["runs"]["retrieve"]>>> {
   await client.flush();
   return withRetry(
     async () => {
-      const trace = await client.readRun(traceId);
+      const trace = await readTrace(client, projectId, traceId);
       if (!trace.end_time) {
         throw Object.assign(new Error("LangSmith trace is not complete"), {
           code: "TRACE_INCOMPLETE",
@@ -458,16 +478,17 @@ async function requireCompletedTrace(
 
 async function rethrowWithExtendedErrorTrace(
   client: Client,
+  projectId: string,
   traceId: string | undefined,
   error: unknown,
 ): Promise<never> {
   if (!traceId) throw error;
   try {
-    const trace = await requireCompletedTrace(client, traceId);
-    if (!trace.session_id) throw new Error("Completed LangSmith trace has no project ID");
+    const trace = await requireCompletedTrace(client, projectId, traceId);
+    if (!trace.project_id) throw new Error("Completed LangSmith trace has no project ID");
     await client.createFeedback({
       runId: traceId,
-      sessionId: trace.session_id,
+      sessionId: trace.project_id,
       key: "operational_error",
       value: error instanceof Error ? error.message : String(error),
       feedbackSourceType: "app",
@@ -477,6 +498,13 @@ async function rethrowWithExtendedErrorTrace(
     log.error({ traceId, err: retentionError }, "could not extend failed trace retention");
   }
   throw error;
+}
+
+async function readTrace(client: Client, projectId: string, traceId: string) {
+  return client.runs.retrieve(traceId, {
+    project_id: projectId,
+    selects: ["ID", "END_TIME", "PROJECT_ID"],
+  });
 }
 
 function isMissingTrace(error: unknown): boolean {
