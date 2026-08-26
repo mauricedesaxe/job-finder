@@ -12,6 +12,8 @@ import {
 } from "../langsmith";
 import { PROMPT_NAMES } from "../promptRegistry";
 
+const testProjectId = "22222222-2222-4222-8222-222222222222";
+
 describe("LangSmith prompt resolution", () => {
   afterEach(shutdownLangSmith);
 
@@ -34,6 +36,7 @@ describe("LangSmith prompt resolution", () => {
           openrouterApiKey: "router",
         },
         {
+          resolveProjectId: async () => testProjectId,
           pullPrompt: async () => RunnableLambda.from(async () => new AIMessage({ content: "" })),
         },
       );
@@ -54,6 +57,7 @@ describe("LangSmith prompt resolution", () => {
         openrouterApiKey: "router",
       },
       {
+        resolveProjectId: async () => testProjectId,
         resolvePrompt: async ({ name }) => ({
           releaseTags: [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
         }),
@@ -73,6 +77,7 @@ describe("LangSmith prompt resolution", () => {
           openrouterApiKey: "router",
         },
         {
+          resolveProjectId: async () => testProjectId,
           resolvePrompt: async ({ name }) => ({
             releaseTags: [
               {
@@ -99,6 +104,7 @@ describe("LangSmith prompt resolution", () => {
             openrouterApiKey: "router",
           },
           {
+            resolveProjectId: async () => testProjectId,
             resolvePrompt: async () => {
               throw new Error("prompt resolution failed");
             },
@@ -120,6 +126,7 @@ describe("LangSmith prompt resolution", () => {
         openrouterApiKey: "router",
       },
       {
+        resolveProjectId: async () => testProjectId,
         resolvePrompt: async ({ name }) => ({
           releaseTags:
             name === PROMPT_NAMES[0]
@@ -217,6 +224,61 @@ describe("LangSmith trace acceptance", () => {
     expect(uniqueRuns.filter((run) => run.id !== root?.id).every((run) => run.parent_run_id)).toBe(
       true,
     );
+  });
+
+  test("exports review data as the root trace output", async () => {
+    const operations: Array<Record<string, unknown>> = [];
+    const client = traceClient((url, init) => {
+      if (url.endsWith("/info")) {
+        return Response.json({ batch_ingest_config: { use_multipart_endpoint: false } });
+      }
+      if (url.endsWith("/runs/batch")) {
+        const body = init?.body;
+        const text =
+          typeof body === "string"
+            ? body
+            : body instanceof Uint8Array
+              ? new TextDecoder().decode(body)
+              : "";
+        const batch = JSON.parse(text) as {
+          post?: Array<Record<string, unknown>>;
+          patch?: Array<Record<string, unknown>>;
+        };
+        operations.push(...(batch.post ?? []), ...(batch.patch ?? []));
+        return new Response(null, { status: 202 });
+      }
+      return Response.json({
+        id: "11111111-1111-4111-8111-111111111111",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        name: "process_job",
+        run_type: "chain",
+        start_time: "2026-08-24T00:00:00Z",
+        inputs: {},
+        extra: {},
+      });
+    });
+    await initTestLangSmith(client);
+
+    await traced(
+      {
+        name: "process_job",
+        inputs: { url: "https://jobs.example.com/1" },
+        finalOutputs: () => ({
+          outcome: "inserted",
+          job: { title: "Applied AI Engineer", description: "Build AI products." },
+        }),
+      },
+      async () => ({ data: "inserted" }),
+    );
+    await client.flush();
+
+    expect(operations.find((operation) => operation.inputs)?.inputs).toEqual({
+      url: "https://jobs.example.com/1",
+    });
+    expect(operations.find((operation) => operation.outputs)?.outputs).toEqual({
+      outcome: "inserted",
+      job: { title: "Applied AI Engineer", description: "Build AI products." },
+    });
   });
 
   test("persists work inside the parent after trace acceptance", async () => {
@@ -355,7 +417,7 @@ describe("LangSmith trace acceptance", () => {
       return Response.json({
         id: "11111111-1111-4111-8111-111111111111",
         trace_id: "11111111-1111-4111-8111-111111111111",
-        session_id: "22222222-2222-4222-8222-222222222222",
+        project_id: testProjectId,
         name: "process_job",
         run_type: "chain",
         start_time: "2026-08-24T00:00:00Z",
@@ -403,7 +465,7 @@ describe("LangSmith trace acceptance", () => {
       return Response.json({
         id: "11111111-1111-4111-8111-111111111111",
         trace_id: "11111111-1111-4111-8111-111111111111",
-        session_id: "22222222-2222-4222-8222-222222222222",
+        project_id: testProjectId,
         name: "process_job",
         run_type: "chain",
         start_time: "2026-08-24T00:00:00Z",
@@ -453,6 +515,7 @@ async function initTestLangSmith(client: Client): Promise<void> {
     },
     {
       client,
+      resolveProjectId: async () => testProjectId,
       resolvePrompt: async ({ name }) => ({
         releaseTags: [{ name: "release-2026-08-23-1", commitHash: `${name}-commit` }],
       }),
@@ -471,7 +534,7 @@ async function physicalTraceReadStarts(input: {
   const testFetch = Object.assign(
     async (request: string | URL | Request) => {
       const url = new URL(String(request));
-      if (/^\/(?:api\/v1\/)?runs\/[0-9a-f-]{36}$/.test(url.pathname)) {
+      if (/^\/api\/v2\/runs\/[0-9a-f-]{36}$/.test(url.pathname)) {
         traceReadStarts.push(now);
         traceReadAttempts++;
         if (input.failFirst && traceReadAttempts === 1) {
@@ -505,6 +568,7 @@ async function physicalTraceReadStarts(input: {
       },
       {
         fetchImplementation: testFetch,
+        resolveProjectId: async () => testProjectId,
         traceReadScheduler: {
           now: () => now,
           sleep: async (delayMs: number) => {

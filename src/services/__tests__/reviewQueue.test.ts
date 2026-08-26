@@ -30,8 +30,10 @@ const snapshot = ReviewSnapshotSchema.parse({
 });
 
 const unreadReviewData = {
-  readRun: async () => {
-    throw new Error("unexpected run read");
+  runs: {
+    retrieve: async () => {
+      throw new Error("unexpected run read");
+    },
   },
   async *listFeedback() {
     yield* [];
@@ -148,7 +150,7 @@ test("rejects duplicate feedback", async () => {
 test("rejects reviews whose snapshot trace differs from the queue run", async () => {
   const queue = createReviewQueue(
     completedReviewClient({
-      run: { extra: { metadata: { review_snapshot: { ...snapshot, traceId: "other-trace" } } } },
+      run: { metadata: { review_snapshot: { ...snapshot, traceId: "other-trace" } } },
       feedback: [
         reviewFeedback("job_decision", 0),
         reviewFeedback("target_profile", 1),
@@ -424,7 +426,9 @@ function completedReviewClient(input: {
     },
     createAnnotationQueue: async () => ({ id: "new-queue" }),
     updateAnnotationQueue: async () => {},
-    readRun: async () => input.run ?? { extra: { metadata: { review_snapshot: snapshot } } },
+    runs: {
+      retrieve: async () => input.run ?? { metadata: { review_snapshot: snapshot } },
+    },
     async *listFeedback(request) {
       input.requests?.push(request);
       yield* input.feedback;
@@ -435,7 +439,12 @@ function completedReviewClient(input: {
         async *list(_queueId, request) {
           input.requests?.push(request);
           if (request.status === "archived") {
-            yield { run_id: traceId, last_reviewed_time: reviewedAt };
+            yield {
+              run_id: traceId,
+              project_id: "22222222-2222-4222-8222-222222222222",
+              start_time: "2026-08-24T10:00:00.000Z",
+              last_reviewed_time: reviewedAt,
+            };
           }
         },
       },

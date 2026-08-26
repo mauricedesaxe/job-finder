@@ -60,14 +60,14 @@ const rubricItems: AnnotationQueueRubricItem[] = [
 
 const ArchivedRunItemSchema = z.object({
   run_id: z.string().min(1),
+  project_id: z.string().uuid(),
+  start_time: z.string().datetime({ offset: true }),
   last_reviewed_time: z.string().datetime({ offset: true }),
 });
 
 const ReviewRunSchema = z.object({
-  extra: z.object({
-    metadata: z.object({
-      review_snapshot: z.unknown(),
-    }),
+  metadata: z.object({
+    review_snapshot: z.unknown(),
   }),
 });
 
@@ -100,7 +100,12 @@ interface ReviewQueueClient {
       rubricItems: AnnotationQueueRubricItem[];
     },
   ): Promise<void>;
-  readRun(runId: string): Promise<unknown>;
+  runs: {
+    retrieve(
+      runId: string,
+      input: { project_id: string; start_time: string; selects: ["METADATA"] },
+    ): Promise<unknown>;
+  };
   listFeedback(input: { runIds: string[]; feedbackKeys: string[] }): AsyncIterable<unknown>;
   annotationQueues: {
     items: {
@@ -179,8 +184,14 @@ async function readCompletedReview(
   client: ReviewQueueClient,
   item: z.infer<typeof ArchivedRunItemSchema>,
 ): Promise<CompletedReview> {
-  const run = ReviewRunSchema.parse(await client.readRun(item.run_id));
-  const snapshot = ReviewSnapshotSchema.parse(run.extra.metadata.review_snapshot);
+  const run = ReviewRunSchema.parse(
+    await client.runs.retrieve(item.run_id, {
+      project_id: item.project_id,
+      start_time: item.start_time,
+      selects: ["METADATA"],
+    }),
+  );
+  const snapshot = ReviewSnapshotSchema.parse(run.metadata.review_snapshot);
   const feedback = await readReviewFeedback(client, item.run_id);
   const noteFeedback = feedback.get("review_note");
   const blockFeedback = feedback.get("block_company");
