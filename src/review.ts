@@ -83,17 +83,6 @@ export const CompletedReviewSchema = z
 export type ReviewSnapshot = z.infer<typeof ReviewSnapshotSchema>;
 export type CompletedReview = z.infer<typeof CompletedReviewSchema>;
 
-export function reviewTraceOutputs(snapshot: ReviewSnapshot): Record<string, unknown> {
-  return {
-    outcome: "inserted",
-    promptRelease: snapshot.promptRelease,
-    job: snapshot.job,
-    ats: snapshot.ats,
-    compensationRates: snapshot.compensationRates,
-    evaluation: snapshot.evaluation,
-  };
-}
-
 export async function replayCompletedReviewCompanyBlocks(input: {
   reviews: AsyncIterable<CompletedReview>;
   ledger: Pick<JobLedger, "excludeCompany">;

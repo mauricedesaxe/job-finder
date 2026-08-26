@@ -41,7 +41,6 @@ export interface TraceOptions {
   inputs?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   finalMeta?: () => Record<string, unknown>;
-  finalOutputs?: () => Record<string, unknown>;
   model?: { name: string; temperature?: number };
 }
 
@@ -51,6 +50,7 @@ export interface TraceContext {
 
 export interface TraceResult<T> {
   data: T;
+  outputs?: Record<string, unknown>;
   usage?: { input: number; output: number; total: number };
   afterTraceComplete?: () => Promise<void>;
 }
@@ -374,7 +374,6 @@ export async function traced<T>(
     ).data;
   }
   const configured = state;
-  const finalOutputs = opts.finalOutputs;
   let result: TraceResult<T> | undefined;
   let traceId: string | undefined;
   const wrapped = traceable(
@@ -391,7 +390,7 @@ export async function traced<T>(
           return startedTraceId;
         },
       });
-      return attachUsage(result.data, result.usage);
+      return attachUsage(result.outputs ?? result.data, result.usage);
     },
     {
       name: opts.name,
@@ -400,7 +399,6 @@ export async function traced<T>(
       project_name: configured.projectName,
       tracingEnabled: true,
       metadata: opts.metadata,
-      processOutputs: finalOutputs ? () => finalOutputs() : undefined,
       on_start: (runTree) => {
         if (runTree) traceId = runTree.id;
       },

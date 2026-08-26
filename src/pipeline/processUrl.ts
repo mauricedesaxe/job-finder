@@ -12,7 +12,7 @@ import {
 import type { JobFinderConfig } from "../config";
 import type { EvaluationFilter } from "../config/evaluation";
 import { logger } from "../logger";
-import { type ReviewSnapshot, ReviewSnapshotSchema, reviewTraceOutputs } from "../review";
+import { type ReviewSnapshot, ReviewSnapshotSchema } from "../review";
 import {
   type AtsJobData,
   atsStructuralFilter,
@@ -107,16 +107,25 @@ export async function processUrl(
         retry_count: state.retries,
         ...(state.reviewSnapshot ? { review_snapshot: state.reviewSnapshot } : {}),
       }),
-      finalOutputs: () =>
-        state.reviewSnapshot
-          ? reviewTraceOutputs(state.reviewSnapshot)
-          : { outcome: state.outcome },
     },
     async ({ requireAccepted }) => {
       const traceId = await requireAccepted();
       const { data: result } = await processJobBody(url, keyword, ctx, state);
       const afterTraceComplete = await result.prepareTraceCompletion(traceId);
-      return { data: result.outcome, afterTraceComplete };
+      return {
+        data: result.outcome,
+        outputs: state.reviewSnapshot
+          ? {
+              outcome: state.outcome,
+              promptRelease: state.reviewSnapshot.promptRelease,
+              job: state.reviewSnapshot.job,
+              ats: state.reviewSnapshot.ats,
+              compensationRates: state.reviewSnapshot.compensationRates,
+              evaluation: state.reviewSnapshot.evaluation,
+            }
+          : { outcome: state.outcome },
+        afterTraceComplete,
+      };
     },
   );
 }
