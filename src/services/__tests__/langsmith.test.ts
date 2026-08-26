@@ -263,12 +263,14 @@ describe("LangSmith trace acceptance", () => {
       {
         name: "process_job",
         inputs: { url: "https://jobs.example.com/1" },
-        finalOutputs: () => ({
+      },
+      async () => ({
+        data: "inserted",
+        outputs: {
           outcome: "inserted",
           job: { title: "Applied AI Engineer", description: "Build AI products." },
-        }),
-      },
-      async () => ({ data: "inserted" }),
+        },
+      }),
     );
     await client.flush();
 
