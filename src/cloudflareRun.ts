@@ -65,6 +65,11 @@ export interface LockedJobDependencies {
   now(): string;
 }
 
+type RunRoute =
+  | { kind: "collection" }
+  | { kind: "instance"; runId: string }
+  | { kind: "unlock"; runId: string };
+
 export class RunLockContendedError extends Error {
   constructor(
     readonly workflowInstanceId: string,
@@ -132,40 +137,56 @@ export async function handleWorkerRequest(
     return errorResponse("unauthorized", 401);
   }
 
-  if (request.method === "POST" && route.kind === "collection") {
-    const input = await parseRequestBody(request);
-    if (!input) return errorResponse("invalid request", 400);
-    const requestedRunId = input.runId ?? crypto.randomUUID();
-    await environment.workflow.startOrReuse({
-      id: requestedRunId,
-      params: { mode: input.mode },
-    });
-    return json(RunCreatedResponseSchema.parse({ runId: requestedRunId }), 202);
+  switch (route.kind) {
+    case "collection":
+      return createRun(request, environment);
+    case "instance":
+      return getRunStatus(request, environment, route.runId);
+    case "unlock":
+      return unlockRun(request, environment, route.runId);
   }
-
-  if (request.method === "GET" && route.kind === "instance") {
-    const status = WorkflowStatusSchema.parse(await environment.workflow.status(route.runId));
-    return json(RunStatusResponseSchema.parse({ runId: route.runId, ...status }));
-  }
-
-  if (request.method === "POST" && route.kind === "unlock") {
-    const status = WorkflowStatusSchema.parse(await environment.workflow.status(route.runId));
-    if (!TERMINAL_WORKFLOW_STATUSES.has(status.status)) {
-      return errorResponse("workflow is not terminal", 409);
-    }
-    if (!(await environment.runLock.release(route.runId))) {
-      return errorResponse("run lock is not owned by this workflow", 409);
-    }
-    return json(UnlockResponseSchema.parse({ runId: route.runId, status: "unlocked" }));
-  }
-
-  return errorResponse("not found", 404);
 }
 
-type RunRoute =
-  | { kind: "collection" }
-  | { kind: "instance"; runId: string }
-  | { kind: "unlock"; runId: string };
+async function createRun(
+  request: Request,
+  environment: WorkerRequestEnvironment,
+): Promise<Response> {
+  if (request.method !== "POST") return errorResponse("not found", 404);
+  const input = await parseRequestBody(request);
+  if (!input) return errorResponse("invalid request", 400);
+  const requestedRunId = input.runId ?? crypto.randomUUID();
+  await environment.workflow.startOrReuse({
+    id: requestedRunId,
+    params: { mode: input.mode },
+  });
+  return json(RunCreatedResponseSchema.parse({ runId: requestedRunId }), 202);
+}
+
+async function getRunStatus(
+  request: Request,
+  environment: WorkerRequestEnvironment,
+  runId: string,
+): Promise<Response> {
+  if (request.method !== "GET") return errorResponse("not found", 404);
+  const status = WorkflowStatusSchema.parse(await environment.workflow.status(runId));
+  return json(RunStatusResponseSchema.parse({ runId, ...status }));
+}
+
+async function unlockRun(
+  request: Request,
+  environment: WorkerRequestEnvironment,
+  runId: string,
+): Promise<Response> {
+  if (request.method !== "POST") return errorResponse("not found", 404);
+  const status = WorkflowStatusSchema.parse(await environment.workflow.status(runId));
+  if (!TERMINAL_WORKFLOW_STATUSES.has(status.status)) {
+    return errorResponse("workflow is not terminal", 409);
+  }
+  if (!(await environment.runLock.release(runId))) {
+    return errorResponse("run lock is not owned by this workflow", 409);
+  }
+  return json(UnlockResponseSchema.parse({ runId, status: "unlocked" }));
+}
 
 function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs") return { kind: "collection" };

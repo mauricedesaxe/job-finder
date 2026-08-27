@@ -12,6 +12,39 @@ import type { JobFinderRunLock, RunLockAcquisition } from "../services/runLock";
 const authHeaders = { authorization: "Bearer secret", "content-type": "application/json" };
 
 describe("Worker run routes", () => {
+  test("serves health without run authorization", async () => {
+    const response = await handleWorkerRequest(
+      new Request("https://worker.example/health"),
+      requestEnvironment(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok" });
+  });
+
+  test("returns not found for unknown and unsupported routes", async () => {
+    const environment = requestEnvironment();
+    const unknown = await handleWorkerRequest(
+      new Request("https://worker.example/unknown", { headers: authHeaders }),
+      environment,
+    );
+    const unsupportedMethod = await handleWorkerRequest(
+      new Request("https://worker.example/runs/manual-1", {
+        method: "DELETE",
+        headers: authHeaders,
+      }),
+      environment,
+    );
+    const malformedRunId = await handleWorkerRequest(
+      new Request("https://worker.example/runs/%25", { headers: authHeaders }),
+      environment,
+    );
+
+    expect(unknown.status).toBe(404);
+    expect(unsupportedMethod.status).toBe(404);
+    expect(malformedRunId.status).toBe(404);
+  });
+
   test("protects and parses run creation", async () => {
     const created: unknown[] = [];
     const environment = requestEnvironment({
@@ -158,6 +191,26 @@ describe("Worker run routes", () => {
     );
     expect(terminal.status).toBe(200);
     expect(released).toEqual(["manual-1"]);
+  });
+
+  test("keeps a terminal Workflow locked when it does not own the lock", async () => {
+    const response = await handleWorkerRequest(
+      new Request("https://worker.example/runs/manual-1/unlock", {
+        method: "POST",
+        headers: authHeaders,
+      }),
+      requestEnvironment({
+        async status() {
+          return { status: "complete" };
+        },
+        async release() {
+          return false;
+        },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "run lock is not owned by this workflow" });
   });
 });
 
