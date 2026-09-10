@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import v2aiFixture from "../../../../fixtures/ats/workable-v2-ai-listing.json";
 import type { Fetcher, WorkableListResponse } from "../types";
 import { fetchWorkableJob, parseWorkableUrl } from "../workable";
-
-import v2aiFixture from "./fixtures/workable-v2-ai-listing.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>

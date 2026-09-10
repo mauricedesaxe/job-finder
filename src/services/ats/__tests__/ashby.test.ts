@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import ledgerFixture from "../../../../fixtures/ats/ashby-ledger-org.json";
 import { clearAshbyCache, fetchAshbyJob, parseAshbyUrl } from "../ashby";
 import type { Fetcher } from "../types";
-
-import ledgerFixture from "./fixtures/ashby-ledger-org.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>

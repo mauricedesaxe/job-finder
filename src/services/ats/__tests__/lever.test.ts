@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import yunoFixture from "../../../../fixtures/ats/lever-yuno-platform-engineer-ai.json";
 import { fetchLeverJob, parseLeverUrl } from "../lever";
 import type { Fetcher } from "../types";
-
-import yunoFixture from "./fixtures/lever-yuno-platform-engineer-ai.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>
