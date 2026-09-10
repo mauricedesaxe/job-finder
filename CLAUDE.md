@@ -8,6 +8,10 @@ LLM, stores machine state in D1, sends qualified jobs to LangSmith review, and
 reconciles pursued jobs into Notion. Everything else makes that loop reliable,
 observable, and cheap.
 
+The replacement architecture is tracked in `docs/architecture-rewrite.md`. New
+replacement code uses Python. The Bun rules below remain active for legacy files
+until the replacement deletes them.
+
 The bar for changes is: the next run is at least as trustworthy as the last
 one. False positives in evaluation cost more than false negatives, so we err
 toward strictness; flaky LLM behaviour gets contained, not papered over.
