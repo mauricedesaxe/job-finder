@@ -18,6 +18,25 @@ _GENERIC_TITLE_PATTERNS = (
     re.compile(r"\bjoin our talent\b", re.I),
     re.compile(r"\bjoin (?:the|our) team\b", re.I),
 )
+_ROLE_TITLE = re.compile(
+    r"""\b(?:engineer|developer|architect|lead|senior|staff|backend|frontend|full.?stack|
+    web3|devops|sre|manager)\b""",
+    re.I | re.X,
+)
+_OUT_OF_SCOPE_TITLE_PATTERNS = (
+    re.compile(r"\bmachine learning engineer\b", re.I),
+    re.compile(r"\bdata engineer\b", re.I),
+    re.compile(r"\bdevops\b", re.I),
+    re.compile(r"\bsite reliability\b", re.I),
+    re.compile(r"\bsoftware architect\b", re.I),
+    re.compile(r"\bengineering team lead\b", re.I),
+    re.compile(r"\bsoftware engineer team lead\b", re.I),
+    re.compile(r"\bai automation engineer\b", re.I),
+    re.compile(r"\bsenior llm engineer\b", re.I),
+    re.compile(r"\bml systems engineer\b", re.I),
+    re.compile(r"\bagent platform\b", re.I),
+    re.compile(r"\bdecentrali[sz]ed messaging engineer\b", re.I),
+)
 
 
 def structural_filter(job: JobListing) -> StructuralDecision:
@@ -31,6 +50,10 @@ def structural_filter(job: JobListing) -> StructuralDecision:
         return StructuralRejection(reason=f"Careers-index page, not a specific role ({job.url})")
     if any(pattern.search(job.title) for pattern in _GENERIC_TITLE_PATTERNS):
         return StructuralRejection(reason=f"Generic / talent-pool title ({job.title})")
+    if _ROLE_TITLE.search(job.title) is None:
+        return StructuralRejection(reason=f"Title does not identify a role ({job.title})")
+    if any(pattern.search(job.title) for pattern in _OUT_OF_SCOPE_TITLE_PATTERNS):
+        return StructuralRejection(reason=f"Out-of-scope role title ({job.title})")
     return StructuralPass()
 
 

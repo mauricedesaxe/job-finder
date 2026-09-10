@@ -6,6 +6,7 @@ from job_finder.evaluation.langfuse import (
     ProjectionFailed,
     ProjectionIdle,
     ProjectionLeaseLost,
+    create_langfuse_projection_sender,
     deliver_next_projection,
 )
 from job_finder.evaluation.manifests import (
@@ -74,6 +75,7 @@ __all__ = [
     "ProjectionIdle",
     "ProjectionLeaseLost",
     "PromptPromotionDecision",
+    "create_langfuse_projection_sender",
     "create_manifest",
     "decide_prompt_promotion",
     "deliver_next_projection",

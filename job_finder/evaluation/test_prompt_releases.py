@@ -12,7 +12,7 @@ from job_finder.evaluation.prompt_releases import (
 def test_builds_the_complete_prompt_release() -> None:
     release = build_prompt_release()
 
-    assert release.name == "release-2026-09-10-2"
+    assert release.name == "release-2026-09-11-16"
     assert len(release.versions) == 8
     assert [version.definition.phase for version in release.versions] == [
         "filter",
@@ -26,7 +26,7 @@ def test_builds_the_complete_prompt_release() -> None:
     ]
     assert len({version.id for version in release.versions}) == 8
     assert release.id == release.content_digest
-    assert release.id == "d4bcb6252f72ccbc4a80db33334f08676f0987824f1dc4d06d30af7aa8a98d7c"
+    assert release.id == "47dd3692f6152de9e860ec5a1e46928a440758dd29c51f7002e3aac006875c8c"
 
 
 def test_preserves_each_prompt_execution_contract() -> None:

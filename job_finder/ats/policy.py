@@ -39,6 +39,6 @@ def format_ats_block(data: AtsAvailable) -> str:
         lines.append(f"- All listed locations: {', '.join(data.locations)}")
     lines.append(f"- Workplace type: {data.workplace_type or 'unspecified'}")
     if data.country:
-        lines.append(f"- Country (HQ): {data.country}")
+        lines.append(f"- Country fallback when locations are non-geographic: {data.country}")
     lines.append("---")
     return "\n".join(lines)

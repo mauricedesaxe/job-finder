@@ -7,6 +7,7 @@ dependencies = [
     "dagster==1.13.21",
     "dagster-postgres==0.29.21",
     "dagster-webserver==1.13.21",
+    "langfuse==4.15.2",
     "psycopg[binary]==3.3.5",
     "pydantic==2.13.4",
     "python-fasthtml==0.14.13",
@@ -27,6 +28,7 @@ dev = [
 package = false
 required-version = ">=0.10"
 exclude-newer = "7 days"
+exclude-newer-package = { langfuse = false }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

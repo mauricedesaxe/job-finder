@@ -15,15 +15,15 @@ from dagster import (
     define_asset_job,  # pyright: ignore[reportUnknownVariableType]
 )
 
-from job_finder.config import OrchestrationSettings
+from job_finder.config import LangfuseSettings, OrchestrationSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exchange_rates
 from job_finder.evaluation.langfuse import (
     ProjectionDelivered,
     ProjectionFailed,
     ProjectionIdle,
+    create_langfuse_projection_sender,
     deliver_next_projection,
-    unavailable_projection_sender,
 )
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.pipeline.orchestration import (
@@ -115,6 +115,8 @@ def job_work_queue_cycle(
 def langfuse_projection_queue(
     context: AssetExecutionContext, job_finder: JobFinderResource
 ) -> dict[str, int]:
+    settings = LangfuseSettings.from_environment()
+    sender = create_langfuse_projection_sender(settings)
     delivered = 0
     failed = 0
     lease_lost = 0
@@ -122,7 +124,7 @@ def langfuse_projection_queue(
         for _ in range(100):
             result = deliver_next_projection(
                 connection,
-                sender=unavailable_projection_sender,
+                sender=sender,
                 owner_token=uuid4(),
                 now=datetime.now(UTC),
                 lease_for=timedelta(minutes=5),
@@ -138,6 +140,8 @@ def langfuse_projection_queue(
                 lease_lost += 1
     metadata = {"delivered": delivered, "failed": failed, "lease_lost": lease_lost}
     context.add_output_metadata(metadata)
+    if failed:
+        raise RuntimeError(f"Langfuse projection failed for {failed} items")
     return metadata
 
 
@@ -221,9 +225,13 @@ job_work_queue_schedule = ScheduleDefinition(
 )
 langfuse_projection_schedule = ScheduleDefinition(
     job=langfuse_projection_job,
-    cron_schedule="0 * * * *",
+    cron_schedule="* * * * *",
     execution_timezone="UTC",
-    default_status=DefaultScheduleStatus.STOPPED,
+    default_status=(
+        DefaultScheduleStatus.RUNNING
+        if LangfuseSettings.credentials_are_configured()
+        else DefaultScheduleStatus.STOPPED
+    ),
 )
 
 defs = Definitions(
