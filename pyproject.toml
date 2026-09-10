@@ -29,7 +29,7 @@ pythonpath = ["."]
 testpaths = ["job_finder"]
 
 [tool.basedpyright]
-include = ["job_finder", "contracts"]
+include = ["job_finder", "contracts", "scripts"]
 pythonVersion = "3.12"
 reportUnusedCallResult = false
 
