@@ -12,7 +12,7 @@ from job_finder.evaluation.models import (
     Qualified,
     Rejected,
 )
-from job_finder.evaluation.prompt_releases import PromptVersion, build_evaluation_prompt_release
+from job_finder.evaluation.prompt_releases import PromptVersion, build_prompt_release
 from job_finder.jobs.models import JobListing
 
 JOB = JobListing(
@@ -29,7 +29,7 @@ RATES = "1 EUR ~= 1.10 USD"
 
 
 def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
     calls: list[str] = []
 
     def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
@@ -56,7 +56,7 @@ def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
 
 
 def test_returns_the_first_filter_result_in_catalog_order() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
     calls: list[str] = []
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
@@ -82,7 +82,7 @@ def test_returns_the_first_filter_result_in_catalog_order() -> None:
 
 
 def test_stops_before_profiles_after_a_filter_rejection() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
     calls: list[str] = []
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
@@ -99,7 +99,7 @@ def test_stops_before_profiles_after_a_filter_rejection() -> None:
 
 
 def test_uses_the_first_passing_profile_in_catalog_order() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         return _accepted(version, passed=True)
@@ -113,7 +113,7 @@ def test_uses_the_first_passing_profile_in_catalog_order() -> None:
 
 
 def test_uses_the_last_fulfilled_profile_rejection() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         return _accepted(version, passed=version.definition.phase == "filter")
@@ -124,7 +124,7 @@ def test_uses_the_last_fulfilled_profile_rejection() -> None:
 
 
 def test_returns_a_rejection_when_the_other_profile_is_unavailable() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         if version.definition.criterion == "early-stage-product-engineer":
@@ -141,7 +141,7 @@ def test_returns_a_rejection_when_the_other_profile_is_unavailable() -> None:
 
 
 def test_returns_the_first_error_when_all_profiles_are_unavailable() -> None:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         if version.definition.phase == "filter":

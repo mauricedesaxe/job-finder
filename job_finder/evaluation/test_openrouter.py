@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from job_finder.evaluation.models import (
+    CompletedModelCall,
     CriterionAccepted,
     CriterionUnavailable,
     ModelCallAttempt,
@@ -23,13 +24,13 @@ from job_finder.evaluation.openrouter import (
     model_request_id,
     prompt_input_digest,
 )
-from job_finder.evaluation.prompt_releases import build_evaluation_prompt_release
+from job_finder.evaluation.prompt_releases import build_prompt_release
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
 
 
 def test_sends_the_exact_prompt_and_returns_only_after_recording() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     events: list[str] = []
     attempts: list[ModelCallAttempt] = []
 
@@ -79,7 +80,7 @@ def test_sends_the_exact_prompt_and_returns_only_after_recording() -> None:
 
 
 def test_records_each_retry_before_the_next_request() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     events: list[str] = []
     responses = iter(
         (
@@ -125,7 +126,7 @@ def test_records_each_retry_before_the_next_request() -> None:
 
 
 def test_retries_network_and_malformed_responses_without_defaulting_a_verdict() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     attempts: list[ModelCallAttempt] = []
     calls = 0
 
@@ -164,7 +165,7 @@ def test_retries_network_and_malformed_responses_without_defaulting_a_verdict() 
 
 
 def test_does_not_retry_terminal_http_errors() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     attempts: list[ModelCallAttempt] = []
     calls = 0
 
@@ -204,8 +205,11 @@ def test_rejects_invalid_retry_policies() -> None:
 
 
 def test_reuses_an_accepted_request_without_calling_openrouter() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
-    accepted = CriterionAccepted(prompt_name=prompt.definition.name, passed=True, reason="stored")
+    prompt = build_prompt_release().versions[0]
+    accepted = CompletedModelCall(
+        prompt_name=prompt.definition.name,
+        parsed_output={"pass": True, "reason": "stored"},
+    )
     context = _context()
 
     result = evaluate_prompt(
@@ -221,18 +225,20 @@ def test_reuses_an_accepted_request_without_calling_openrouter() -> None:
         sender=_unexpected_send,
     )
 
-    assert result == accepted
+    assert result == CriterionAccepted(
+        prompt_name=prompt.definition.name, passed=True, reason="stored"
+    )
     assert len(model_request_id(context, prompt)) == 64
     assert model_request_id(context, prompt) == model_request_id(context, prompt)
     assert prompt_input_digest({"job": "job body"}) != prompt_input_digest({"job": "changed"})
 
 
 def test_rejects_a_context_for_different_prompt_input() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     context = ModelCallContext(
         processing_attempt_id=UUID("00000000-0000-0000-0000-000000000001"),
         pipeline_run_id=UUID("00000000-0000-0000-0000-000000000002"),
-        prompt_release_id=build_evaluation_prompt_release().id,
+        prompt_release_id=build_prompt_release().id,
         operation_key="evaluate_job",
         input_digest=prompt_input_digest({"job": "different"}),
     )
@@ -253,13 +259,13 @@ def test_rejects_a_context_for_different_prompt_input() -> None:
 
 
 def test_does_not_expand_placeholders_inside_job_text() -> None:
-    prompt = build_evaluation_prompt_release().versions[1]
+    prompt = build_prompt_release().versions[1]
     bodies: list[dict[str, object]] = []
     values = {"job": "Keep the literal {rates} text", "rates": "1 EUR ~= 1.10 USD"}
     context = ModelCallContext(
         processing_attempt_id=UUID("00000000-0000-0000-0000-000000000001"),
         pipeline_run_id=UUID("00000000-0000-0000-0000-000000000002"),
-        prompt_release_id=build_evaluation_prompt_release().id,
+        prompt_release_id=build_prompt_release().id,
         operation_key="evaluate_job",
         input_digest=prompt_input_digest(values),
     )
@@ -289,7 +295,7 @@ def test_does_not_expand_placeholders_inside_job_text() -> None:
 
 
 def test_continues_attempt_numbers_after_a_restart() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
     attempts: list[ModelCallAttempt] = []
 
     result = evaluate_prompt(
@@ -311,7 +317,7 @@ def test_continues_attempt_numbers_after_a_restart() -> None:
 
 
 def test_does_not_return_an_uncommitted_accepted_result() -> None:
-    prompt = build_evaluation_prompt_release().versions[0]
+    prompt = build_prompt_release().versions[0]
 
     def fail_record(_attempt: ModelCallAttempt) -> None:
         raise RuntimeError("commit failed")
@@ -333,7 +339,7 @@ def test_does_not_return_an_uncommitted_accepted_result() -> None:
 
 
 def _context() -> ModelCallContext:
-    release = build_evaluation_prompt_release()
+    release = build_prompt_release()
     return ModelCallContext(
         processing_attempt_id=UUID("00000000-0000-0000-0000-000000000001"),
         pipeline_run_id=UUID("00000000-0000-0000-0000-000000000002"),
