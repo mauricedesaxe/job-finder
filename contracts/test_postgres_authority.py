@@ -32,6 +32,13 @@ from job_finder.jobs.decision_pipeline import (
 from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
+from job_finder.review.models import ReviewConflict, ReviewSaved, ReviewSubmission
+from job_finder.review.postgres import (
+    deterministic_rejected_sample,
+    load_daily_review,
+    prepare_daily_review,
+    record_review,
+)
 from job_finder.evaluation.openrouter import (
     HttpResponse,
     evaluate_prompt,
@@ -62,11 +69,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert first == (
             "0001_authoritative_job_state.sql",
             "0002_model_call_response_model.sql",
+            "0003_one_review_event_per_item.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -462,6 +470,197 @@ def test_rolls_back_every_terminal_row_when_the_decision_is_invalid(
         assert connection.execute("SELECT count(*) FROM job_snapshots").fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM evaluation_decisions").fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM pipeline_receipts").fetchone() == (0,)
+
+
+def test_builds_immutable_daily_membership_with_every_qualified_job(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    review_day = now.date()
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        qualified_ids = tuple(
+            _insert_review_decision(connection, run_id, release.id, now, value, "qualified")
+            for value in range(1, 5)
+        )
+        rejected_ids = tuple(
+            _insert_review_decision(connection, run_id, release.id, now, value, "rejected")
+            for value in range(10, 18)
+        )
+
+        prepare_daily_review(connection, review_day, created_at=now)
+        first_rows = connection.execute(
+            "SELECT id, evaluation_id, lane, position FROM review_items ORDER BY lane, position"
+        ).fetchall()
+        prepare_daily_review(connection, review_day, created_at=now)
+        review = load_daily_review(connection, review_day)
+        second_rows = connection.execute(
+            "SELECT id, evaluation_id, lane, position FROM review_items ORDER BY lane, position"
+        ).fetchall()
+
+        assert second_rows == first_rows
+        assert review.qualified.total == 4
+        assert {item.evaluation_id for item in review.qualified.pending} == set(qualified_ids)
+        assert review.rejected_audit.total == 3
+        assert {item.evaluation_id for item in review.rejected_audit.pending} == set(
+            deterministic_rejected_sample(review_day, rejected_ids)
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                "UPDATE review_items SET position = 99 WHERE id = %s",
+                (review.qualified.pending[0].id,),
+            )
+
+
+def test_records_feedback_and_company_block_in_one_exact_transaction(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        prepare_daily_review(connection, now.date(), created_at=now)
+        item = load_daily_review(connection, now.date()).current
+        assert item is not None
+        submission = ReviewSubmission(
+            review_item_id=item.id,
+            evaluation_id=item.evaluation_id,
+            snapshot_id=item.snapshot_id,
+            decision="pursue",
+            target_profile="applied-ai-product-engineer",
+            primary_reason="technology-fit",
+            note="Strong fit.",
+            block_company=True,
+            actor="owner",
+            created_at=now,
+        )
+
+        first = record_review(connection, submission)
+        second = record_review(connection, submission.model_copy(update={"decision": "reject"}))
+
+        assert isinstance(first, ReviewSaved)
+        assert isinstance(second, ReviewConflict)
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
+        assert connection.execute("SELECT policy FROM company_policies").fetchone() == ("blocked",)
+        assert connection.execute(
+            """
+            SELECT i.id, d.id, s.id
+            FROM review_events e
+            JOIN review_items i ON i.id = e.review_item_id
+            JOIN evaluation_decisions d ON d.id = i.evaluation_id
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            """
+        ).fetchone() == (item.id, item.evaluation_id, item.snapshot_id)
+
+
+def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        prepare_daily_review(connection, now.date(), created_at=now)
+        item = load_daily_review(connection, now.date()).current
+        assert item is not None
+        connection.execute(
+            """
+            CREATE FUNCTION reject_company_policy_for_contract() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'policy unavailable'; END; $$
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER reject_company_policy_for_contract
+            BEFORE INSERT OR UPDATE ON company_policies
+            FOR EACH ROW EXECUTE FUNCTION reject_company_policy_for_contract()
+            """
+        )
+
+        with pytest.raises(psycopg.Error, match="policy unavailable"):
+            record_review(
+                connection,
+                ReviewSubmission(
+                    review_item_id=item.id,
+                    evaluation_id=item.evaluation_id,
+                    snapshot_id=item.snapshot_id,
+                    decision="reject",
+                    target_profile="neither",
+                    primary_reason="company-quality",
+                    block_company=True,
+                    actor="owner",
+                    created_at=now,
+                ),
+            )
+
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM company_policies").fetchone() == (0,)
+
+
+def _insert_review_decision(
+    connection: psycopg.Connection[tuple[object, ...]],
+    run_id: UUID,
+    prompt_release_id: str,
+    now: datetime,
+    value: int,
+    outcome: str,
+) -> str:
+    job_id = UUID(int=value)
+    snapshot_id = f"{value + 100:064x}"
+    evaluation_id = f"{value + 1000:064x}"
+    raw_url = f"https://example.com/jobs/review-{value}"
+    connection.execute(
+        """
+        INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (job_id, raw_url, now, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO job_snapshots (
+          id, job_id, content_digest, title, company, normalized_company,
+          normalized_title, source, raw_url, description, location, keywords,
+          date_posted, observed_at
+        ) VALUES (%s, %s, %s, %s, 'Acme', 'acme', %s, 'other', %s,
+          'Build useful tools.', 'Remote', '["python"]'::jsonb, %s, %s)
+        """,
+        (
+            snapshot_id,
+            job_id,
+            f"{value + 200:064x}",
+            f"Engineer {value}",
+            f"engineer {value}",
+            raw_url,
+            now.date(),
+            now,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO evaluation_decisions (
+          id, snapshot_id, pipeline_run_id, prompt_release_id, policy_version,
+          outcome, matched_profile, reason, created_at
+        ) VALUES (%s, %s, %s, %s, 'policy-1', %s, %s, 'Evaluation reason', %s)
+        """,
+        (
+            evaluation_id,
+            snapshot_id,
+            run_id,
+            prompt_release_id,
+            outcome,
+            "applied-ai-product-engineer" if outcome == "qualified" else None,
+            now,
+        ),
+    )
+    return evaluation_id
 
 
 def _insert_prompt_run(
