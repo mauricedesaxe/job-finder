@@ -1,5 +1,7 @@
 # jobfinder
 
+> The Python, PlanetScale, Dagster, FastHTML, and Langfuse rewrite is in progress. See [`docs/architecture-rewrite.md`](docs/architecture-rewrite.md). The Bun instructions below describe the current production runtime until replacement.
+
 Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with an LLM via OpenRouter, and stores qualified jobs in Notion. Fork it and customize the search profile to match your own job search criteria.
 
 ## Prerequisites
