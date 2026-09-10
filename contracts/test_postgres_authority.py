@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -14,14 +14,30 @@ from psycopg import sql
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.evaluation import (
+    EvaluationManifestCase,
+    LangfuseProjection,
+    LangfuseUnavailable,
+    ManifestPolicy,
+    ProjectionDelivered,
+    ProjectionFailed,
     bootstrap_prompt_release,
+    create_manifest,
+    decide_prompt_promotion,
+    deliver_next_projection,
+    exclude_review_event,
+    include_review_event,
     load_prompt_release,
+    run_manifest,
 )
 from job_finder.evaluation.models import (
     CriterionAccepted,
+    EvaluationResult,
+    EvaluationUnavailable,
     ModelCallContext,
     PromptAccepted,
+    PromptReleaseId,
     Qualified,
+    Rejected,
 )
 from job_finder.jobs.decision_pipeline import (
     DecisionContext,
@@ -70,11 +86,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0001_authoritative_job_state.sql",
             "0002_model_call_response_model.sql",
             "0003_one_review_event_per_item.sql",
+            "0004_evaluation_manifests.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (3,)
+        ).fetchone() == (4,)
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -602,6 +619,356 @@ def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> 
 
         assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM company_policies").fetchone() == (0,)
+
+
+def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        _insert_review_decision(connection, run_id, release.id, now, 21, "qualified")
+        _insert_review_decision(connection, run_id, release.id, now, 22, "rejected")
+        prepare_daily_review(connection, now.date(), created_at=now)
+        review = load_daily_review(connection, now.date())
+        qualified = review.qualified.pending[0]
+        rejected = review.rejected_audit.pending[0]
+        rejected_feedback = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=qualified.id,
+                evaluation_id=qualified.evaluation_id,
+                snapshot_id=qualified.snapshot_id,
+                decision="reject",
+                target_profile="neither",
+                primary_reason="role-scope",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        qualified_feedback = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=rejected.id,
+                evaluation_id=rejected.evaluation_id,
+                snapshot_id=rejected.snapshot_id,
+                decision="pursue",
+                target_profile="applied-ai-product-engineer",
+                primary_reason="technology-fit",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        assert isinstance(rejected_feedback, ReviewSaved)
+        assert isinstance(qualified_feedback, ReviewSaved)
+        include_review_event(
+            connection,
+            review_event_id=rejected_feedback.review_event_id,
+            critical=True,
+            reason="False positives are costly.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="curate:negative",
+        )
+        include_review_event(
+            connection,
+            review_event_id=qualified_feedback.review_event_id,
+            critical=False,
+            reason="Known positive control.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="curate:positive",
+        )
+
+        first = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now,
+            created_by="owner",
+        )
+        exclude_review_event(
+            connection,
+            review_event_id=qualified_feedback.review_event_id,
+            reason="Temporarily disputed.",
+            actor="owner",
+            created_at=now + timedelta(seconds=1),
+            idempotency_key="exclude:positive",
+        )
+        second = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now + timedelta(seconds=1),
+            created_by="owner",
+        )
+
+        assert len(first.cases) == 2
+        assert sorted(case.trial_count for case in first.cases) == [1, 3]
+        assert len(second.cases) == 1
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM langfuse_projection_items WHERE kind = 'evaluation_manifest'"
+        ).fetchone() == (2,)
+        include_review_event(
+            connection,
+            review_event_id=qualified_feedback.review_event_id,
+            critical=False,
+            reason="Dispute resolved.",
+            actor="owner",
+            created_at=now + timedelta(seconds=2),
+            idempotency_key="reinclude:positive",
+        )
+        connection.execute(
+            """
+            CREATE FUNCTION reject_manifest_projection_for_contract() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'projection unavailable'; END; $$
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER reject_manifest_projection_for_contract
+            BEFORE INSERT ON langfuse_projection_items
+            FOR EACH ROW WHEN (NEW.kind = 'evaluation_manifest')
+            EXECUTE FUNCTION reject_manifest_projection_for_contract()
+            """
+        )
+        with pytest.raises(psycopg.Error, match="projection unavailable"):
+            create_manifest(
+                connection,
+                policy=ManifestPolicy(),
+                created_at=now + timedelta(seconds=2),
+                created_by="owner",
+            )
+        assert connection.execute("SELECT count(*) FROM evaluation_manifests").fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM evaluation_manifest_cases").fetchone() == (
+            3,
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                "UPDATE evaluation_manifests SET created_by = 'other' WHERE id = %s",
+                (first.id,),
+            )
+
+
+def test_runs_trials_rejects_operational_failures_and_retries_projection(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        baseline_release = bootstrap_prompt_release(connection)
+        candidate_release_id = _insert_candidate_release(connection, baseline_release.id, now)
+        _insert_prompt_run(connection, run_id, baseline_release.id, now)
+        _insert_review_decision(connection, run_id, baseline_release.id, now, 31, "qualified")
+        _insert_review_decision(connection, run_id, baseline_release.id, now, 32, "rejected")
+        prepare_daily_review(connection, now.date(), created_at=now)
+        review = load_daily_review(connection, now.date())
+        qualified = review.qualified.pending[0]
+        rejected = review.rejected_audit.pending[0]
+        negative_feedback = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=qualified.id,
+                evaluation_id=qualified.evaluation_id,
+                snapshot_id=qualified.snapshot_id,
+                decision="reject",
+                target_profile="neither",
+                primary_reason="role-scope",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        positive_feedback = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=rejected.id,
+                evaluation_id=rejected.evaluation_id,
+                snapshot_id=rejected.snapshot_id,
+                decision="pursue",
+                target_profile="applied-ai-product-engineer",
+                primary_reason="technology-fit",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        assert isinstance(negative_feedback, ReviewSaved)
+        assert isinstance(positive_feedback, ReviewSaved)
+        include_review_event(
+            connection,
+            review_event_id=negative_feedback.review_event_id,
+            critical=True,
+            reason="Critical negative control.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="run:negative",
+        )
+        include_review_event(
+            connection,
+            review_event_id=positive_feedback.review_event_id,
+            critical=False,
+            reason="Positive control.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="run:positive",
+        )
+        manifest = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now,
+            created_by="owner",
+        )
+        baseline_calls = 0
+
+        def baseline_evaluator(
+            case: EvaluationManifestCase, release_id: PromptReleaseId, trial: int
+        ) -> EvaluationResult:
+            nonlocal baseline_calls
+            baseline_calls += 1
+            assert release_id == baseline_release.id
+            assert trial >= 0
+            if case.expected_outcome == "qualified":
+                return Qualified(reason="Expected positive.", profile_name="profile")
+            return Rejected(reason="Expected negative.")
+
+        baseline = run_manifest(
+            connection,
+            manifest_id=manifest.id,
+            prompt_release_id=baseline_release.id,
+            evaluator=baseline_evaluator,
+            implementation_ref="baseline-ref",
+            completed_at=now,
+            idempotency_key="evaluation:baseline",
+        )
+        repeated = run_manifest(
+            connection,
+            manifest_id=manifest.id,
+            prompt_release_id=baseline_release.id,
+            evaluator=baseline_evaluator,
+            implementation_ref="baseline-ref",
+            completed_at=now,
+            idempotency_key="evaluation:baseline",
+        )
+        assert repeated == baseline
+        assert baseline_calls == 4
+
+        def candidate_evaluator(
+            case: EvaluationManifestCase, release_id: PromptReleaseId, trial: int
+        ) -> EvaluationResult:
+            assert release_id == candidate_release_id
+            if case.expected_outcome == "qualified":
+                return EvaluationUnavailable(
+                    prompt_name="profile",
+                    error_code="timeout",
+                    reason="Provider timed out.",
+                )
+            if trial == 0:
+                return Qualified(reason="Incorrect pass.", profile_name="profile")
+            return Rejected(reason="Expected negative.")
+
+        candidate = run_manifest(
+            connection,
+            manifest_id=manifest.id,
+            prompt_release_id=PromptReleaseId(candidate_release_id),
+            evaluator=candidate_evaluator,
+            implementation_ref="candidate-ref",
+            completed_at=now,
+            idempotency_key="evaluation:candidate",
+        )
+        promotion = decide_prompt_promotion(
+            connection,
+            baseline_run_id=baseline.id,
+            candidate_run_id=candidate.id,
+            actor="owner",
+            created_at=now,
+            idempotency_key="promotion:candidate",
+        )
+
+        assert candidate.metrics.false_positive_count == 1
+        assert candidate.metrics.false_negative_count == 0
+        assert candidate.metrics.operational_failure_count == 1
+        assert candidate.metrics.critical_false_positive_count == 1
+        assert promotion.decision == "rejected"
+        assert promotion.baseline_prompt_release_id == baseline_release.id
+        assert promotion.candidate_prompt_release_id == candidate_release_id
+        authoritative_counts = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM evaluation_manifests),
+                   (SELECT count(*) FROM evaluation_runs),
+                   (SELECT count(*) FROM prompt_promotion_decisions)
+            """
+        ).fetchone()
+
+        attempted_ids: list[str] = []
+
+        def unavailable_sender(projection: LangfuseProjection) -> object:
+            attempted_ids.append(projection.idempotency_key)
+            raise LangfuseUnavailable("Langfuse is down")
+
+        failed = deliver_next_projection(
+            connection,
+            sender=unavailable_sender,
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(minutes=5),
+        )
+        assert isinstance(failed, ProjectionFailed)
+        assert (
+            connection.execute(
+                """
+            SELECT (SELECT count(*) FROM evaluation_manifests),
+                   (SELECT count(*) FROM evaluation_runs),
+                   (SELECT count(*) FROM prompt_promotion_decisions)
+            """
+            ).fetchone()
+            == authoritative_counts
+        )
+
+        delivered = deliver_next_projection(
+            connection,
+            sender=lambda projection: {"remote_id": f"langfuse-{projection.idempotency_key}"},
+            owner_token=uuid4(),
+            now=now + timedelta(minutes=5),
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(minutes=5),
+        )
+        assert isinstance(delivered, ProjectionDelivered)
+        assert delivered.projection_id == attempted_ids[0]
+        assert connection.execute(
+            "SELECT attempt_count FROM langfuse_projection_items WHERE id = %s",
+            (delivered.projection_id,),
+        ).fetchone() == (2,)
+
+
+def _insert_candidate_release(
+    connection: psycopg.Connection[tuple[object, ...]],
+    baseline_release_id: str,
+    now: datetime,
+) -> str:
+    candidate_release_id = "f" * 64
+    with connection.transaction():
+        connection.execute(
+            """
+            INSERT INTO prompt_releases (
+              id, name, content_digest, expected_member_count, created_at, created_by
+            )
+            SELECT %s, 'candidate', %s, expected_member_count, %s, 'contract'
+            FROM prompt_releases WHERE id = %s
+            """,
+            (candidate_release_id, "e" * 64, now, baseline_release_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO prompt_release_members (release_id, prompt_name, prompt_version_id)
+            SELECT %s, prompt_name, prompt_version_id
+            FROM prompt_release_members WHERE release_id = %s
+            """,
+            (candidate_release_id, baseline_release_id),
+        )
+    return candidate_release_id
 
 
 def _insert_review_decision(
