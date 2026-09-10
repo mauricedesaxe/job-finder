@@ -11,24 +11,29 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from job_finder.evaluation.models import (
-    CriterionUnavailable,
     EvaluationModel,
+    OperationalFailure,
     PromptAccepted,
     PromptReleaseId,
     Qualified,
+    RetryableOperationalError,
+    TerminalOperationalError,
 )
 from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 
-DecisionOutcome = Literal["qualified", "duplicate", "company_blocked", "company_applied"]
+DecisionOutcome = Literal[
+    "qualified", "rejected", "duplicate", "company_blocked", "company_applied"
+]
+DecisionStage = Literal["ats_structural", "structural", "evaluation", "qualified"]
 CompanyPolicy = Literal["blocked", "recent_application"]
-Enricher = Callable[[JobListing], PromptAccepted[EnrichedJob] | CriterionUnavailable]
+Enricher = Callable[[JobListing], PromptAccepted[EnrichedJob] | OperationalFailure]
 TitleDeduplicator = Callable[
-    [str, tuple[str, ...]], PromptAccepted[TitleDuplicate] | CriterionUnavailable
+    [str, tuple[str, ...]], PromptAccepted[TitleDuplicate] | OperationalFailure
 ]
 
 
@@ -40,17 +45,24 @@ class PersistedDecision(EvaluationModel):
     matched_profile: str | None
     reason: str
     job: EnrichedJob
+    decision_stage: DecisionStage = "qualified"
 
 
-class DecisionPipelineUnavailable(EvaluationModel):
-    kind: Literal["unavailable"] = "unavailable"
+class RetryableDecisionPipelineError(RetryableOperationalError):
     stage: Literal["enrichment", "deduplication"]
-    error_code: str
-    reason: str
 
 
+class TerminalDecisionPipelineError(TerminalOperationalError):
+    stage: Literal["enrichment", "deduplication"]
+
+
+DecisionPipelineFailure = Annotated[
+    RetryableDecisionPipelineError | TerminalDecisionPipelineError,
+    Field(discriminator="kind"),
+]
 DecisionPipelineResult = Annotated[
-    PersistedDecision | DecisionPipelineUnavailable, Field(discriminator="kind")
+    PersistedDecision | RetryableDecisionPipelineError | TerminalDecisionPipelineError,
+    Field(discriminator="kind"),
 ]
 
 
@@ -74,6 +86,8 @@ class TerminalDecision:
     matched_profile: str | None
     reason: str
     context: DecisionContext
+    decision_stage: DecisionStage = "qualified"
+    ats_evidence: JsonValue | None = None
 
 
 CompletedDecisionLookup = Callable[[str], PersistedDecision | None]
@@ -97,31 +111,25 @@ def process_qualified_job(
     store: DecisionStore,
     enrich: Enricher,
     deduplicate: TitleDeduplicator,
+    *,
+    ats_evidence: JsonValue | None = None,
 ) -> DecisionPipelineResult:
-    input_digest = _terminal_input_digest(listing, evaluation, context)
+    input_digest = _terminal_input_digest(listing, evaluation, context, ats_evidence)
     idempotency_key = f"qualified-decision:{input_digest}"
     completed = store.find_completed(idempotency_key)
     if completed is not None:
         return completed
 
     enrichment = enrich(listing)
-    if isinstance(enrichment, CriterionUnavailable):
-        return DecisionPipelineUnavailable(
-            stage="enrichment",
-            error_code=enrichment.error_code,
-            reason=enrichment.reason,
-        )
+    if isinstance(enrichment, (RetryableOperationalError, TerminalOperationalError)):
+        return _decision_pipeline_failure("enrichment", enrichment)
 
     enriched = enrichment.output
     normalized_company = normalize_ledger_text(enriched.company)
     titles = store.existing_titles(normalized_company)
     duplicate = deduplicate(enriched.title, titles)
-    if isinstance(duplicate, CriterionUnavailable):
-        return DecisionPipelineUnavailable(
-            stage="deduplication",
-            error_code=duplicate.error_code,
-            reason=duplicate.reason,
-        )
+    if isinstance(duplicate, (RetryableOperationalError, TerminalOperationalError)):
+        return _decision_pipeline_failure("deduplication", duplicate)
 
     policy = store.active_company_policy(normalized_company, context.observed_at)
     outcome, matched_profile, reason = _terminal_outcome(evaluation, duplicate.output, policy)
@@ -136,6 +144,53 @@ def process_qualified_job(
             matched_profile=matched_profile,
             reason=reason,
             context=context,
+            ats_evidence=ats_evidence,
+        )
+    )
+
+
+def persist_rejected_job(
+    listing: JobListing,
+    reason: str,
+    decision_stage: Literal["ats_structural", "structural", "evaluation"],
+    context: DecisionContext,
+    store: DecisionStore,
+    *,
+    ats_evidence: JsonValue | None = None,
+) -> PersistedDecision:
+    input_digest = _digest(
+        {
+            "listing": listing.model_dump(mode="json"),
+            "reason": reason,
+            "decision_stage": decision_stage,
+            "prompt_release_id": str(context.prompt_release_id),
+            "policy_version": context.policy_version,
+            "implementation_ref": context.implementation_ref,
+            "ats_evidence": ats_evidence,
+        }
+    )
+    idempotency_key = f"rejected-decision:{input_digest}"
+    completed = store.find_completed(idempotency_key)
+    if completed is not None:
+        return completed
+    return store.persist(
+        TerminalDecision(
+            idempotency_key=idempotency_key,
+            input_digest=input_digest,
+            job_id=job_id_for_url(listing.url),
+            listing=listing,
+            enriched=EnrichedJob(
+                title=listing.title,
+                company=listing.company,
+                description=listing.description,
+                location=listing.location,
+            ),
+            outcome="rejected",
+            matched_profile=None,
+            reason=reason,
+            context=context,
+            decision_stage=decision_stage,
+            ats_evidence=ats_evidence,
         )
     )
 
@@ -215,6 +270,25 @@ def normalize_ledger_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip()).lower()
 
 
+def _decision_pipeline_failure(
+    stage: Literal["enrichment", "deduplication"],
+    failure: OperationalFailure,
+) -> DecisionPipelineFailure:
+    if isinstance(failure, RetryableOperationalError):
+        return RetryableDecisionPipelineError(
+            stage=stage,
+            prompt_name=failure.prompt_name,
+            error_code=failure.error_code,
+            reason=failure.reason,
+        )
+    return TerminalDecisionPipelineError(
+        stage=stage,
+        prompt_name=failure.prompt_name,
+        error_code=failure.error_code,
+        reason=failure.reason,
+    )
+
+
 def _terminal_outcome(
     evaluation: Qualified,
     duplicate: TitleDuplicate,
@@ -265,6 +339,7 @@ def _insert_snapshot(
         "date_posted": decision.listing.date_posted.isoformat()
         if decision.listing.date_posted is not None
         else None,
+        "ats_evidence": decision.ats_evidence,
     }
     content_digest = _digest(snapshot)
     snapshot_id = _digest([str(decision.job_id), content_digest])
@@ -273,8 +348,8 @@ def _insert_snapshot(
         INSERT INTO job_snapshots (
           id, job_id, content_digest, title, company, normalized_company,
           normalized_title, source, raw_url, description, location, keywords,
-          date_posted, observed_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+          date_posted, observed_at, ats_evidence
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
         """,
         (
@@ -292,6 +367,7 @@ def _insert_snapshot(
             Jsonb(snapshot["keywords"]),
             decision.listing.date_posted,
             decision.context.observed_at,
+            Jsonb(decision.ats_evidence) if decision.ats_evidence is not None else None,
         ),
     )
     return snapshot_id
@@ -309,8 +385,8 @@ def _insert_decision(
         """
         INSERT INTO evaluation_decisions (
           id, snapshot_id, pipeline_run_id, prompt_release_id, policy_version,
-          outcome, matched_profile, reason, created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+          outcome, matched_profile, reason, created_at, decision_stage
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (snapshot_id, prompt_release_id, policy_version) DO NOTHING
         """,
         (
@@ -323,12 +399,13 @@ def _insert_decision(
             decision.matched_profile,
             decision.reason,
             decision.context.observed_at,
+            decision.decision_stage,
         ),
     )
     row = connection.execute(
         """
         SELECT d.id, d.snapshot_id, d.outcome, d.matched_profile, d.reason,
-               s.title, s.company, s.description, s.location
+               s.title, s.company, s.description, s.location, d.decision_stage
         FROM evaluation_decisions d
         JOIN job_snapshots s ON s.id = d.snapshot_id
         WHERE d.snapshot_id = %s AND d.prompt_release_id = %s AND d.policy_version = %s
@@ -354,13 +431,30 @@ def _insert_decision(
             description=str(row[7]),
             location=str(row[8]),
         ),
+        decision_stage=_parse_decision_stage(str(row[9])),
     )
+
+
+def _parse_decision_stage(value: str) -> DecisionStage:
+    match value:
+        case "ats_structural":
+            return "ats_structural"
+        case "structural":
+            return "structural"
+        case "evaluation":
+            return "evaluation"
+        case "qualified":
+            return "qualified"
+        case _:
+            raise RuntimeError(f"Unknown decision stage: {value}")
 
 
 def _parse_decision_outcome(value: str) -> DecisionOutcome:
     match value:
         case "qualified":
             return "qualified"
+        case "rejected":
+            return "rejected"
         case "duplicate":
             return "duplicate"
         case "company_blocked":
@@ -404,7 +498,10 @@ def _insert_receipt(
 
 
 def _terminal_input_digest(
-    listing: JobListing, evaluation: Qualified, context: DecisionContext
+    listing: JobListing,
+    evaluation: Qualified,
+    context: DecisionContext,
+    ats_evidence: JsonValue | None,
 ) -> str:
     value = {
         "listing": listing.model_dump(mode="json"),
@@ -412,6 +509,7 @@ def _terminal_input_digest(
         "prompt_release_id": str(context.prompt_release_id),
         "policy_version": context.policy_version,
         "implementation_ref": context.implementation_ref,
+        "ats_evidence": ats_evidence,
     }
     return _digest(value)
 

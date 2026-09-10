@@ -16,6 +16,9 @@ class SchemaMigrationError(RuntimeError):
 
 def apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tuple[str, ...]:
     with connection.transaction():
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('job_finder_schema_migrations'))"
+        )
         return _apply_migrations(connection)
 
 

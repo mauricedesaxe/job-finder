@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Never
 from uuid import UUID
 
 import psycopg
@@ -60,6 +60,12 @@ ProjectionSender = Callable[[LangfuseProjection], object]
 
 class LangfuseUnavailable(RuntimeError):
     pass
+
+
+def unavailable_projection_sender(_projection: LangfuseProjection) -> Never:
+    raise LangfuseUnavailable(
+        "No supported Langfuse v4 mapping exists for the durable projection payload"
+    )
 
 
 def deliver_next_projection(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from job_finder.evaluation.models import (
-    CriterionUnavailable,
+    OperationalFailure,
     EvaluationModel,
     ModelCallContext,
     PromptAccepted,
@@ -34,7 +34,7 @@ def enrich_job(
     api_key: str,
     sender: ChatCompletionSender | None = None,
     retry_policy: RetryPolicy | None = None,
-) -> PromptAccepted[EnrichedJob] | CriterionUnavailable:
+) -> PromptAccepted[EnrichedJob] | OperationalFailure:
     values = {"job": enrichment_message(job)}
     return invoke_prompt(
         release.version("job-finder-enrichment"),

@@ -5,9 +5,9 @@ from collections.abc import Callable, Mapping
 from job_finder.evaluation.models import (
     CriterionAccepted,
     CriterionResult,
-    CriterionUnavailable,
     EvaluationResult,
-    EvaluationUnavailable,
+    OperationalError,
+    OperationalFailure,
     Qualified,
     Rejected,
 )
@@ -53,13 +53,13 @@ def _evaluate_filters(
     rates: str,
     filters: tuple[PromptVersion, ...],
     evaluate: CriterionEvaluator,
-) -> Rejected | EvaluationUnavailable | None:
+) -> Rejected | OperationalFailure | None:
     filter_results = tuple(
         evaluate(version, _prompt_values(version, job_input, rates)) for version in filters
     )
     for result in filter_results:
-        if isinstance(result, CriterionUnavailable):
-            return _unavailable(result)
+        if isinstance(result, OperationalError):
+            return result
         if not result.passed:
             return Rejected(reason=result.reason)
 
@@ -76,7 +76,7 @@ def _evaluate_profiles(
         evaluate(version, _prompt_values(version, job_input, rates)) for version in profiles
     )
     last_rejection: CriterionAccepted | None = None
-    first_error: CriterionUnavailable | None = None
+    first_error: OperationalFailure | None = None
     for version, result in zip(profiles, profile_results, strict=True):
         if isinstance(result, CriterionAccepted):
             if result.passed:
@@ -87,7 +87,7 @@ def _evaluate_profiles(
     if last_rejection is not None:
         return Rejected(reason=last_rejection.reason)
     if first_error is not None:
-        return _unavailable(first_error)
+        return first_error
     return Rejected(reason="No profiles matched")
 
 
@@ -96,11 +96,3 @@ def _prompt_values(version: PromptVersion, job_input: str, rates: str) -> Mappin
     if "rates" in version.definition.inputs:
         values["rates"] = rates
     return values
-
-
-def _unavailable(result: CriterionUnavailable) -> EvaluationUnavailable:
-    return EvaluationUnavailable(
-        prompt_name=result.prompt_name,
-        error_code=result.error_code,
-        reason=result.reason,
-    )

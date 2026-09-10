@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 from datetime import UTC, date, datetime, timedelta
@@ -32,7 +33,8 @@ from job_finder.evaluation import (
 from job_finder.evaluation.models import (
     CriterionAccepted,
     EvaluationResult,
-    EvaluationUnavailable,
+    RetryableOperationalError,
+    TerminalOperationalError,
     ModelCallContext,
     PromptAccepted,
     PromptReleaseId,
@@ -87,11 +89,29 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0002_model_call_response_model.sql",
             "0003_one_review_event_per_item.sql",
             "0004_evaluation_manifests.sql",
+            "0005_dagster_orchestration.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (4,)
+        ).fetchone() == (5,)
+
+
+def test_concurrent_migration_startup_serializes_schema_writes(
+    authority_schema: str,
+) -> None:
+    def migrate() -> tuple[str, ...]:
+        with _connection(authority_schema) as connection:
+            return apply_migrations(connection)
+
+    def migrate_for_index(_index: int) -> tuple[str, ...]:
+        return migrate()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(migrate_for_index, range(2)))
+
+    assert results[0] == results[1]
+    assert results[0][-1] == "0005_dagster_orchestration.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -387,6 +407,77 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
             Decimal("0.00012000"),
             {"pass": True, "reason": "matched"},
         )
+
+
+def test_records_and_reuses_a_terminal_model_error(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    processing_attempt_id = uuid4()
+    input_digest = prompt_input_digest({"job": "job body"})
+    calls = 0
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id, parameters,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'evaluation', 'test-ref', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"evaluation:{run_id}", release.id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, operation_key, attempt_number, input_digest,
+              status, started_at
+            ) VALUES (%s, %s, 'evaluate_job', 0, %s, 'running', %s)
+            """,
+            (processing_attempt_id, run_id, input_digest, now),
+        )
+        context = ModelCallContext(
+            processing_attempt_id=processing_attempt_id,
+            pipeline_run_id=run_id,
+            prompt_release_id=release.id,
+            operation_key="evaluate_job",
+            input_digest=input_digest,
+        )
+
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal calls
+            calls += 1
+            return HttpResponse(400, '{"error":{"message":"bad request"}}')
+
+        persistence = postgres_model_call_persistence(connection)
+        first = evaluate_prompt(
+            release.versions[0],
+            {"job": "job body"},
+            context,
+            persistence,
+            api_key="secret",
+            sender=send,
+            now=lambda: now,
+        )
+        second = evaluate_prompt(
+            release.versions[0],
+            {"job": "job body"},
+            context,
+            persistence,
+            api_key="secret",
+            sender=send,
+            now=lambda: now,
+        )
+
+    assert isinstance(first, TerminalOperationalError)
+    assert second == first
+    assert calls == 1
 
 
 def test_persists_a_terminal_decision_atomically_and_idempotently(
@@ -859,7 +950,7 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         ) -> EvaluationResult:
             assert release_id == candidate_release_id
             if case.expected_outcome == "qualified":
-                return EvaluationUnavailable(
+                return RetryableOperationalError(
                     prompt_name="profile",
                     error_code="timeout",
                     reason="Provider timed out.",

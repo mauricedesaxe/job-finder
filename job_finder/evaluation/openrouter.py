@@ -19,14 +19,17 @@ from job_finder.evaluation.models import (
     CompletedModelCall,
     CriterionAccepted,
     CriterionResult,
-    CriterionUnavailable,
     EvaluationModel,
+    OperationalError,
+    OperationalFailure,
     EvaluationToolOutput,
     ModelCallAttempt,
     InputDigest,
     ModelCallContext,
     ModelRequestId,
     PromptAccepted,
+    RetryableOperationalError,
+    TerminalOperationalError,
 )
 from job_finder.evaluation.prompt_releases import PromptVersion
 
@@ -45,7 +48,7 @@ class HttpResponse:
 
 ChatCompletionSender = Callable[[str, Mapping[str, str], dict[str, object], float], HttpResponse]
 AttemptRecorder = Callable[[ModelCallAttempt], None]
-CompletedLookup = Callable[[ModelRequestId], CompletedModelCall | CriterionUnavailable | None]
+CompletedLookup = Callable[[ModelRequestId], CompletedModelCall | TerminalOperationalError | None]
 AttemptNumberLookup = Callable[[ModelRequestId], int]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
@@ -137,7 +140,7 @@ def evaluate_prompt(
         clock=clock,
         now=now,
     )
-    if isinstance(result, CriterionUnavailable):
+    if isinstance(result, OperationalError):
         return result
     return CriterionAccepted(
         prompt_name=result.prompt_name,
@@ -159,14 +162,14 @@ def invoke_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     now: Now = lambda: datetime.now(UTC),
-) -> PromptAccepted[_OutputT] | CriterionUnavailable:
+) -> PromptAccepted[_OutputT] | OperationalFailure:
     policy = retry_policy or RetryPolicy()
     messages = _render_messages(prompt, values)
     if context.input_digest != prompt_input_digest(values):
         raise ValueError("Model-call context does not match the prompt input")
     request_id = model_request_id(context, prompt)
     completed = persistence.find_completed(request_id)
-    if isinstance(completed, CriterionUnavailable):
+    if isinstance(completed, TerminalOperationalError):
         return completed
     if completed is not None:
         return PromptAccepted(
@@ -198,7 +201,7 @@ def invoke_prompt(
             )
         except requests.RequestException as error:
             latency_ms = max(0, round((clock() - started_at) * 1000))
-            result = CriterionUnavailable(
+            result = RetryableOperationalError(
                 prompt_name=prompt.definition.name,
                 error_code="network_error",
                 reason=str(error),
@@ -242,7 +245,7 @@ def postgres_model_call_persistence(
 
     def find_completed(
         request_id: ModelRequestId,
-    ) -> CompletedModelCall | CriterionUnavailable | None:
+    ) -> CompletedModelCall | TerminalOperationalError | None:
         row = connection.execute(
             """
             SELECT prompt_name, status, parsed_output, error
@@ -259,7 +262,7 @@ def postgres_model_call_persistence(
             parsed_output = TypeAdapter(dict[str, JsonValue]).validate_python(row[2])
             return CompletedModelCall(prompt_name=str(row[0]), parsed_output=parsed_output)
         error = StoredModelCallError.model_validate(row[3])
-        return CriterionUnavailable(
+        return TerminalOperationalError(
             prompt_name=str(row[0]), error_code=error.code, reason=error.message
         )
 
@@ -391,7 +394,7 @@ def _interpret_response(
     latency_ms: int,
     observed_at: datetime,
     output_type: type[_OutputT],
-) -> tuple[PromptAccepted[_OutputT] | CriterionUnavailable, ModelCallAttempt]:
+) -> tuple[PromptAccepted[_OutputT] | OperationalFailure, ModelCallAttempt]:
     try:
         raw = _JSON.validate_json(response.body)
     except ValidationError:
@@ -403,7 +406,10 @@ def _interpret_response(
             if response.status_code in RETRYABLE_HTTP_STATUSES
             else "terminal_error"
         )
-        unavailable = CriterionUnavailable(
+        error_type = (
+            RetryableOperationalError if status == "retryable_error" else TerminalOperationalError
+        )
+        unavailable = error_type(
             prompt_name=prompt.definition.name,
             error_code=f"http_{response.status_code}",
             reason=_error_reason(raw, response.status_code),
@@ -427,7 +433,7 @@ def _interpret_response(
             raise ValueError("response returned the wrong tool")
         output = output_type.model_validate_json(tool_call.function.arguments)
     except (ValidationError, ValueError, IndexError) as error:
-        unavailable = CriterionUnavailable(
+        unavailable = RetryableOperationalError(
             prompt_name=prompt.definition.name,
             error_code="invalid_response",
             reason=str(error),

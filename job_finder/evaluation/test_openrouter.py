@@ -12,7 +12,8 @@ import requests
 from job_finder.evaluation.models import (
     CompletedModelCall,
     CriterionAccepted,
-    CriterionUnavailable,
+    RetryableOperationalError,
+    TerminalOperationalError,
     ModelCallAttempt,
     ModelCallContext,
 )
@@ -155,7 +156,7 @@ def test_retries_network_and_malformed_responses_without_defaulting_a_verdict() 
         now=lambda: NOW,
     )
 
-    assert result == CriterionUnavailable(
+    assert result == RetryableOperationalError(
         prompt_name=prompt.definition.name,
         error_code="invalid_response",
         reason=result.reason,
@@ -192,9 +193,90 @@ def test_does_not_retry_terminal_http_errors() -> None:
     )
 
     assert calls == 1
-    assert isinstance(result, CriterionUnavailable)
+    assert isinstance(result, TerminalOperationalError)
     assert result.error_code == "http_400"
     assert attempts[0].status == "terminal_error"
+
+
+def test_returns_a_retryable_error_after_network_attempts_are_exhausted() -> None:
+    prompt = build_prompt_release().versions[0]
+
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        raise requests.Timeout("timed out")
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=lambda _attempt: None,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert isinstance(result, RetryableOperationalError)
+    assert result.error_code == "network_error"
+
+
+@pytest.mark.parametrize("status_code", (429, 500, 502, 503))
+def test_returns_retryable_errors_after_retryable_http_attempts_are_exhausted(
+    status_code: int,
+) -> None:
+    prompt = build_prompt_release().versions[0]
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=lambda _attempt: None,
+        ),
+        api_key="secret",
+        sender=lambda _url, _headers, _body, _timeout: HttpResponse(
+            status_code, '{"error":{"message":"try again"}}'
+        ),
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert isinstance(result, RetryableOperationalError)
+    assert result.error_code == f"http_{status_code}"
+
+
+def test_reuses_a_cached_terminal_error_without_calling_openrouter() -> None:
+    prompt = build_prompt_release().versions[0]
+    cached = TerminalOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="http_400",
+        reason="bad request",
+    )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: cached,
+            next_attempt_number=lambda _request_id: pytest.fail("attempt number was requested"),
+            record=lambda _attempt: pytest.fail("cached error was recorded again"),
+        ),
+        api_key="secret",
+        sender=_unexpected_send,
+        now=lambda: NOW,
+    )
+
+    assert result == cached
 
 
 def test_rejects_invalid_retry_policies() -> None:

@@ -1,0 +1,11 @@
+services:
+  webserver:
+    build: .
+    command: uv run dagster-webserver -h 0.0.0.0 -p 3000 -w workspace.yaml
+    env_file: .env
+    ports:
+      - "3000:3000"
+  daemon:
+    build: .
+    command: uv run dagster-daemon run -w workspace.yaml
+    env_file: .env
