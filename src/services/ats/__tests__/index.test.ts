@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import ledgerFixture from "../../../../fixtures/ats/ashby-ledger-org.json";
+import openupFixture from "../../../../fixtures/ats/greenhouse-openup-senior-ai-engineer.json";
+import yunoFixture from "../../../../fixtures/ats/lever-yuno-platform-engineer-ai.json";
+import v2aiFixture from "../../../../fixtures/ats/workable-v2-ai-listing.json";
 import {
   atsStructuralFilter,
   clearAshbyCache,
@@ -7,11 +11,6 @@ import {
   formatAtsBlock,
 } from "..";
 import type { AtsJobData, Fetcher } from "../types";
-
-import ledgerFixture from "./fixtures/ashby-ledger-org.json";
-import openupFixture from "./fixtures/greenhouse-openup-senior-ai-engineer.json";
-import yunoFixture from "./fixtures/lever-yuno-platform-engineer-ai.json";
-import v2aiFixture from "./fixtures/workable-v2-ai-listing.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>

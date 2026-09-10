@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import openupFixture from "../../../../fixtures/ats/greenhouse-openup-senior-ai-engineer.json";
 import { fetchGreenhouseJob, parseGreenhouseUrl } from "../greenhouse";
 import type { Fetcher } from "../types";
-
-import openupFixture from "./fixtures/greenhouse-openup-senior-ai-engineer.json";
 
 function jsonFetcher(payload: unknown, status = 200): Fetcher {
   return async () =>
