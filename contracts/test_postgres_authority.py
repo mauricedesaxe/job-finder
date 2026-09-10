@@ -59,6 +59,7 @@ from job_finder.review.postgres import (
 )
 from job_finder.evaluation.openrouter import (
     HttpResponse,
+    RetryPolicy,
     evaluate_prompt,
     postgres_model_call_persistence,
     prompt_input_digest,
@@ -90,11 +91,14 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0003_one_review_event_per_item.sql",
             "0004_evaluation_manifests.sql",
             "0005_dagster_orchestration.sql",
+            "0006_stored_prompt_execution.sql",
+            "0007_model_call_request_messages.sql",
+            "0008_pending_usage_response_model.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (5,)
+        ).fetchone() == (8,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -111,7 +115,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0005_dagster_orchestration.sql"
+    assert results[0][-1] == "0008_pending_usage_response_model.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -219,9 +223,9 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
         connection.execute(
             """
             INSERT INTO prompt_versions (
-              id, prompt_name, content_digest, messages, input_schema, output_schema,
-              model, parameters, created_at
-            ) VALUES (%s, 'profile', %s, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+              id, prompt_name, criterion, phase, content_digest, messages,
+              input_schema, output_schema, model, parameters, created_at
+            ) VALUES (%s, 'profile', 'profile-criterion', 'profile', %s, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
               'test-model', '{}'::jsonb, %s)
             """,
             ("4" * 64, "5" * 64, now),
@@ -229,9 +233,9 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
         connection.execute(
             """
             INSERT INTO prompt_versions (
-              id, prompt_name, content_digest, messages, input_schema, output_schema,
-              model, parameters, created_at
-            ) VALUES (%s, 'other', %s, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+              id, prompt_name, criterion, phase, content_digest, messages,
+              input_schema, output_schema, model, parameters, created_at
+            ) VALUES (%s, 'other', 'other-criterion', 'profile', %s, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
               'test-model', '{}'::jsonb, %s)
             """,
             ("8" * 64, "9" * 64, now),
@@ -259,8 +263,9 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
             )
             connection.execute(
                 """
-                INSERT INTO prompt_release_members (release_id, prompt_name, prompt_version_id)
-                VALUES (%s, 'profile', %s)
+                INSERT INTO prompt_release_members (
+                  release_id, prompt_name, prompt_version_id, position
+                ) VALUES (%s, 'profile', %s, 0)
                 """,
                 ("6" * 64, "4" * 64),
             )
@@ -268,14 +273,17 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
         with pytest.raises(psycopg.errors.CheckViolation, match="requires 1 members"):
             connection.execute(
                 """
-                INSERT INTO prompt_release_members (release_id, prompt_name, prompt_version_id)
-                VALUES (%s, 'other', %s)
+                INSERT INTO prompt_release_members (
+                  release_id, prompt_name, prompt_version_id, position
+                ) VALUES (%s, 'other', %s, 1)
                 """,
                 ("6" * 64, "8" * 64),
             )
 
 
-def test_bootstraps_the_complete_prompt_release_idempotently(authority_schema: str) -> None:
+def test_bootstraps_the_complete_prompt_release_idempotently(
+    authority_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
 
@@ -283,18 +291,30 @@ def test_bootstraps_the_complete_prompt_release_idempotently(authority_schema: s
         second = bootstrap_prompt_release(connection)
 
         assert second == first
+        monkeypatch.setattr("job_finder.evaluation.prompt_releases.PROMPTS", ())
         assert load_prompt_release(connection, first.id) == first
         assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (8,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (8,)
 
 
-def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> None:
+def test_resumes_usage_lookup_then_reuses_an_accepted_model_call(
+    authority_schema: str,
+) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     run_id = uuid4()
     processing_attempt_id = uuid4()
     input_digest = prompt_input_digest({"job": "job body"})
     calls = 0
+    generation_responses = iter(
+        (
+            HttpResponse(404, '{"error":{"message":"not ready"}}'),
+            HttpResponse(
+                200,
+                '{"data":{"tokens_prompt":12,"tokens_completion":4,"total_cost":0.00012}}',
+            ),
+        )
+    )
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
@@ -356,14 +376,14 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
                                 }
                             }
                         ],
-                        "usage": {
-                            "prompt_tokens": 12,
-                            "completion_tokens": 4,
-                            "cost": 0.00012,
-                        },
                     }
                 ),
             )
+
+        def lookup_generation(
+            _url: str, _headers: Mapping[str, str], _id: str, _timeout: float
+        ) -> HttpResponse:
+            return next(generation_responses)
 
         persistence = postgres_model_call_persistence(connection)
         first = evaluate_prompt(
@@ -373,6 +393,9 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
             persistence,
             api_key="secret",
             sender=send,
+            generation_sender=lookup_generation,
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _delay: None,
             now=lambda: now,
         )
         second = evaluate_prompt(
@@ -382,21 +405,41 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
             persistence,
             api_key="secret",
             sender=send,
+            generation_sender=lookup_generation,
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _delay: None,
+            now=lambda: now,
+        )
+        third = evaluate_prompt(
+            release.versions[0],
+            {"job": "job body"},
+            context,
+            persistence,
+            api_key="secret",
+            sender=send,
+            generation_sender=lookup_generation,
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _delay: None,
             now=lambda: now,
         )
 
-        assert first == CriterionAccepted(
+        assert isinstance(first, RetryableOperationalError)
+        assert second == CriterionAccepted(
             prompt_name=release.versions[0].definition.name,
             passed=True,
             reason="matched",
         )
-        assert second == first
+        assert third == second
         assert calls == 1
+        assert connection.execute(
+            "SELECT status FROM model_call_attempts ORDER BY attempt_number"
+        ).fetchall() == [("retryable_error",), ("accepted",)]
         assert connection.execute(
             """
             SELECT status, response_model, provider_response_id, input_tokens,
-                   output_tokens, cost_usd, parsed_output
+                   output_tokens, cost_usd, parsed_output, request_messages
             FROM model_call_attempts
+            WHERE status = 'accepted'
             """
         ).fetchone() == (
             "accepted",
@@ -406,7 +449,64 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
             4,
             Decimal("0.00012000"),
             {"pass": True, "reason": "matched"},
+            [
+                {"role": "system", "content": release.versions[0].messages[0]["content"]},
+                {"role": "user", "content": "job body"},
+            ],
         )
+        assert connection.execute(
+            """
+            SELECT kind, payload ->> 'requested_model', payload ->> 'status'
+            FROM langfuse_projection_items
+            WHERE kind = 'model_call'
+              AND payload ->> 'status' = 'accepted'
+            """
+        ).fetchone() == (
+            "model_call",
+            "google/gemini-2.5-flash",
+            "accepted",
+        )
+        terminal_processing_attempt_id = uuid4()
+        terminal_input_digest = prompt_input_digest({"job": "another job body"})
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, operation_key, attempt_number, input_digest,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'evaluate_terminal_usage', 0, %s, 'completed', %s, %s)
+            """,
+            (terminal_processing_attempt_id, run_id, terminal_input_digest, now, now),
+        )
+        terminal = evaluate_prompt(
+            release.versions[0],
+            {"job": "another job body"},
+            ModelCallContext(
+                processing_attempt_id=terminal_processing_attempt_id,
+                pipeline_run_id=run_id,
+                prompt_release_id=release.id,
+                operation_key="evaluate_terminal_usage",
+                input_digest=terminal_input_digest,
+            ),
+            persistence,
+            api_key="secret",
+            sender=send,
+            generation_sender=lambda _url, _headers, _id, _timeout: HttpResponse(
+                401, '{"error":{"message":"unauthorized"}}'
+            ),
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _delay: None,
+            now=lambda: now,
+        )
+
+        assert isinstance(terminal, TerminalOperationalError)
+        assert connection.execute(
+            """
+            SELECT status, response_model
+            FROM model_call_attempts
+            WHERE processing_attempt_id = %s
+            """,
+            (terminal_processing_attempt_id,),
+        ).fetchone() == ("terminal_error", "google/gemini-2.5-flash-001")
 
 
 def test_records_and_reuses_a_terminal_model_error(authority_schema: str) -> None:
@@ -1053,8 +1153,10 @@ def _insert_candidate_release(
         )
         connection.execute(
             """
-            INSERT INTO prompt_release_members (release_id, prompt_name, prompt_version_id)
-            SELECT %s, prompt_name, prompt_version_id
+            INSERT INTO prompt_release_members (
+              release_id, prompt_name, prompt_version_id, position
+            )
+            SELECT %s, prompt_name, prompt_version_id, position
             FROM prompt_release_members WHERE release_id = %s
             """,
             (candidate_release_id, baseline_release_id),

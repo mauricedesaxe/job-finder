@@ -271,3 +271,18 @@ The goal is to keep the Notion board accurate without manual status management. 
 ```bash
 bun test
 ```
+
+### Run the Python corpus gate
+
+Set `JOB_FINDER_POSTGRES_DSN`, `OPENROUTER_API_KEY`, and `JOB_FINDER_IMPLEMENTATION_REF` first.
+The default command runs the 121 unique direct fixtures through the structural filter and the full evaluator.
+
+```bash
+uv run python -m scripts.evaluate_corpus
+```
+
+Run the 25 ATS fixtures separately. This suite applies ATS formatting and both structural filters before evaluation.
+
+```bash
+uv run python -m scripts.evaluate_corpus --suite ats
+```

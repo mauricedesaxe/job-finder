@@ -72,9 +72,41 @@ def test_rejects_generic_titles(title: str) -> None:
     assert "Generic" in decision.reason
 
 
+@pytest.mark.parametrize(
+    "title",
+    (
+        "Senior Machine Learning Engineer",
+        "Senior Data Engineer (LLM)",
+        "Senior DevOps Engineer",
+        "Site Reliability Engineer",
+        "Senior Software Architect, Blockchain",
+        "Senior Software Engineer Team Lead",
+        "Senior AI Automation Engineer",
+        "Senior LLM Engineer: Text and Reasoning",
+        "Senior or Staff ML Systems Engineer, LLMs",
+        "Senior Staff Engineer, Agent Platform",
+        "Decentralised Messaging Engineer, Rust",
+    ),
+)
+def test_rejects_out_of_scope_role_titles(title: str) -> None:
+    decision = structural_filter(_job(title=title))
+
+    assert decision.kind == "rejected"
+    assert "Out-of-scope" in decision.reason
+
+
 def test_passes_an_ordinary_direct_employer_listing() -> None:
     assert structural_filter(_job()).kind == "pass"
     assert structural_filter(_job(title="Senior Engineer, General AI Platform")).kind == "pass"
+    assert structural_filter(_job(title="Lead AI Engineer")).kind == "pass"
+
+
+@pytest.mark.parametrize("title", ("JazzX AI", "Position | Fireblocks", "Speechify"))
+def test_rejects_titles_that_do_not_identify_a_role(title: str) -> None:
+    decision = structural_filter(_job(title=title))
+
+    assert decision.kind == "rejected"
+    assert "does not identify a role" in decision.reason
 
 
 def test_does_not_reject_an_aggregator_name_on_an_unrelated_host() -> None:

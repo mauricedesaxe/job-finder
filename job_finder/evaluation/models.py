@@ -117,3 +117,4 @@ class ModelCallAttempt:
     latency_ms: int
     error: dict[str, JsonValue] | None
     observed_at: datetime
+    request_messages: tuple[dict[str, str], ...] = ()

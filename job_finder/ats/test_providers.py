@@ -161,7 +161,7 @@ def test_formats_structured_evidence_for_the_evaluator() -> None:
             "- Primary location: Argentina",
             "- All listed locations: Argentina, Europe, Spain",
             "- Workplace type: Remote",
-            "- Country (HQ): AR",
+            "- Country fallback when locations are non-geographic: AR",
             "---",
         )
     )

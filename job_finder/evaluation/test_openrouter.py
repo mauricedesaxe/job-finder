@@ -12,6 +12,7 @@ import requests
 from job_finder.evaluation.models import (
     CompletedModelCall,
     CriterionAccepted,
+    OperationalFailure,
     RetryableOperationalError,
     TerminalOperationalError,
     ModelCallAttempt,
@@ -20,6 +21,7 @@ from job_finder.evaluation.models import (
 from job_finder.evaluation.openrouter import (
     HttpResponse,
     ModelCallPersistence,
+    PendingModelCallUsage,
     RetryPolicy,
     evaluate_prompt,
     model_request_id,
@@ -44,7 +46,7 @@ def test_sends_the_exact_prompt_and_returns_only_after_recording() -> None:
         assert timeout == 30.0
         assert body["model"] == "google/gemini-2.5-flash"
         assert body["temperature"] == 0
-        assert body["max_tokens"] == 256
+        assert body["max_tokens"] == 512
         assert body["usage"] == {"include": True}
         messages = cast(list[dict[str, str]], body["messages"])
         assert messages[1] == {"role": "user", "content": "job body"}
@@ -75,6 +77,7 @@ def test_sends_the_exact_prompt_and_returns_only_after_recording() -> None:
     assert attempts[0].status == "accepted"
     assert attempts[0].provider_response_id == "generation-1"
     assert attempts[0].response_model == "google/gemini-2.5-flash-001"
+    assert attempts[0].request_messages[-1] == {"role": "user", "content": "job body"}
     assert attempts[0].input_tokens == 12
     assert attempts[0].output_tokens == 4
     assert str(attempts[0].cost_usd) == "0.00012"
@@ -163,6 +166,223 @@ def test_retries_network_and_malformed_responses_without_defaulting_a_verdict() 
     )
     assert [attempt.status for attempt in attempts] == ["retryable_error", "retryable_error"]
     assert all(attempt.parsed_output is None for attempt in attempts)
+
+
+def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+    completion_calls = 0
+    generation_calls = 0
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        nonlocal completion_calls
+        completion_calls += 1
+        return _accepted_response(pass_value=True, reason="matched", include_usage=False)
+
+    def get_generation(
+        url: str, headers: Mapping[str, str], generation_id: str, timeout: float
+    ) -> HttpResponse:
+        nonlocal generation_calls
+        generation_calls += 1
+        assert url.endswith("/generation")
+        assert headers["authorization"] == "Bearer secret"
+        assert generation_id == "generation-1"
+        assert timeout == 30.0
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "data": {
+                        "tokens_prompt": 12,
+                        "tokens_completion": 4,
+                        "total_cost": 0.00012,
+                    }
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        generation_sender=get_generation,
+        retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
+        sleep=lambda _delay: None,
+        now=lambda: NOW,
+    )
+
+    assert isinstance(result, CriterionAccepted)
+    assert completion_calls == 1
+    assert generation_calls == 1
+    assert len(attempts) == 1
+    assert attempts[0].status == "accepted"
+    assert attempts[0].input_tokens == 12
+    assert attempts[0].output_tokens == 4
+    assert str(attempts[0].cost_usd) == "0.00012"
+
+
+def test_returns_one_retryable_attempt_when_generation_usage_stays_unavailable() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+    completion_calls = 0
+    generation_calls = 0
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        nonlocal completion_calls
+        completion_calls += 1
+        return _accepted_response(pass_value=True, reason="matched", include_usage=False)
+
+    def get_generation(
+        _url: str, _headers: Mapping[str, str], _generation_id: str, _timeout: float
+    ) -> HttpResponse:
+        nonlocal generation_calls
+        generation_calls += 1
+        return HttpResponse(404, '{"error":{"message":"not ready"}}')
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        generation_sender=get_generation,
+        retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
+        sleep=lambda _delay: None,
+        now=lambda: NOW,
+    )
+
+    assert isinstance(result, RetryableOperationalError)
+    assert result.error_code == "usage_unavailable"
+    assert completion_calls == 1
+    assert generation_calls == 2
+    assert len(attempts) == 1
+    assert attempts[0].status == "retryable_error"
+    assert attempts[0].provider_response_id == "generation-1"
+    assert attempts[0].response_model == "google/gemini-2.5-flash-001"
+
+
+def test_resumes_usage_lookup_without_reissuing_the_completion() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+    completion_calls = 0
+    generation_responses = iter(
+        (
+            HttpResponse(404, '{"error":{"message":"not ready"}}'),
+            HttpResponse(
+                200,
+                '{"data":{"tokens_prompt":12,"tokens_completion":4,"total_cost":0.00012}}',
+            ),
+        )
+    )
+
+    def find_completed(_request_id: object) -> PendingModelCallUsage | None:
+        if not attempts:
+            return None
+        pending = attempts[-1]
+        assert pending.response_model is not None
+        assert pending.provider_response_id is not None
+        assert pending.raw_response is not None
+        return PendingModelCallUsage(
+            prompt_name=pending.prompt_name,
+            response_model=pending.response_model,
+            provider_response_id=pending.provider_response_id,
+            raw_response=pending.raw_response,
+        )
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        nonlocal completion_calls
+        completion_calls += 1
+        return _accepted_response(pass_value=True, reason="matched", include_usage=False)
+
+    def lookup_generation(
+        _url: str, _headers: Mapping[str, str], _id: str, _timeout: float
+    ) -> HttpResponse:
+        return next(generation_responses)
+
+    persistence = ModelCallPersistence(
+        find_completed=find_completed,
+        next_attempt_number=lambda _request_id: len(attempts),
+        record=attempts.append,
+    )
+
+    def evaluate() -> CriterionAccepted | OperationalFailure:
+        return evaluate_prompt(
+            prompt,
+            {"job": "job body"},
+            _context(),
+            persistence,
+            api_key="secret",
+            sender=send,
+            generation_sender=lookup_generation,
+            retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+            sleep=lambda _delay: None,
+            now=lambda: NOW,
+        )
+
+    first = evaluate()
+    second = evaluate()
+
+    assert isinstance(first, RetryableOperationalError)
+    assert isinstance(second, CriterionAccepted)
+    assert completion_calls == 1
+    assert [attempt.status for attempt in attempts] == ["retryable_error", "accepted"]
+
+
+def test_returns_a_terminal_error_when_generation_usage_lookup_is_unauthorized() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+    completion_calls = 0
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        nonlocal completion_calls
+        completion_calls += 1
+        return _accepted_response(pass_value=True, reason="matched", include_usage=False)
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        generation_sender=lambda _url, _headers, _id, _timeout: HttpResponse(
+            401, '{"error":{"message":"unauthorized"}}'
+        ),
+        retry_policy=RetryPolicy(max_attempts=4, base_delay_seconds=0),
+        sleep=lambda _delay: None,
+        now=lambda: NOW,
+    )
+
+    assert isinstance(result, TerminalOperationalError)
+    assert result.error_code == "usage_unavailable"
+    assert completion_calls == 1
+    assert len(attempts) == 1
+    assert attempts[0].status == "terminal_error"
+    assert attempts[0].provider_response_id == "generation-1"
 
 
 def test_does_not_retry_terminal_http_errors() -> None:
@@ -431,37 +651,37 @@ def _context() -> ModelCallContext:
     )
 
 
-def _accepted_response(*, pass_value: bool, reason: str) -> HttpResponse:
+def _accepted_response(
+    *, pass_value: bool, reason: str, include_usage: bool = True
+) -> HttpResponse:
+    response: dict[str, object] = {
+        "id": "generation-1",
+        "model": "google/gemini-2.5-flash-001",
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "evaluate_job",
+                                "arguments": json.dumps({"pass": pass_value, "reason": reason}),
+                            },
+                        }
+                    ]
+                }
+            }
+        ],
+    }
+    if include_usage:
+        response["usage"] = {
+            "prompt_tokens": 12,
+            "completion_tokens": 4,
+            "cost": 0.00012,
+        }
     return HttpResponse(
         200,
-        json.dumps(
-            {
-                "id": "generation-1",
-                "model": "google/gemini-2.5-flash-001",
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "type": "function",
-                                    "function": {
-                                        "name": "evaluate_job",
-                                        "arguments": json.dumps(
-                                            {"pass": pass_value, "reason": reason}
-                                        ),
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 4,
-                    "cost": 0.00012,
-                },
-            }
-        ),
+        json.dumps(response),
     )
 
 

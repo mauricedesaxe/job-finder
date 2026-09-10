@@ -34,7 +34,10 @@ def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
 
     def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
         calls.append(version.definition.criterion)
-        assert values["job"] == job_message(JOB)
+        if version.definition.criterion in ("remote-europe-eligible", "compensation-minimum"):
+            assert values["job"].endswith("Description:\nNo relevant evidence stated.")
+        else:
+            assert values["job"] == job_message(JOB)
         if version.definition.criterion == "applied-ai-product-engineer":
             return _accepted(version, passed=True)
         return _accepted(version, passed=version.definition.phase == "filter")
@@ -53,6 +56,30 @@ def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
         reason="applied-ai-product-engineer",
         profile_name="applied-ai-product-engineer",
     )
+
+
+def test_isolates_location_and_compensation_evidence() -> None:
+    release = build_prompt_release()
+    job = JOB.model_copy(
+        update={
+            "description": """Remote across Europe.
+Our compensation reflects labor costs across U.S. geographic markets.
+Build customer-facing AI features."""
+        }
+    )
+    inputs: dict[str, str] = {}
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        inputs[version.definition.criterion] = values["job"]
+        return _accepted(version, passed=True)
+
+    _ = evaluate_job(job, release, evaluate, rates=RATES)
+
+    assert "Remote across Europe." in inputs["remote-europe-eligible"]
+    assert "compensation reflects" not in inputs["remote-europe-eligible"]
+    assert "compensation reflects" in inputs["compensation-minimum"]
+    assert "Remote across Europe." not in inputs["compensation-minimum"]
+    assert "Build customer-facing AI features." in inputs["early-stage-product-engineer"]
 
 
 def test_returns_the_first_filter_result_in_catalog_order() -> None:

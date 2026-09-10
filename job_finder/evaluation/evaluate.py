@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 
 from job_finder.evaluation.models import (
@@ -15,6 +16,19 @@ from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion
 from job_finder.jobs.models import JobListing
 
 CriterionEvaluator = Callable[[PromptVersion, Mapping[str, str]], CriterionResult]
+_FILTER_EVIDENCE_PATTERNS = {
+    "remote-europe-eligible": re.compile(
+        r"""remote|hybrid|on.?site|location|residen|work\ authori[sz]ation|work\ permit|visa|
+        time.?zone|working\ hours|based\ in|located\ in|office|EMEA|Europe|UK|EEA|global|
+        worldwide|country""",
+        re.I | re.X,
+    ),
+    "compensation-minimum": re.compile(
+        r"""compensation|salary|pay\ range|hourly|monthly|annual|per\ (?:year|hour|month)|
+        [/\ ](?:yr|hr)|[€$£]|\b(?:USD|EUR|GBP)\b""",
+        re.I | re.X,
+    ),
+}
 
 
 def evaluate_job(
@@ -92,7 +106,17 @@ def _evaluate_profiles(
 
 
 def _prompt_values(version: PromptVersion, job_input: str, rates: str) -> Mapping[str, str]:
-    values = {"job": job_input}
+    values = {"job": _filter_evidence(version.definition.criterion, job_input)}
     if "rates" in version.definition.inputs:
         values["rates"] = rates
     return values
+
+
+def _filter_evidence(criterion: str, job_input: str) -> str:
+    pattern = _FILTER_EVIDENCE_PATTERNS.get(criterion)
+    if pattern is None:
+        return job_input
+    lines = job_input.splitlines()
+    header = "\n".join(lines[:2])
+    evidence = "\n".join(line for line in lines[2:] if pattern.search(line))
+    return f"{header}\n\nDescription:\n{evidence or 'No relevant evidence stated.'}"

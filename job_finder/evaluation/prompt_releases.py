@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import JsonValue
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
-from job_finder.evaluation.prompts import PROMPTS, PromptDefinition
+from job_finder.evaluation.prompts import PROMPTS, PromptDefinition, PromptPhase
 
-RELEASE_NAME = "release-2026-09-10-2"
+RELEASE_NAME = "release-2026-09-11-16"
 MODEL = "google/gemini-2.5-flash"
 EVALUATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "type": "object",
@@ -43,32 +51,52 @@ DEDUPLICATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "required": ["isDuplicate"],
     "additionalProperties": False,
 }
+_STRINGS = TypeAdapter(tuple[str, ...])
 
 
 class PromptReleaseError(RuntimeError):
-    """The stored prompt release does not match the application catalog."""
+    """The stored prompt release is missing or corrupt."""
 
 
-@dataclass(frozen=True)
-class PromptVersion:
+class PromptModel(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+
+class PromptExecution(PromptModel):
+    name: str = Field(min_length=1)
+    criterion: str = Field(min_length=1)
+    phase: PromptPhase
+    inputs: tuple[str, ...] = Field(min_length=1)
+
+
+class PromptVersion(PromptModel):
     id: PromptVersionId
-    definition: PromptDefinition
-    content_digest: str
-    messages: tuple[dict[str, str], ...]
+    definition: PromptExecution
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    messages: tuple[dict[str, str], ...] = Field(min_length=1)
     input_schema: dict[str, JsonValue]
     output_schema: dict[str, JsonValue]
-    model: str
+    model: str = Field(min_length=1)
     parameters: dict[str, JsonValue]
-    tool_name: str
-    tool_description: str
+    tool_name: str = Field(min_length=1)
+    tool_description: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def execution_matches_content(self) -> PromptVersion:
+        if self.definition.inputs != _input_names(self.input_schema):
+            raise ValueError("Prompt inputs do not match the stored input schema")
+        if self.parameters.get("tool_name") != self.tool_name:
+            raise ValueError("Prompt tool name does not match the stored parameters")
+        if self.parameters.get("tool_description") != self.tool_description:
+            raise ValueError("Prompt tool description does not match the stored parameters")
+        return self
 
 
-@dataclass(frozen=True)
-class PromptRelease:
+class PromptRelease(PromptModel):
     id: PromptReleaseId
-    name: str
-    content_digest: str
-    versions: tuple[PromptVersion, ...]
+    name: str = Field(min_length=1)
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    versions: tuple[PromptVersion, ...] = Field(min_length=1)
 
     def version(self, name: str) -> PromptVersion:
         for version in self.versions:
@@ -98,14 +126,16 @@ def bootstrap_prompt_release(
             _ = connection.execute(
                 """
                 INSERT INTO prompt_versions (
-                  id, prompt_name, content_digest, messages, input_schema, output_schema,
-                  model, parameters, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  id, prompt_name, criterion, phase, content_digest, messages,
+                  input_schema, output_schema, model, parameters, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
                 (
                     version.id,
                     version.definition.name,
+                    version.definition.criterion,
+                    version.definition.phase,
                     version.content_digest,
                     Jsonb(version.messages),
                     Jsonb(version.input_schema),
@@ -131,14 +161,15 @@ def bootstrap_prompt_release(
                 "bootstrap",
             ),
         )
-        for version in release.versions:
+        for position, version in enumerate(release.versions):
             _ = connection.execute(
                 """
-                INSERT INTO prompt_release_members (release_id, prompt_name, prompt_version_id)
-                VALUES (%s, %s, %s)
+                INSERT INTO prompt_release_members (
+                  release_id, prompt_name, prompt_version_id, position
+                ) VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (release.id, version.definition.name, version.id),
+                (release.id, version.definition.name, version.id, position),
             )
     loaded = load_prompt_release(connection, release.id)
     if loaded != release:
@@ -151,58 +182,54 @@ def load_prompt_release(
 ) -> PromptRelease:
     rows = connection.execute(
         """
-        SELECT r.name, r.content_digest, v.id, v.prompt_name, v.content_digest,
+        SELECT r.name, r.content_digest, r.expected_member_count,
+               v.id, v.prompt_name, v.criterion, v.phase, v.content_digest,
                v.messages, v.input_schema, v.output_schema, v.model, v.parameters
         FROM prompt_releases r
         JOIN prompt_release_members m ON m.release_id = r.id
         JOIN prompt_versions v ON v.id = m.prompt_version_id
         WHERE r.id = %s
+        ORDER BY m.position
         """,
         (release_id,),
     ).fetchall()
-    expected = build_prompt_release()
     if not rows:
         raise PromptReleaseError(f"Prompt release not found: {release_id}")
-    by_name = {prompt.name: prompt for prompt in PROMPTS}
-    if len(rows) != len(by_name) or {str(row[3]) for row in rows} != set(by_name):
-        raise PromptReleaseError(f"Prompt release {release_id} does not contain the prompt catalog")
-    versions: list[PromptVersion] = []
-    for prompt in PROMPTS:
-        row = next(item for item in rows if str(item[3]) == prompt.name)
-        version = _build_version(prompt)
-        stored = (
-            str(row[2]),
-            str(row[4]),
-            row[5],
-            row[6],
-            row[7],
-            str(row[8]),
-            row[9],
-        )
-        wanted = (
-            str(version.id),
-            version.content_digest,
-            list(version.messages),
-            version.input_schema,
-            version.output_schema,
-            version.model,
-            version.parameters,
-        )
-        if stored != wanted:
-            raise PromptReleaseError(f"Stored prompt differs from catalog: {prompt.name}")
-        versions.append(version)
-    loaded = PromptRelease(
+    expected_member_count = int(str(rows[0][2]))
+    if len(rows) != expected_member_count:
+        raise PromptReleaseError(f"Prompt release {release_id} is incomplete")
+    try:
+        versions = tuple(_load_version(row) for row in rows)
+    except (ValidationError, ValueError) as error:
+        raise PromptReleaseError(f"Prompt release {release_id} contains invalid content") from error
+    for version in versions:
+        content_digest = _version_digest(version)
+        if version.content_digest != content_digest:
+            raise PromptReleaseError(f"Stored prompt content is corrupt: {version.definition.name}")
+        expected_id = PromptVersionId(_digest([version.definition.name, content_digest]))
+        if version.id != expected_id:
+            raise PromptReleaseError(
+                f"Stored prompt identity is corrupt: {version.definition.name}"
+            )
+    digest = _digest([[version.definition.name, version.id] for version in versions])
+    stored_digest = str(rows[0][1])
+    if stored_digest != digest or str(release_id) != digest:
+        raise PromptReleaseError(f"Stored release identity is corrupt: {release_id}")
+    return PromptRelease(
         id=release_id,
         name=str(rows[0][0]),
-        content_digest=str(rows[0][1]),
-        versions=tuple(versions),
+        content_digest=stored_digest,
+        versions=versions,
     )
-    if loaded != expected:
-        raise PromptReleaseError(f"Stored release differs from catalog: {release_id}")
-    return loaded
 
 
 def _build_version(prompt: PromptDefinition) -> PromptVersion:
+    definition = PromptExecution(
+        name=prompt.name,
+        criterion=prompt.criterion,
+        phase=prompt.phase,
+        inputs=prompt.inputs,
+    )
     messages = (
         {"role": "system", "content": prompt.system_message},
         {"role": "user", "content": prompt.user_message},
@@ -220,18 +247,15 @@ def _build_version(prompt: PromptDefinition) -> PromptVersion:
         "max_tokens": prompt.max_tokens,
         "tool_name": tool_name,
         "tool_description": tool_description,
+        "criterion": prompt.criterion,
+        "phase": prompt.phase,
     }
-    content = {
-        "messages": messages,
-        "input_schema": input_schema,
-        "output_schema": output_schema,
-        "model": MODEL,
-        "parameters": parameters,
-    }
-    content_digest = _digest(content)
+    content_digest = _digest(
+        _version_content(messages, input_schema, output_schema, MODEL, parameters)
+    )
     return PromptVersion(
         id=PromptVersionId(_digest([prompt.name, content_digest])),
-        definition=prompt,
+        definition=definition,
         content_digest=content_digest,
         messages=messages,
         input_schema=input_schema,
@@ -241,6 +265,64 @@ def _build_version(prompt: PromptDefinition) -> PromptVersion:
         tool_name=tool_name,
         tool_description=tool_description,
     )
+
+
+def _load_version(row: tuple[object, ...]) -> PromptVersion:
+    parameters = TypeAdapter(dict[str, JsonValue]).validate_python(row[12])
+    tool_name = TypeAdapter(str).validate_python(parameters.get("tool_name"))
+    tool_description = TypeAdapter(str).validate_python(parameters.get("tool_description"))
+    input_schema = TypeAdapter(dict[str, JsonValue]).validate_python(row[9])
+    return PromptVersion.model_validate(
+        {
+            "id": row[3],
+            "definition": {
+                "name": row[4],
+                "criterion": row[5],
+                "phase": row[6],
+                "inputs": _input_names(input_schema),
+            },
+            "content_digest": row[7],
+            "messages": row[8],
+            "input_schema": input_schema,
+            "output_schema": row[10],
+            "model": row[11],
+            "parameters": parameters,
+            "tool_name": tool_name,
+            "tool_description": tool_description,
+        }
+    )
+
+
+def _version_digest(version: PromptVersion) -> str:
+    return _digest(
+        _version_content(
+            version.messages,
+            version.input_schema,
+            version.output_schema,
+            version.model,
+            version.parameters,
+        )
+    )
+
+
+def _version_content(
+    messages: tuple[dict[str, str], ...],
+    input_schema: dict[str, JsonValue],
+    output_schema: dict[str, JsonValue],
+    model: str,
+    parameters: dict[str, JsonValue],
+) -> dict[str, object]:
+    return {
+        "messages": messages,
+        "input_schema": input_schema,
+        "output_schema": output_schema,
+        "model": model,
+        "parameters": parameters,
+    }
+
+
+def _input_names(input_schema: dict[str, JsonValue]) -> tuple[str, ...]:
+    return _STRINGS.validate_python(input_schema.get("required"))
 
 
 def _output_schema(prompt: PromptDefinition) -> dict[str, JsonValue]:
