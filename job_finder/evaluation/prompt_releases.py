@@ -4,16 +4,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import NewType
 
 import psycopg
 from psycopg.types.json import Jsonb
 from pydantic import JsonValue
 
+from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS, EvaluationPrompt
-
-PromptVersionId = NewType("PromptVersionId", str)
-PromptReleaseId = NewType("PromptReleaseId", str)
 
 RELEASE_NAME = "release-2026-09-10-1"
 MODEL = "google/gemini-2.5-flash"
@@ -40,6 +37,9 @@ class PromptVersion:
     content_digest: str
     messages: tuple[dict[str, str], ...]
     input_schema: dict[str, JsonValue]
+    output_schema: dict[str, JsonValue]
+    model: str
+    parameters: dict[str, JsonValue]
 
 
 @dataclass(frozen=True)
@@ -202,6 +202,9 @@ def _build_version(prompt: EvaluationPrompt) -> PromptVersion:
         content_digest=content_digest,
         messages=messages,
         input_schema=input_schema,
+        output_schema=OUTPUT_SCHEMA,
+        model=MODEL,
+        parameters=PARAMETERS,
     )
 
 
