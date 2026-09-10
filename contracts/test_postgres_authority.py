@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
+import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -14,6 +16,13 @@ from job_finder.database import apply_migrations
 from job_finder.evaluation import (
     bootstrap_evaluation_prompt_release,
     load_evaluation_prompt_release,
+)
+from job_finder.evaluation.models import CriterionAccepted, ModelCallContext
+from job_finder.evaluation.openrouter import (
+    HttpResponse,
+    evaluate_prompt,
+    postgres_model_call_persistence,
+    prompt_input_digest,
 )
 
 
@@ -36,11 +45,14 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         first = apply_migrations(connection)
         second = apply_migrations(connection)
 
-        assert first == ("0001_authoritative_job_state.sql",)
+        assert first == (
+            "0001_authoritative_job_state.sql",
+            "0002_model_call_response_model.sql",
+        )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (1,)
+        ).fetchone() == (2,)
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -216,6 +228,126 @@ def test_bootstraps_the_evaluation_release_idempotently(authority_schema: str) -
         assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (6,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (6,)
+
+
+def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    processing_attempt_id = uuid4()
+    input_digest = prompt_input_digest({"job": "job body"})
+    calls = 0
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_evaluation_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id, parameters,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'evaluation', 'test-ref', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"evaluation:{run_id}", release.id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, operation_key, attempt_number, input_digest,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'evaluate_job', 0, %s, 'completed', %s, %s)
+            """,
+            (processing_attempt_id, run_id, input_digest, now, now),
+        )
+        context = ModelCallContext(
+            processing_attempt_id=processing_attempt_id,
+            pipeline_run_id=run_id,
+            prompt_release_id=release.id,
+            operation_key="evaluate_job",
+            input_digest=input_digest,
+        )
+
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal calls
+            calls += 1
+            return HttpResponse(
+                status_code=200,
+                body=json.dumps(
+                    {
+                        "id": "generation-1",
+                        "model": "google/gemini-2.5-flash-001",
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "type": "function",
+                                            "function": {
+                                                "name": "evaluate_job",
+                                                "arguments": json.dumps(
+                                                    {"pass": True, "reason": "matched"}
+                                                ),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 4,
+                            "cost": 0.00012,
+                        },
+                    }
+                ),
+            )
+
+        persistence = postgres_model_call_persistence(connection)
+        first = evaluate_prompt(
+            release.versions[0],
+            {"job": "job body"},
+            context,
+            persistence,
+            api_key="secret",
+            sender=send,
+            now=lambda: now,
+        )
+        second = evaluate_prompt(
+            release.versions[0],
+            {"job": "job body"},
+            context,
+            persistence,
+            api_key="secret",
+            sender=send,
+            now=lambda: now,
+        )
+
+        assert first == CriterionAccepted(
+            prompt_name=release.versions[0].definition.name,
+            passed=True,
+            reason="matched",
+        )
+        assert second == first
+        assert calls == 1
+        assert connection.execute(
+            """
+            SELECT status, response_model, provider_response_id, input_tokens,
+                   output_tokens, cost_usd, parsed_output
+            FROM model_call_attempts
+            """
+        ).fetchone() == (
+            "accepted",
+            "google/gemini-2.5-flash-001",
+            "generation-1",
+            12,
+            4,
+            Decimal("0.00012000"),
+            {"pass": True, "reason": "matched"},
+        )
 
 
 @contextmanager
