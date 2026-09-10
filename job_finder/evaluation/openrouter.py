@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypeVar
 from uuid import uuid4
 
 import psycopg
@@ -16,14 +16,17 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from job_finder.evaluation.models import (
+    CompletedModelCall,
     CriterionAccepted,
     CriterionResult,
     CriterionUnavailable,
+    EvaluationModel,
     EvaluationToolOutput,
     ModelCallAttempt,
     InputDigest,
     ModelCallContext,
     ModelRequestId,
+    PromptAccepted,
 )
 from job_finder.evaluation.prompt_releases import PromptVersion
 
@@ -31,6 +34,7 @@ OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions
 RETRYABLE_HTTP_STATUSES = frozenset((429, 500, 502, 503))
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _INTEGER: TypeAdapter[int] = TypeAdapter(int)
+_OutputT = TypeVar("_OutputT", bound=EvaluationModel)
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,7 @@ class HttpResponse:
 
 ChatCompletionSender = Callable[[str, Mapping[str, str], dict[str, object], float], HttpResponse]
 AttemptRecorder = Callable[[ModelCallAttempt], None]
-CompletedLookup = Callable[[ModelRequestId], CriterionResult | None]
+CompletedLookup = Callable[[ModelRequestId], CompletedModelCall | CriterionUnavailable | None]
 AttemptNumberLookup = Callable[[ModelRequestId], int]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
@@ -120,14 +124,55 @@ def evaluate_prompt(
     clock: Clock = time.monotonic,
     now: Now = lambda: datetime.now(UTC),
 ) -> CriterionResult:
+    result = invoke_prompt(
+        prompt,
+        values,
+        context,
+        persistence,
+        EvaluationToolOutput,
+        api_key=api_key,
+        sender=sender,
+        retry_policy=retry_policy,
+        sleep=sleep,
+        clock=clock,
+        now=now,
+    )
+    if isinstance(result, CriterionUnavailable):
+        return result
+    return CriterionAccepted(
+        prompt_name=result.prompt_name,
+        passed=result.output.passed,
+        reason=result.output.reason,
+    )
+
+
+def invoke_prompt(
+    prompt: PromptVersion,
+    values: Mapping[str, str],
+    context: ModelCallContext,
+    persistence: ModelCallPersistence,
+    output_type: type[_OutputT],
+    *,
+    api_key: str,
+    sender: ChatCompletionSender | None = None,
+    retry_policy: RetryPolicy | None = None,
+    sleep: Sleeper = time.sleep,
+    clock: Clock = time.monotonic,
+    now: Now = lambda: datetime.now(UTC),
+) -> PromptAccepted[_OutputT] | CriterionUnavailable:
     policy = retry_policy or RetryPolicy()
     messages = _render_messages(prompt, values)
     if context.input_digest != prompt_input_digest(values):
         raise ValueError("Model-call context does not match the prompt input")
     request_id = model_request_id(context, prompt)
     completed = persistence.find_completed(request_id)
-    if completed is not None:
+    if isinstance(completed, CriterionUnavailable):
         return completed
+    if completed is not None:
+        return PromptAccepted(
+            prompt_name=completed.prompt_name,
+            output=output_type.model_validate(completed.parsed_output),
+        )
     first_attempt_number = persistence.next_attempt_number(request_id)
     body = _request_body(prompt, messages)
     send = sender or send_chat_completion
@@ -149,6 +194,7 @@ def evaluate_prompt(
                 attempt_number,
                 latency_ms,
                 now(),
+                output_type,
             )
         except requests.RequestException as error:
             latency_ms = max(0, round((clock() - started_at) * 1000))
@@ -169,13 +215,12 @@ def evaluate_prompt(
                 result.reason,
             )
         persistence.record(attempt)
-        if isinstance(result, CriterionAccepted):
+        if isinstance(result, PromptAccepted):
             return result
         attempts_used = attempt_number - first_attempt_number + 1
         if attempt.status != "retryable_error" or attempts_used >= policy.max_attempts:
             return result
-        delay_seconds = policy.base_delay_seconds * 2.0 ** (attempts_used - 1)
-        sleep(delay_seconds)
+        sleep(policy.base_delay_seconds * 2.0 ** (attempts_used - 1))
     raise AssertionError("A valid retry policy always returns from the attempt loop")
 
 
@@ -195,7 +240,9 @@ def postgres_model_call_persistence(
     if not connection.autocommit:
         raise ValueError("Model-call persistence requires an autocommit connection")
 
-    def find_completed(request_id: ModelRequestId) -> CriterionResult | None:
+    def find_completed(
+        request_id: ModelRequestId,
+    ) -> CompletedModelCall | CriterionUnavailable | None:
         row = connection.execute(
             """
             SELECT prompt_name, status, parsed_output, error
@@ -209,10 +256,8 @@ def postgres_model_call_persistence(
         if row is None:
             return None
         if str(row[1]) == "accepted":
-            output = EvaluationToolOutput.model_validate(row[2])
-            return CriterionAccepted(
-                prompt_name=str(row[0]), passed=output.passed, reason=output.reason
-            )
+            parsed_output = TypeAdapter(dict[str, JsonValue]).validate_python(row[2])
+            return CompletedModelCall(prompt_name=str(row[0]), parsed_output=parsed_output)
         error = StoredModelCallError.model_validate(row[3])
         return CriterionUnavailable(
             prompt_name=str(row[0]), error_code=error.code, reason=error.message
@@ -327,13 +372,13 @@ def _request_body(prompt: PromptVersion, messages: tuple[dict[str, str], ...]) -
             {
                 "type": "function",
                 "function": {
-                    "name": "evaluate_job",
-                    "description": "Submit the evaluation result for a job listing",
+                    "name": prompt.tool_name,
+                    "description": prompt.tool_description,
                     "parameters": prompt.output_schema,
                 },
             }
         ],
-        "tool_choice": {"type": "function", "function": {"name": "evaluate_job"}},
+        "tool_choice": {"type": "function", "function": {"name": prompt.tool_name}},
     }
 
 
@@ -345,7 +390,8 @@ def _interpret_response(
     attempt_number: int,
     latency_ms: int,
     observed_at: datetime,
-) -> tuple[CriterionResult, ModelCallAttempt]:
+    output_type: type[_OutputT],
+) -> tuple[PromptAccepted[_OutputT] | CriterionUnavailable, ModelCallAttempt]:
     try:
         raw = _JSON.validate_json(response.body)
     except ValidationError:
@@ -377,9 +423,9 @@ def _interpret_response(
     try:
         completion = OpenRouterCompletion.model_validate(raw)
         tool_call = completion.choices[0].message.tool_calls[0]
-        if tool_call.function.name != "evaluate_job":
+        if tool_call.function.name != prompt.tool_name:
             raise ValueError("response returned the wrong tool")
-        output = EvaluationToolOutput.model_validate_json(tool_call.function.arguments)
+        output = output_type.model_validate_json(tool_call.function.arguments)
     except (ValidationError, ValueError, IndexError) as error:
         unavailable = CriterionUnavailable(
             prompt_name=prompt.definition.name,
@@ -398,12 +444,8 @@ def _interpret_response(
             unavailable.reason,
             raw,
         )
-    parsed_output = output.model_dump(by_alias=True)
-    accepted = CriterionAccepted(
-        prompt_name=prompt.definition.name,
-        passed=output.passed,
-        reason=output.reason,
-    )
+    parsed_output = output.model_dump(by_alias=True, exclude_none=True)
+    accepted = PromptAccepted(prompt_name=prompt.definition.name, output=output)
     return accepted, ModelCallAttempt(
         id=uuid4(),
         context=context,

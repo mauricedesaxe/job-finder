@@ -24,9 +24,9 @@ from job_finder.evaluation.openrouter import (
     prompt_input_digest,
 )
 from job_finder.evaluation.prompt_releases import (
-    EvaluationPromptRelease,
-    bootstrap_evaluation_prompt_release,
-    load_evaluation_prompt_release,
+    PromptRelease,
+    bootstrap_prompt_release,
+    load_prompt_release,
 )
 
 __all__ = [
@@ -35,7 +35,7 @@ __all__ = [
     "CriterionEvaluator",
     "CriterionResult",
     "CriterionUnavailable",
-    "EvaluationPromptRelease",
+    "PromptRelease",
     "EvaluationResult",
     "EvaluationUnavailable",
     "HttpResponse",
@@ -45,11 +45,11 @@ __all__ = [
     "Qualified",
     "Rejected",
     "RetryPolicy",
-    "bootstrap_evaluation_prompt_release",
+    "bootstrap_prompt_release",
     "evaluate_job",
     "evaluate_prompt",
     "job_message",
-    "load_evaluation_prompt_release",
+    "load_prompt_release",
     "postgres_model_call_persistence",
     "prompt_input_digest",
 ]

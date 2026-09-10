@@ -3,19 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-PromptPhase = Literal["filter", "profile"]
+PromptPhase = Literal["filter", "profile", "enrichment", "deduplication"]
+PromptOutput = Literal["evaluation", "enrichment", "deduplication"]
 
 
 @dataclass(frozen=True)
-class EvaluationPrompt:
+class PromptDefinition:
     name: str
     criterion: str
     phase: PromptPhase
     system_message: str
     inputs: tuple[str, ...] = ("job",)
+    user_message: str = "{job}"
+    output: PromptOutput = "evaluation"
+    max_tokens: int = 256
 
 
-LOCATION = EvaluationPrompt(
+LOCATION = PromptDefinition(
     name="job-finder-filter-location-eligibility",
     criterion="remote-europe-eligible",
     phase="filter",
@@ -36,7 +40,7 @@ FAIL: "Remote, US or Canada only." -> Europe is excluded.
 FAIL: "Crypto exchange, London office, hybrid schedule." -> company domain does not make the role remote.""",
 )
 
-COMPENSATION = EvaluationPrompt(
+COMPENSATION = PromptDefinition(
     name="job-finder-filter-compensation",
     criterion="compensation-minimum",
     phase="filter",
@@ -64,7 +68,7 @@ FAIL: "$80,000 - $100,000 per year" -> max $100k < $130k.
 FAIL: "$3,000/month" -> $36k/year < $130k.""",
 )
 
-ROLE_QUALITY = EvaluationPrompt(
+ROLE_QUALITY = PromptDefinition(
     name="job-finder-filter-role-quality",
     criterion="role-quality",
     phase="filter",
@@ -90,7 +94,7 @@ FAIL: "Solutions Engineer. Partner with strategic accounts and translate custome
 FAIL: "Principal engineer. 12+ years required. Java, Spring Boot, and Angular are the core stack." -> seniority and stack signals.""",
 )
 
-COMPANY_QUALITY = EvaluationPrompt(
+COMPANY_QUALITY = PromptDefinition(
     name="job-finder-filter-company-quality",
     criterion="cheap-shop-placement",
     phase="filter",
@@ -118,7 +122,7 @@ FAIL: "We connect LATAM engineering talent with global companies. Our client is 
 FAIL: "Hatch IT - Senior Software Engineer. Hatch IT is partnering with VIA to find an engineer." -> S1, S3.""",
 )
 
-EARLY_STAGE_PRODUCT = EvaluationPrompt(
+EARLY_STAGE_PRODUCT = PromptDefinition(
     name="job-finder-profile-early-stage-product-engineer",
     criterion="early-stage-product-engineer",
     phase="profile",
@@ -137,7 +141,7 @@ FAIL: "Senior SRE. Own Kubernetes, incident response, and reliability targets." 
 FAIL: "Platform engineer. Build internal developer tooling with no user-facing product ownership." -> internal platform work alone is insufficient.""",
 )
 
-APPLIED_AI_PRODUCT = EvaluationPrompt(
+APPLIED_AI_PRODUCT = PromptDefinition(
     name="job-finder-profile-applied-ai-product-engineer",
     criterion="applied-ai-product-engineer",
     phase="profile",
@@ -165,3 +169,38 @@ EVALUATION_PROMPTS = (
     EARLY_STAGE_PRODUCT,
     APPLIED_AI_PRODUCT,
 )
+
+ENRICHMENT = PromptDefinition(
+    name="job-finder-enrichment",
+    criterion="enrichment",
+    phase="enrichment",
+    output="enrichment",
+    max_tokens=1024,
+    system_message="""You normalize and clean up job listing data for a personal job search CRM.
+
+Given raw scraped job data, return cleaned and normalized versions of each field:
+- **title**: Just the job title, no company name, location, or other suffixes
+- **company**: Proper company name with correct capitalization and spacing (e.g. "Monad Foundation" not "monad.foundation", "Paxos Labs" not "PaxosLabs")
+- **description**: A clean, well-formatted summary of the role using markdown. Structure it with sections like "## Overview", "## Responsibilities", "## Requirements", "## Tech Stack", "## Compensation" (only include sections that have content). Use bullet points for lists. Strip navigation elements, boilerplate, legal disclaimers, and repeated company marketing. Should be readable in 30 seconds.
+- **location**: A short canonical location string (e.g. "Remote (Global)", "Remote (US/EU)", "Remote (Europe)", "Remote (US)", "Remote", "New York, NY", "London, UK").
+
+  STRICT RULES - be conservative; do NOT infer or invent restrictions:
+  * Only encode geographic restrictions that are EXPLICITLY stated in the listing (e.g. "US only", "EU residents only", "must be eligible to work in Canada").
+  * A mentioned office is NOT a restriction. "Remote-friendly with an NYC office" -> "Remote", NOT "Remote (US/NYC preferred)". "Hybrid in San Francisco" -> "Hybrid (San Francisco)" only because the listing states the requirement.
+  * Do not write phrases like "preferred" or "primarily" unless those exact words appear in the source.
+  * If the listing says "remote" without a region -> "Remote".
+  * If the listing gives no location/eligibility signal at all -> "Not specified".""",
+)
+
+TITLE_DEDUPLICATION = PromptDefinition(
+    name="job-finder-title-deduplication",
+    criterion="title-deduplication",
+    phase="deduplication",
+    inputs=("newTitle", "existingTitles"),
+    user_message='New title: "{newTitle}"\n\nExisting titles at the same company:\n{existingTitles}\n\nIs the new title a duplicate of any existing title?',
+    output="deduplication",
+    max_tokens=128,
+    system_message="""You compare job titles at the same company to detect duplicates. Two titles are duplicates if they refer to the same role despite minor wording differences: abbreviations (Sr. = Senior, Eng = Engineer), reordering (Backend Engineer = Engineer, Backend), or trivial additions (e.g. adding a team name). They are NOT duplicates if the seniority level, domain, or function differs (e.g. "Senior Backend Engineer" vs "Staff Frontend Engineer").""",
+)
+
+PROMPTS = (*EVALUATION_PROMPTS, ENRICHMENT, TITLE_DEDUPLICATION)

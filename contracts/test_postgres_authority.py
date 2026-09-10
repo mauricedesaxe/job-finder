@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -14,10 +14,24 @@ from psycopg import sql
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.evaluation import (
-    bootstrap_evaluation_prompt_release,
-    load_evaluation_prompt_release,
+    bootstrap_prompt_release,
+    load_prompt_release,
 )
-from job_finder.evaluation.models import CriterionAccepted, ModelCallContext
+from job_finder.evaluation.models import (
+    CriterionAccepted,
+    ModelCallContext,
+    PromptAccepted,
+    Qualified,
+)
+from job_finder.jobs.decision_pipeline import (
+    DecisionContext,
+    PersistedDecision,
+    postgres_decision_store,
+    process_qualified_job,
+)
+from job_finder.jobs.enrichment import EnrichedJob
+from job_finder.jobs.models import JobListing
+from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.evaluation.openrouter import (
     HttpResponse,
     evaluate_prompt,
@@ -216,18 +230,18 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
             )
 
 
-def test_bootstraps_the_evaluation_release_idempotently(authority_schema: str) -> None:
+def test_bootstraps_the_complete_prompt_release_idempotently(authority_schema: str) -> None:
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
 
-        first = bootstrap_evaluation_prompt_release(connection)
-        second = bootstrap_evaluation_prompt_release(connection)
+        first = bootstrap_prompt_release(connection)
+        second = bootstrap_prompt_release(connection)
 
         assert second == first
-        assert load_evaluation_prompt_release(connection, first.id) == first
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (6,)
+        assert load_prompt_release(connection, first.id) == first
+        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (8,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (6,)
+        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (8,)
 
 
 def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> None:
@@ -238,7 +252,7 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
     calls = 0
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
-        release = bootstrap_evaluation_prompt_release(connection)
+        release = bootstrap_prompt_release(connection)
         connection.execute(
             """
             INSERT INTO pipeline_runs (
@@ -348,6 +362,147 @@ def test_records_and_reuses_an_accepted_model_call(authority_schema: str) -> Non
             Decimal("0.00012000"),
             {"pass": True, "reason": "matched"},
         )
+
+
+def test_persists_a_terminal_decision_atomically_and_idempotently(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    calls = {"enrichment": 0, "deduplication": 0}
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        store = postgres_decision_store(connection)
+        listing = _decision_listing()
+        context = DecisionContext(
+            pipeline_run_id=run_id,
+            prompt_release_id=release.id,
+            policy_version="policy-1",
+            implementation_ref="test-ref",
+            observed_at=now,
+        )
+
+        def enrich(_listing: JobListing) -> PromptAccepted[EnrichedJob]:
+            calls["enrichment"] += 1
+            return PromptAccepted(
+                prompt_name="job-finder-enrichment", output=_decision_enrichment()
+            )
+
+        def deduplicate(
+            _title: str, existing_titles: tuple[str, ...]
+        ) -> PromptAccepted[TitleDuplicate]:
+            calls["deduplication"] += 1
+            assert existing_titles == ()
+            return PromptAccepted(
+                prompt_name="job-finder-title-deduplication",
+                output=TitleDuplicate(isDuplicate=False),
+            )
+
+        first = process_qualified_job(
+            listing,
+            Qualified(reason="Matches", profile_name="applied-ai"),
+            context,
+            store,
+            enrich,
+            deduplicate,
+        )
+        second = process_qualified_job(
+            listing,
+            Qualified(reason="Matches", profile_name="applied-ai"),
+            context,
+            store,
+            enrich,
+            deduplicate,
+        )
+
+        assert isinstance(first, PersistedDecision)
+        assert second == first
+        assert first.outcome == "qualified"
+        assert first.job == _decision_enrichment()
+        assert calls == {"enrichment": 1, "deduplication": 1}
+        assert connection.execute("SELECT count(*) FROM jobs").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM job_snapshots").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM evaluation_decisions").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM pipeline_receipts").fetchone() == (1,)
+
+
+def test_rolls_back_every_terminal_row_when_the_decision_is_invalid(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        store = postgres_decision_store(connection)
+
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            process_qualified_job(
+                _decision_listing(),
+                Qualified(reason="Matches", profile_name="applied-ai"),
+                DecisionContext(
+                    pipeline_run_id=uuid4(),
+                    prompt_release_id=release.id,
+                    policy_version="policy-1",
+                    implementation_ref="test-ref",
+                    observed_at=now,
+                ),
+                store,
+                lambda _listing: PromptAccepted(
+                    prompt_name="job-finder-enrichment", output=_decision_enrichment()
+                ),
+                lambda _title, _existing: PromptAccepted(
+                    prompt_name="job-finder-title-deduplication",
+                    output=TitleDuplicate(isDuplicate=False),
+                ),
+            )
+
+        assert connection.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM job_snapshots").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM evaluation_decisions").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM pipeline_receipts").fetchone() == (0,)
+
+
+def _insert_prompt_run(
+    connection: psycopg.Connection[tuple[object, ...]],
+    run_id: UUID,
+    prompt_release_id: str,
+    now: datetime,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO pipeline_runs (
+          id, idempotency_key, kind, implementation_ref, prompt_release_id, parameters,
+          status, started_at, completed_at
+        ) VALUES (%s, %s, 'processing', 'test-ref', %s, '{}'::jsonb,
+          'completed', %s, %s)
+        """,
+        (run_id, f"decision:{run_id}", prompt_release_id, now, now),
+    )
+
+
+def _decision_listing() -> JobListing:
+    return JobListing(
+        title="Sr Eng - Acme",
+        company="acme.io",
+        url="https://example.com/jobs/decision",
+        source="other",
+        keywords_matched=("python",),
+        date_posted=date(2026, 9, 9),
+        date_scraped=date(2026, 9, 10),
+        description="Raw description",
+        location="",
+    )
+
+
+def _decision_enrichment() -> EnrichedJob:
+    return EnrichedJob(
+        title="Senior Engineer",
+        company="Acme",
+        description="## Overview\nBuild things.",
+        location="Remote",
+    )
 
 
 @contextmanager

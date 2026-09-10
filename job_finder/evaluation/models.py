@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, ClassVar, Literal, NewType
+from typing import Annotated, ClassVar, Generic, Literal, NewType, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -21,6 +21,21 @@ class EvaluationModel(BaseModel):
 class EvaluationToolOutput(EvaluationModel):
     passed: bool = Field(alias="pass")
     reason: str
+
+
+PromptOutputT = TypeVar("PromptOutputT", bound=EvaluationModel)
+
+
+@dataclass(frozen=True)
+class PromptAccepted(Generic[PromptOutputT]):
+    prompt_name: str
+    output: PromptOutputT
+
+
+class CompletedModelCall(EvaluationModel):
+    kind: Literal["completed"] = "completed"
+    prompt_name: str
+    parsed_output: dict[str, JsonValue]
 
 
 class CriterionAccepted(EvaluationModel):

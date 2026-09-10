@@ -11,7 +11,7 @@ from job_finder.evaluation.models import (
     Qualified,
     Rejected,
 )
-from job_finder.evaluation.prompt_releases import EvaluationPromptRelease, PromptVersion
+from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion
 from job_finder.jobs.models import JobListing
 
 CriterionEvaluator = Callable[[PromptVersion, Mapping[str, str]], CriterionResult]
@@ -19,7 +19,7 @@ CriterionEvaluator = Callable[[PromptVersion, Mapping[str, str]], CriterionResul
 
 def evaluate_job(
     job: JobListing,
-    release: EvaluationPromptRelease,
+    release: PromptRelease,
     evaluate: CriterionEvaluator,
     *,
     rates: str,
