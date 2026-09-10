@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from job_finder.evaluation.models import (
     EvaluationResult,
-    EvaluationUnavailable,
+    OperationalError,
     PromptReleaseId,
     Qualified,
 )
@@ -592,7 +592,7 @@ def _trial_result(
     trial_index: int,
     result: EvaluationResult,
 ) -> EvaluationTrialResult:
-    if isinstance(result, EvaluationUnavailable):
+    if isinstance(result, OperationalError):
         actual: ExpectedOutcome | None = None
     else:
         actual = "qualified" if isinstance(result, Qualified) else "rejected"

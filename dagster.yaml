@@ -1,0 +1,11 @@
+storage:
+  postgres:
+    postgres_url:
+      env: JOB_FINDER_POSTGRES_DSN
+telemetry:
+  enabled: false
+concurrency:
+  runs:
+    max_concurrent_runs: 4
+  pools:
+    default_limit: 1

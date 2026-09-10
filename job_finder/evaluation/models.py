@@ -45,14 +45,30 @@ class CriterionAccepted(EvaluationModel):
     reason: str
 
 
-class CriterionUnavailable(EvaluationModel):
-    kind: Literal["unavailable"] = "unavailable"
+class OperationalError(EvaluationModel):
     prompt_name: str
     error_code: str
     reason: str
 
 
-CriterionResult = Annotated[CriterionAccepted | CriterionUnavailable, Field(discriminator="kind")]
+class RetryableOperationalError(OperationalError):
+    kind: Literal["retryable_error"] = "retryable_error"
+    retryability: Literal["retryable"] = "retryable"
+
+
+class TerminalOperationalError(OperationalError):
+    kind: Literal["terminal_error"] = "terminal_error"
+    retryability: Literal["terminal"] = "terminal"
+
+
+OperationalFailure = Annotated[
+    RetryableOperationalError | TerminalOperationalError,
+    Field(discriminator="kind"),
+]
+CriterionResult = Annotated[
+    CriterionAccepted | RetryableOperationalError | TerminalOperationalError,
+    Field(discriminator="kind"),
+]
 
 
 class Qualified(EvaluationModel):
@@ -66,15 +82,9 @@ class Rejected(EvaluationModel):
     reason: str
 
 
-class EvaluationUnavailable(EvaluationModel):
-    kind: Literal["unavailable"] = "unavailable"
-    prompt_name: str
-    error_code: str
-    reason: str
-
-
 EvaluationResult = Annotated[
-    Qualified | Rejected | EvaluationUnavailable, Field(discriminator="kind")
+    Qualified | Rejected | RetryableOperationalError | TerminalOperationalError,
+    Field(discriminator="kind"),
 ]
 
 

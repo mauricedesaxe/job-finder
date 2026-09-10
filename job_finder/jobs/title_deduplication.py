@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from job_finder.evaluation.models import (
-    CriterionUnavailable,
+    OperationalFailure,
     EvaluationModel,
     ModelCallContext,
     PromptAccepted,
@@ -32,7 +32,7 @@ def deduplicate_title(
     api_key: str,
     sender: ChatCompletionSender | None = None,
     retry_policy: RetryPolicy | None = None,
-) -> PromptAccepted[TitleDuplicate] | CriterionUnavailable:
+) -> PromptAccepted[TitleDuplicate] | OperationalFailure:
     prompt_name = "job-finder-title-deduplication"
     if not existing_titles:
         return PromptAccepted(prompt_name=prompt_name, output=TitleDuplicate(isDuplicate=False))

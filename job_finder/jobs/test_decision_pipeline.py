@@ -6,7 +6,8 @@ from datetime import UTC, date, datetime
 from uuid import uuid4
 
 from job_finder.evaluation.models import (
-    CriterionUnavailable,
+    RetryableOperationalError,
+    TerminalOperationalError,
     InputDigest,
     ModelCallContext,
     PromptAccepted,
@@ -295,7 +296,7 @@ def test_stops_without_a_terminal_write_when_enrichment_is_unavailable() -> None
             active_company_policy=lambda _company, _at: None,
             persist=persist,
         ),
-        lambda _listing: CriterionUnavailable(
+        lambda _listing: RetryableOperationalError(
             prompt_name="job-finder-enrichment",
             error_code="invalid_response",
             reason="missing tool call",
@@ -306,8 +307,39 @@ def test_stops_without_a_terminal_write_when_enrichment_is_unavailable() -> None
         ),
     )
 
-    assert result.kind == "unavailable"
+    assert result.kind == "retryable_error"
     assert result.stage == "enrichment"
+    assert writes == 0
+
+
+def test_preserves_a_terminal_deduplication_error_without_a_write() -> None:
+    writes = 0
+
+    def persist(_decision: TerminalDecision) -> PersistedDecision:
+        nonlocal writes
+        writes += 1
+        raise AssertionError("terminal persistence must not run")
+
+    result = process_qualified_job(
+        _listing(),
+        Qualified(reason="qualified", profile_name="profile"),
+        _decision_context(),
+        DecisionStore(
+            find_completed=lambda _key: None,
+            existing_titles=lambda _company: ("Existing Engineer",),
+            active_company_policy=lambda _company, _at: None,
+            persist=persist,
+        ),
+        lambda _listing: PromptAccepted(prompt_name="job-finder-enrichment", output=_enriched()),
+        lambda _title, _existing: TerminalOperationalError(
+            prompt_name="job-finder-title-deduplication",
+            error_code="http_401",
+            reason="invalid credentials",
+        ),
+    )
+
+    assert result.kind == "terminal_error"
+    assert result.stage == "deduplication"
     assert writes == 0
 
 

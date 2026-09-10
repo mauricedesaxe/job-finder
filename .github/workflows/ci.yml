@@ -80,8 +80,12 @@ jobs:
           uv run basedpyright --level error
           uv run vulture
           uv run xenon --max-absolute C --max-modules B --max-average A job_finder
+          uv lock --check
+          JOB_FINDER_POSTGRES_DSN="$JOB_FINDER_TEST_POSTGRES_DSN" uv run dagster definitions validate -m job_finder.dagster
           uv run pytest
-          uv run pytest contracts/test_postgres_authority.py
+          uv run pytest contracts
+      - name: Build Dagster image
+        run: docker build --tag job-finder-dagster:test .
 
   cloudflare:
     runs-on: ubuntu-latest

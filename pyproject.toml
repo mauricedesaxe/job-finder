@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Automated job search, evaluation, and review."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "dagster==1.13.21",
+    "dagster-postgres==0.29.21",
+    "dagster-webserver==1.13.21",
     "psycopg[binary]==3.3.5",
     "pydantic==2.13.4",
     "python-fasthtml==0.14.13",

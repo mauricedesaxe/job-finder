@@ -7,8 +7,8 @@ from job_finder.evaluation.evaluate import evaluate_job, job_message
 from job_finder.evaluation.models import (
     CriterionAccepted,
     CriterionResult,
-    CriterionUnavailable,
-    EvaluationUnavailable,
+    RetryableOperationalError,
+    TerminalOperationalError,
     Qualified,
     Rejected,
 )
@@ -62,7 +62,7 @@ def test_returns_the_first_filter_result_in_catalog_order() -> None:
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         calls.append(version.definition.criterion)
         if version.definition.criterion == "remote-europe-eligible":
-            return CriterionUnavailable(
+            return RetryableOperationalError(
                 prompt_name=version.definition.name,
                 error_code="timeout",
                 reason="first failed",
@@ -74,11 +74,29 @@ def test_returns_the_first_filter_result_in_catalog_order() -> None:
     result = evaluate_job(JOB, release, evaluate, rates=RATES)
 
     assert len(calls) == 4
-    assert result == EvaluationUnavailable(
+    assert result == RetryableOperationalError(
         prompt_name=release.versions[0].definition.name,
         error_code="timeout",
         reason="first failed",
     )
+
+
+def test_preserves_a_terminal_filter_error() -> None:
+    release = build_prompt_release()
+
+    def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
+        if version.definition.criterion == "remote-europe-eligible":
+            return TerminalOperationalError(
+                prompt_name=version.definition.name,
+                error_code="http_400",
+                reason="invalid request",
+            )
+        return _accepted(version, passed=True)
+
+    result = evaluate_job(JOB, release, evaluate, rates=RATES)
+
+    assert isinstance(result, TerminalOperationalError)
+    assert result.error_code == "http_400"
 
 
 def test_stops_before_profiles_after_a_filter_rejection() -> None:
@@ -128,7 +146,7 @@ def test_returns_a_rejection_when_the_other_profile_is_unavailable() -> None:
 
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         if version.definition.criterion == "early-stage-product-engineer":
-            return CriterionUnavailable(
+            return RetryableOperationalError(
                 prompt_name=version.definition.name,
                 error_code="timeout",
                 reason="profile failed",
@@ -146,7 +164,7 @@ def test_returns_the_first_error_when_all_profiles_are_unavailable() -> None:
     def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
         if version.definition.phase == "filter":
             return _accepted(version, passed=True)
-        return CriterionUnavailable(
+        return RetryableOperationalError(
             prompt_name=version.definition.name,
             error_code="timeout",
             reason=version.definition.criterion,
@@ -154,7 +172,7 @@ def test_returns_the_first_error_when_all_profiles_are_unavailable() -> None:
 
     result = evaluate_job(JOB, release, evaluate, rates=RATES)
 
-    assert result == EvaluationUnavailable(
+    assert result == RetryableOperationalError(
         prompt_name=release.versions[4].definition.name,
         error_code="timeout",
         reason="early-stage-product-engineer",
