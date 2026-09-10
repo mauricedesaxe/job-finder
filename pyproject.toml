@@ -1,0 +1,42 @@
+[project]
+name = "job-finder"
+version = "0.1.0"
+description = "Automated job search, evaluation, and review."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "psycopg[binary]==3.3.5",
+    "pydantic==2.13.4",
+    "requests==2.32.3",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright==1.39.10",
+    "pre-commit==4.5.1",
+    "pytest==9.0.3",
+    "ruff==0.6.9",
+    "vulture==2.16",
+    "xenon==0.9.3",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.10"
+exclude-newer = "7 days"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["job_finder"]
+
+[tool.basedpyright]
+include = ["job_finder", "contracts"]
+pythonVersion = "3.12"
+reportUnusedCallResult = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.vulture]
+paths = ["job_finder"]
+min_confidence = 80
