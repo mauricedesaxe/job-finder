@@ -11,6 +11,10 @@ from psycopg import sql
 
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
+from job_finder.evaluation import (
+    bootstrap_evaluation_prompt_release,
+    load_evaluation_prompt_release,
+)
 
 
 @pytest.fixture
@@ -198,6 +202,20 @@ def test_prompt_release_requires_the_declared_members(authority_schema: str) -> 
                 """,
                 ("6" * 64, "8" * 64),
             )
+
+
+def test_bootstraps_the_evaluation_release_idempotently(authority_schema: str) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        first = bootstrap_evaluation_prompt_release(connection)
+        second = bootstrap_evaluation_prompt_release(connection)
+
+        assert second == first
+        assert load_evaluation_prompt_release(connection, first.id) == first
+        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (6,)
+        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (6,)
 
 
 @contextmanager
