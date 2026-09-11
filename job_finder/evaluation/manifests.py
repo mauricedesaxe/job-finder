@@ -311,7 +311,7 @@ def create_manifest(
             created_at=created_at,
             created_by=created_by,
         )
-        _enqueue_projection(connection, "evaluation_manifest", digest, manifest, created_at)
+        enqueue_projection(connection, "evaluation_manifest", digest, manifest, created_at)
         return manifest
 
 
@@ -373,7 +373,7 @@ def run_manifest(
     idempotency_key: str,
 ) -> EvaluationRun:
     _require_autocommit(connection)
-    existing = _load_run_by_key(connection, idempotency_key)
+    existing = load_run_by_key(connection, idempotency_key)
     if existing is not None:
         if (
             existing.manifest_id != manifest_id
@@ -409,7 +409,7 @@ def run_manifest(
     )
     with connection.transaction():
         _insert_run(connection, run)
-        _enqueue_projection(connection, "evaluation_run", run.id, run, completed_at)
+        enqueue_projection(connection, "evaluation_run", run.id, run, completed_at)
     return run
 
 
@@ -467,7 +467,7 @@ def decide_prompt_promotion(
     idempotency_key: str,
 ) -> PromptPromotionDecision:
     _require_autocommit(connection)
-    existing = _load_promotion_by_key(connection, idempotency_key)
+    existing = load_promotion_decision(connection, idempotency_key)
     if existing is not None:
         if (
             existing.baseline_run_id != baseline_run_id
@@ -476,8 +476,8 @@ def decide_prompt_promotion(
         ):
             raise ValueError("Idempotency key belongs to a different promotion decision")
         return existing
-    baseline = _load_run(connection, baseline_run_id)
-    candidate = _load_run(connection, candidate_run_id)
+    baseline = load_run(connection, baseline_run_id)
+    candidate = load_run(connection, candidate_run_id)
     if baseline.manifest_id != candidate.manifest_id:
         raise ValueError("Baseline and candidate runs must use the same manifest")
     if baseline.prompt_release_id == candidate.prompt_release_id:
@@ -525,7 +525,7 @@ def decide_prompt_promotion(
                 created_at,
             ),
         )
-        _enqueue_projection(connection, "prompt_promotion", promotion.id, promotion, created_at)
+        enqueue_projection(connection, "prompt_promotion", promotion.id, promotion, created_at)
     return promotion
 
 
@@ -696,14 +696,14 @@ def _insert_run(connection: Connection, run: EvaluationRun) -> None:
         )
 
 
-def _load_run_by_key(connection: Connection, idempotency_key: str) -> EvaluationRun | None:
+def load_run_by_key(connection: Connection, idempotency_key: str) -> EvaluationRun | None:
     row = connection.execute(
         "SELECT id FROM evaluation_runs WHERE idempotency_key = %s", (idempotency_key,)
     ).fetchone()
-    return None if row is None else _load_run(connection, str(row[0]))
+    return None if row is None else load_run(connection, str(row[0]))
 
 
-def _load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
+def load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
     row = connection.execute(
         """
         SELECT idempotency_key, manifest_id, prompt_release_id, result_count,
@@ -758,7 +758,7 @@ def _load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
     )
 
 
-def _load_promotion_by_key(
+def load_promotion_decision(
     connection: Connection, idempotency_key: str
 ) -> PromptPromotionDecision | None:
     row = connection.execute(
@@ -857,7 +857,7 @@ def _require_matching_curation(
         raise ValueError("Idempotency key belongs to a different curation command")
 
 
-def _enqueue_projection(
+def enqueue_projection(
     connection: Connection,
     kind: str,
     source_id: str,
