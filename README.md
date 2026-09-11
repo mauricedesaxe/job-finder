@@ -1,288 +1,98 @@
-# jobfinder
+# job-finder
 
-> The Python, PlanetScale, Dagster, FastHTML, and Langfuse rewrite is in progress. See [`docs/architecture-rewrite.md`](docs/architecture-rewrite.md). The Bun instructions below describe the current production runtime until replacement.
-
-Automated job search and enrichment pipeline. Searches job boards (Ashby, Lever, Greenhouse, Workable), evaluates listings with an LLM via OpenRouter, and stores qualified jobs in Notion. Fork it and customize the search profile to match your own job search criteria.
-
-## Prerequisites
-
-- [Bun](https://bun.sh) runtime installed
-- A [Notion integration](https://www.notion.so/my-integrations) with read/write access to your database — you'll need the **Integration Token** and **Database ID**
-- A [Jina AI](https://jina.ai) API key — used for searching and scraping job pages
-- An [OpenRouter](https://openrouter.ai) API key — used for evaluating, enriching, and deduplicating jobs via LLM (model configurable via `LLM_MODEL` env var, defaults to `google/gemini-2.5-flash`)
-- A [LangSmith](https://smith.langchain.com) API key — every processed job is traced for inspection; usage and cost replace the old in-run token tracker
-- A [Cloudflare](https://dash.cloudflare.com) Workers Paid account with Workflows and D1 enabled
-
-## Notion Database Setup
-
-Create a new Notion database and add it to your integration's connections. The database needs these properties (the preflight check will tell you if anything is missing):
-
-| Property | Type |
-|----------|------|
-| `Job Title` | Title |
-| `Company` | Text |
-| `URL` | URL |
-| `Source` | Select |
-| `Keywords` | Multi-select |
-| `Date Scraped` | Date |
-| `Date Posted` | Date |
-| `Location` | Text |
-| `Status` | Select |
-| `Application Date` | Date |
-
-Status options (`To Review`, `Applied`, `Skipped`, `Rejected`, `Company Applied`, `Company Blocked`, `Archived`) are created automatically on first run.
-
-## Customize Your Profile
-
-Edit the files in `src/config/` to match your job search. There are three things to configure:
-
-**`SEARCH_KEYWORDS`** — the search terms that get combined with each job board domain. For example, if you're looking for Python backend roles:
-
-```ts
-export const SEARCH_KEYWORDS = [
-  "senior python backend engineer",
-  "senior django developer",
-  "senior fastapi developer",
-  "lead backend engineer python",
-];
-```
-
-**`EVALUATION_PROFILES`** (OR logic) — role-matching criteria. The evaluator acts as a binary gatekeeper (not a scorer), so write clear rules for what should pass and what should fail. You can define multiple profiles — a job passes if **any** profile accepts it:
-
-```ts
-export const EVALUATION_PROFILES: EvaluationProfile[] = [
-  {
-    name: "python-backend",
-    prompt: `You evaluate job listings for a senior Python backend engineer based in the USA.
-
-A job PASSES if ALL of these are true:
-1. US-based or remote-friendly to US timezones.
-2. Senior or lead level (or unspecified).
-3. Backend engineering involving Python (Django, FastAPI, Flask).
-
-A job FAILS if ANY of these are true:
-- Restricted to non-US locations
-- Junior or internship level
-- Non-engineering role
-- No Python involvement`,
-  },
-];
-```
-
-**`EVALUATION_FILTERS`** (AND logic, optional) — hard gate criteria that **all** must pass before profiles are checked. Filters run first; if any filter fails, the job is rejected immediately without running profile evaluations (saving API calls). Leave the array empty to skip filters entirely:
-
-```ts
-export const EVALUATION_FILTERS: EvaluationFilter[] = [
-  {
-    name: "location-gate",
-    prompt: `You evaluate whether a job listing is available to someone based in the USA.
-A job PASSES if it is remote-friendly to US timezones or based in the US.
-A job FAILS if it explicitly requires a non-US location or timezone.`,
-  },
-];
-```
-
-You can combine everything in a single profile prompt (fewer API calls) or split into separate filters and profiles for modularity.
-
-## Forking for Personal Use
-
-This repo is configured for a specific job search (senior backend/fullstack, crypto, fintech, AI engineering, remote from Romania). If you fork it, you'll need to customize:
-
-1. **`src/config/search.ts`** — replace search keywords with terms relevant to your target roles
-2. **`src/config/evaluation.ts`** — rewrite the evaluation profiles and filters to match your criteria (seniority, stack, domain, location)
-3. **`src/pipeline/__integration__/fixtures/`** — delete the existing fixtures entirely, then build your own by adding real job listings you've liked/disliked. The integration tests use threshold-based accuracy, so they'll adapt as you add fixtures
-4. Run the integration tests (`bun test src/pipeline/__integration__/`) to see how well your prompts perform, then refine iteratively
-
-The evaluation prompts are the core of the system — expect to iterate on them as you encounter edge cases. The test infrastructure is designed for this: add fixtures from real jobs, run the tests, see what's misclassified, and tighten your prompts.
-
-## Local Setup
-
-```bash
-bun install
-cp .env.example .env  # fill in your API keys
-bun run scrape
-```
-
-## Deploy to Cloudflare
-
-1. Authenticate Wrangler with `bunx wrangler login`.
-2. Create the proof and production D1 databases:
-
-   ```bash
-   bunx wrangler d1 create job-finder-ledger-proof
-   bunx wrangler d1 create job-finder-ledger
-   ```
-
-3. Replace each environment's `database_id` in `wrangler.jsonc` with the ID returned by its create command.
-4. Add each required secret to the proof environment, then repeat each command with `--env production`:
-
-   ```bash
-   bunx wrangler secret put NOTION_TOKEN
-   bunx wrangler secret put NOTION_DATABASE_ID
-   bunx wrangler secret put JINA_API_KEY
-   bunx wrangler secret put OPENROUTER_API_KEY
-   bunx wrangler secret put LANGSMITH_API_KEY
-   bunx wrangler secret put MANUAL_TRIGGER_SECRET
-   ```
-
-5. Add optional `SLACK_WEBHOOK_URL`, `LLM_MODEL`, `LANGSMITH_ENDPOINT`, and `LANGSMITH_PROJECT` secrets when needed.
-6. Run `bun run deploy:cloudflare:proof` for an unscheduled proof deployment.
-7. Run `bun run deploy:cloudflare:production` to apply D1 migrations and deploy the scheduled production Workflow.
-
-Export `JOB_FINDER_URL` with the deployed Worker URL and `MANUAL_TRIGGER_SECRET` with the matching secret. Then start a manual reconcile and check its status with the generated run ID:
-
-```bash
-RUN_ID="manual-reconcile-$(date +%s)"
-
-curl --request POST "$JOB_FINDER_URL/runs" \
-  --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET" \
-  --header "Content-Type: application/json" \
-  --data "{\"runId\":\"$RUN_ID\",\"mode\":{\"kind\":\"reconcile\"}}"
-
-curl "$JOB_FINDER_URL/runs/$RUN_ID" \
-  --header "Authorization: Bearer $MANUAL_TRIGGER_SECRET"
-```
-
-The production schedule lives in `wrangler.jsonc`.
-
-> **Note:** Avoid modifying the Notion database while the scheduled Workflow is running. The scraper caches the database state at startup and concurrent edits can cause pagination errors.
-
-## Architecture
-
-```mermaid
-flowchart TD
-    Start([bun run scrape]) --> Preflight[Preflight checks\nValidate Notion schema]
-    Preflight --> PreReconcile[Pre-reconcile\nSync job statuses]
-    PreReconcile --> Cache[Build Notion cache\nURLs, blocked companies,\nrecent apps, titles by company]
-    Cache --> Search
-
-    subgraph Search [Phase 1: Search]
-        direction TB
-        Keywords[keywords x domains\n= search queries] --> JinaSearch
-        JinaSearch[Jina Search API\nsite:domain keyword]
-        JinaSearch --> Dedup1[Filter & deduplicate URLs]
-    end
-
-    Search --> Process
-
-    subgraph Process [Phase 2: Process URLs]
-        direction TB
-        P1[URL dedup\nSkip if in cache or seen this run]
-        P1 --> P2[Scrape via Jina Reader\nPage → markdown]
-        P2 --> P3[Evaluate with LLM\nfilters first, then profiles]
-        P3 -->|Filter or all profiles fail| Rejected[Insert as Rejected]
-        P3 -->|Filters pass + profile match| P4[Enrich with LLM\nNormalize title, company,\nlocation, description]
-        P4 --> P5[Fuzzy dedup with LLM\nCompare against existing titles]
-        P5 -->|Duplicate| Skip1[Skip]
-        P5 -->|Unique| P6{Company\nchecks}
-        P6 -->|Blocked| Archive[Insert as Archived]
-        P6 -->|Recently applied| CompApp[Insert as Company Applied]
-        P6 -->|Clear| Insert[Insert as To Review]
-    end
-
-    Process --> PostReconcile[Post-reconcile\nSync job statuses]
-    PostReconcile --> Summary([Print summary stats])
-
-    JinaSearch -.-> Jina[(Jina AI\ns.jina.ai / r.jina.ai)]
-    P2 -.-> Jina
-    P3 -.-> LLM[(LLM via OpenRouter)]
-    P4 -.-> LLM
-    P5 -.-> LLM
-    Insert -.-> Notion[(Notion DB)]
-    Rejected -.-> Notion
-    Archive -.-> Notion
-    CompApp -.-> Notion
-    Cache -.-> Notion
-
-    style Jina fill:#e8f4f8,stroke:#0891b2
-    style LLM fill:#fef3c7,stroke:#d97706
-    style Notion fill:#f3e8ff,stroke:#9333ea
-    style Rejected fill:#fee2e2,stroke:#dc2626
-    style Skip1 fill:#f3f4f6,stroke:#6b7280
-    style Archive fill:#f3f4f6,stroke:#6b7280
-    style Insert fill:#dcfce7,stroke:#16a34a
-    style CompApp fill:#fef9c3,stroke:#ca8a04
-```
-
-Each external service call is wrapped in a resilience stack: **semaphore** (concurrency limit) → **circuit breaker** (5 failures → 30s cooldown) → **retry** (3 attempts, exponential backoff on 429/5xx).
-
-| Service | Concurrency | Rate limit |
-|---------|-------------|------------|
-| Jina Search | 5 parallel | — |
-| Jina Reader | 8 parallel | — |
-| LLM (OpenRouter) | 10 parallel | — |
-| Notion | 3 parallel | 3 req/s (token bucket) |
-
-## How Search Works
-
-Each run generates search queries by combining your **keywords** from `config/search.ts` with **job board domains** (Ashby, Lever, Greenhouse, Workable).
-
-The query format is `site:{domain} {keyword}` — for example:
+Automated job search, evaluation, and review. A Python pipeline discovers job
+listings, filters and evaluates them against target profiles, and surfaces the
+survivors in a daily review where human feedback feeds the next evaluation
+round.
 
 ```
-site:jobs.ashbyhq.com senior python backend engineer
-site:jobs.lever.co senior django developer
+Dagster (schedules, pools, run history)
+  └─ job_finder pipeline: discover → claim → scrape → structural filter
+     → evaluate (OpenRouter) → enrich → dedup → terminal decision
+FastHTML review app  ← reads/writes →  PostgreSQL (the only authority)
+Langfuse             ← retryable projections (never a decision input)
 ```
 
-These queries hit the [Jina Search API](https://s.jina.ai) which returns indexed job listing URLs. Results are filtered to keep only valid job page URLs and deduplicated across all queries before moving to Phase 2.
+PostgreSQL owns every durable fact: jobs, immutable snapshots, pipeline runs,
+immutable prompt releases, model call attempts, frozen daily review membership,
+and append-only feedback. Dagster owns schedules and run history. Langfuse
+receives retryable copies of evaluation traces; a Langfuse outage never changes
+a job decision. `docs/architecture-rewrite.md` records why the system is
+shaped this way.
 
-## How URL Processing Works
+## Requirements
 
-Each URL goes through a multi-stage pipeline:
+- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- A PostgreSQL database (`JOB_FINDER_POSTGRES_DSN`); migrations apply
+  automatically on first connection
 
-1. **Dedup** — skip immediately if the URL exists in the Notion cache (fetched at startup) or was already seen in this run
-2. **Scrape** — the [Jina Reader API](https://r.jina.ai) fetches the page and converts it to clean markdown (title, company, description, dates)
-3. **Evaluate** — LLM via OpenRouter runs evaluation in two phases. First, AND filters run in parallel — if any filter fails, the job is rejected immediately (saving API calls). Then, OR profiles run in parallel — the job passes if any profile accepts it. If all profiles reject, the job is inserted as "Rejected" and processing stops
-4. **Enrich** — LLM via OpenRouter normalizes the raw scraped data: cleans the title (removes company/location suffixes), proper-cases the company name, normalizes the location (e.g. `Remote - US/EU` → `Remote (US/EU)`), and rewrites the description as concise markdown
-5. **Fuzzy dedup** — if the company already has jobs in the cache, LLM via OpenRouter compares the new title against existing ones to catch duplicates that differ only in abbreviations, reordering, or trivial additions
-6. **Company checks** — skip if the company is marked "Company Blocked", or insert as "Company Applied" if the user recently applied there (within 6 months)
-7. **Insert** — write to Notion with status "To Review"
+## Setup
 
-Jobs inserted during a run are immediately added to the local cache so they're visible for dedup within the same run.
-
-## Job Statuses
-
-| Status | Set by | Meaning |
-|--------|--------|---------|
-| `To Review` | System | New job, needs human review |
-| `Applied` | User/System | Applied to this job (auto-set if Application Date is filled) |
-| `Skipped` | User | Job isn't a fit, but company is fine |
-| `Rejected` | System | LLM evaluation rejected this job |
-| `Company Applied` | System | Another job at this company was applied to recently |
-| `Company Blocked` | User | Company is not a fit (e.g., doesn't hire remote) |
-| `Archived` | System/User | Done with this listing |
-
-## Reconciliation
-
-Reconciliation is an idempotent 4-pass process that keeps job statuses consistent with the current state of the Notion database. It runs **both before and after scraping** — before to clean up stale state from manual edits between runs, and after to propagate statuses for newly inserted jobs.
-
-The goal is to keep the Notion board accurate without manual status management. The user only needs to fill in Application Date or set Company Blocked — everything else propagates automatically.
-
-**Pass 0 — Auto-mark Applied**: Any job with an Application Date filled but status other than "Applied" gets corrected. This means you just need to fill in the date — the status updates itself.
-
-**Pass 1 — Unstale Company Applied**: Jobs marked "Company Applied" within the last 30 days are checked against the 6-month application lookback window. If the original application is now older than 6 months, the job is moved back to "To Review" so it gets a fresh look.
-
-**Pass 2 — Propagate Company Applied**: Finds all companies where the user has an Application Date within the last 6 months, then marks any "To Review" jobs from those companies as "Company Applied". This prevents reviewing jobs at companies you've already applied to recently.
-
-**Pass 3 — Archive blocked companies**: Finds all companies with at least one "Company Blocked" job, then archives any "To Review" jobs from those companies. Once you block a company, all future scraped jobs from them are automatically archived.
-
-## Testing
-
-```bash
-bun test
+```sh
+uv sync --frozen
 ```
 
-### Run the Python corpus gate
+### Environment variables
 
-Set `JOB_FINDER_POSTGRES_DSN`, `OPENROUTER_API_KEY`, and `JOB_FINDER_IMPLEMENTATION_REF` first.
-The default command runs the 121 unique direct fixtures through the structural filter and the full evaluator.
+| Variable | Used by | Purpose |
+|---|---|---|
+| `JOB_FINDER_POSTGRES_DSN` | pipeline, review app | PostgreSQL authority (`public` schema) |
+| `JOB_FINDER_DAGSTER_POSTGRES_DSN` | Dagster webserver/daemon | Same database, `?options=-csearch_path%3Ddagster` appended so Dagster storage lives in its own schema |
+| `OPENROUTER_API_KEY` | pipeline, evaluation | LLM evaluation calls |
+| `JINA_API_KEY` | pipeline | Search and scraping |
+| `JOB_FINDER_IMPLEMENTATION_REF` | pipeline | Provenance ref recorded on runs |
+| `JOB_FINDER_REVIEW_PASSWORD` | review app | Review login (≥12 chars) |
+| `JOB_FINDER_REVIEW_SESSION_SECRET` | review app | Session signing (≥32 chars) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | projection | Presence enables the projection schedule |
+| `JOB_FINDER_TEST_POSTGRES_DSN` | contracts | PostgreSQL for `pytest contracts` |
 
-```bash
-uv run python -m scripts.evaluate_corpus
+## Tasks
+
+```sh
+uv run pytest                              # unit tests
+uv run pytest contracts                    # authority + Dagster contracts (needs PostgreSQL)
+uv run dagster definitions validate -m job_finder.dagster
+uv run python -m scripts.serve_review      # review app on :8080
+uv run python -m scripts.evaluate_corpus   # full eval pipeline against real OpenRouter
 ```
 
-Run the 25 ATS fixtures separately. This suite applies ATS formatting and both structural filters before evaluation.
+Pre-commit runs ruff format, ruff check, basedpyright, and unit tests on every
+commit and enforces conventional commit messages:
 
-```bash
-uv run python -m scripts.evaluate_corpus --suite ats
+```sh
+uv run pre-commit install --install-hooks -t pre-commit -t commit-msg
 ```
+
+## Running the stack locally
+
+```sh
+docker compose up          # Dagster webserver :3000 + daemon
+uv run python -m scripts.serve_review
+```
+
+## Deployment
+
+One Docker image serves three roles on Railway; the per-service start command
+decides the role:
+
+- review app: `uv run --no-sync uvicorn scripts.serve_review:create_app --factory --host 0.0.0.0 --port $PORT`
+- Dagster webserver: `uv run --no-sync dagster-webserver -h 0.0.0.0 -p $PORT -w workspace.yaml`
+- Dagster daemon: `uv run --no-sync dagster-daemon run -w workspace.yaml`
+
+`railway.toml` carries build config; healthchecks and start commands are
+per-service settings. Merges to `main` cut a CalVer release tag and a GitHub
+Release with generated notes.
+
+## Schedules
+
+- Full discovery: Wednesdays 07:00 UTC
+- Work-queue drain: every 15 minutes
+- Langfuse projection: every minute (self-enables when Langfuse keys are set)
+
+## Evaluation
+
+The evaluator ANDs the structural filter with per-criterion filter results and
+ORs target profiles. False positives cost more than false negatives: promotion
+requires FP ≤ 15% and FN ≤ 10% against the active prompt release. Every model
+attempt is recorded in PostgreSQL (`model_call_attempts`); Langfuse gets a
+retryable projection afterward.
