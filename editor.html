@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily review wireframe — editable board</title>
-<link rel="stylesheet" href="https://esm.sh/@tldraw/tldraw@3/editor.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tldraw/tldraw@3.15.6/tldraw.css">
 <style>
   html, body, #app { height: 100%; margin: 0; }
   #hint {
@@ -32,13 +32,30 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Tldraw } from 'https://esm.sh/@tldraw/tldraw@3?external=react,react-dom'
 
-const file = await fetch('./review-nav.tldr').then((r) => r.json())
-const snapshot = { schema: file.schema, store: { records: file.records } }
+const json = await fetch('./review-nav.tldr').then((r) => r.text())
 
 function App() {
   return React.createElement(Tldraw, {
     onMount(editor) {
-      editor.store.loadSnapshot(snapshot)
+      let snapshot = null
+      if (typeof editor.store.schema.migrateStoreSnapshot === 'function') {
+        const records = JSON.parse(json).records
+        const store = Object.fromEntries(records.map((r) => [r.id, r]))
+        const migrated = editor.store.schema.migrateStoreSnapshot({
+          store,
+          schema: JSON.parse(json).schema,
+        })
+        if (migrated.type === 'error') {
+          console.error('migration failed', migrated.reason)
+          return
+        }
+        snapshot = { store: migrated.value, schema: editor.store.schema.serialize() }
+      } else {
+        console.error('no migration api')
+        return
+      }
+      editor.loadSnapshot(snapshot)
+      editor.clearHistory()
       editor.zoomToFit()
     },
   })
