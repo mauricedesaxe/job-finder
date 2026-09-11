@@ -7,7 +7,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import Literal, cast
+from typing import cast
 from urllib.parse import quote
 from uuid import UUID
 
@@ -17,7 +17,6 @@ from fasthtml.common import (
     Beforeware,
     Body,
     Button,
-    Details,
     Div,
     Fieldset,
     Form,
@@ -37,9 +36,7 @@ from fasthtml.common import (
     Span,
     Strong,
     Style,
-    Summary,
     Textarea,
-    Time,
     Title,
     FastHTML,
     Request,
@@ -57,6 +54,7 @@ from job_finder.review.models import (
     DailyReview,
     ReviewConflict,
     ReviewItem,
+    ReviewJob,
     ReviewSubmission,
 )
 from job_finder.review.postgres import ReviewService
@@ -64,7 +62,6 @@ from job_finder.review.postgres import ReviewService
 DateClock = Callable[[], date]
 DateTimeClock = Callable[[], datetime]
 ReadinessProbe = Callable[[], None]
-PageKind = Literal["empty", "complete"]
 SESSION_COOKIE = "job_finder_review_session"
 SESSION_MAX_AGE = 14 * 24 * 60 * 60
 LOGIN_MAX_FAILURES = 5
@@ -139,7 +136,7 @@ def create_review_app(
         return RedirectResponse("/review", status_code=303)
 
     @app.route("/review", methods=["GET"])
-    def review_page(request: Request, day: str = "") -> HTMLResponse:
+    def review_page(request: Request, day: str = "", tab: str = "") -> HTMLResponse:
         review_day = _parse_day(day, today())
         if review_day is None:
             return _state_response(
@@ -149,12 +146,13 @@ def create_review_app(
             )
         try:
             daily_review = service.open_day(review_day)
+            adjacent = service.adjacent_days(review_day)
         except psycopg.Error:
             return _unavailable_response(review_day)
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
-        return HTMLResponse(_document(_review_content(daily_review, csrf_token)))
+        return HTMLResponse(_document(_review_page(daily_review, adjacent, tab, csrf_token)))
 
     @app.route("/review/{review_item_id}", methods=["POST"])
     async def submit_review(
@@ -170,28 +168,29 @@ def create_review_app(
         )
 
     @app.route("/review/item/{review_item_id}", methods=["GET"])
-    def review_item_page(review_item_id: str, request: Request) -> HTMLResponse:
+    def review_item_page(
+        review_item_id: str, request: Request, day: str = "", edit: str = ""
+    ) -> HTMLResponse:
+        review_day = _parse_day(day, today())
+        if review_day is None:
+            return _item_not_found_response(today())
         try:
-            daily_review = service.open_day(today())
+            daily_review = service.open_day(review_day)
         except psycopg.Error:
-            return _unavailable_response(today())
+            return _unavailable_response(review_day)
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
-        items = (
-            *daily_review.qualified.pending,
-            *daily_review.qualified.reviewed_items,
-            *daily_review.rejected_audit.pending,
-            *daily_review.rejected_audit.reviewed_items,
-        )
         try:
             item_id = UUID(review_item_id)
         except ValueError:
-            return _item_not_found_response(today())
+            return _item_not_found_response(review_day)
+        items = daily_review.ordered_items
         item = next((candidate for candidate in items if candidate.id == item_id), None)
         if item is None:
-            return _item_not_found_response(today())
-        return HTMLResponse(_document(_reviewed_item_content(daily_review, item, csrf_token)))
+            return _item_not_found_response(review_day)
+        show_form = not item.reviewed or edit == "1"
+        return HTMLResponse(_document(_item_page(review_day, items, item, show_form, csrf_token)))
 
     @app.route("/logout", methods=["POST"])
     async def logout(request: Request) -> HTMLResponse | RedirectResponse:
@@ -283,7 +282,23 @@ async def _submit_review(
         return _unavailable_response(review_day)
     if isinstance(result, ReviewConflict):
         return _conflict_response(review_day, result.reason)
-    return RedirectResponse(f"/review?day={review_day.isoformat()}", status_code=303)
+    return RedirectResponse(
+        _next_review_url(service, review_day, submission.review_item_id), status_code=303
+    )
+
+
+def _next_review_url(service: ReviewService, review_day: date, saved_item_id: UUID) -> str:
+    try:
+        review = service.open_day(review_day)
+    except psycopg.Error:
+        return _day_url(review_day)
+    items = review.ordered_items
+    index = next((i for i, item in enumerate(items) if item.id == saved_item_id), None)
+    if index is not None:
+        for item in items[index + 1 :]:
+            if not item.reviewed:
+                return _item_url(item.id, review_day)
+    return _day_url(review_day)
 
 
 class SecurityHeadersMiddleware:
@@ -346,103 +361,213 @@ def _login_content(next_url: str, error: str | None = None) -> object:
     )
 
 
-def _review_content(review: DailyReview, csrf_token: str) -> object:
-    current = review.current
-    if current is None:
-        kind: PageKind = "empty" if review.total == 0 else "complete"
-        return _finished_state(review, kind, csrf_token)
+def _review_page(
+    review: DailyReview,
+    adjacent: tuple[date | None, date | None],
+    tab: str,
+    csrf_token: str,
+) -> object:
+    active_tab = "reviewed" if tab == "reviewed" else "to_review"
     return Main(
-        _review_header(review, csrf_token),
-        _job_card(review, current, csrf_token),
+        _review_header(review, adjacent, csrf_token),
+        _review_tabs(review, active_tab),
+        _review_tab_content(review, active_tab),
         cls="review-shell",
     )
 
 
-def _reviewed_item_content(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
-    banner = None
-    if item.reviewed:
-        recorded = f"You recorded: {item.decision}"
-        if item.note:
-            recorded += f" \u2014 \u201c{item.note}\u201d"
-        banner = Div(
-            Strong(recorded, cls="recorded-decision"),
-            P(
-                "Every revision below is kept as a new entry; the latest one counts.",
-                cls="recorded-hint",
-            ),
-            cls="recorded-banner",
-        )
-    return Main(
-        _review_header(review, csrf_token),
-        banner,
-        _job_card(review, item, csrf_token),
-        cls="review-shell",
-    )
-
-
-def _review_header(review: DailyReview, csrf_token: str) -> object:
-    current = review.current
-    lane_label = "Qualified" if current is not None and current.lane == "qualified" else "Audit"
-    return (
-        Div(
-            Div(
-                Small("Daily review", cls="eyebrow"),
-                H1("Choose the next move"),
-            ),
-            Div(
-                Time(review.day.strftime("%A, %B %-d"), datetime=review.day.isoformat()),
-                P(f"{review.completed} of {review.total} reviewed", cls="progress-copy"),
-                _logout_form(csrf_token),
-                cls="review-meta",
-            ),
-            cls="review-header",
-        ),
-        _reviewed_list(review),
-        Div(
-            Span(lane_label, cls="lane-label"),
-            Span(
-                f"Qualified {review.qualified.completed}/{review.qualified.total}",
-                cls="lane-progress",
-            ),
-            Span(
-                f"Audit {review.rejected_audit.completed}/{review.rejected_audit.total}",
-                cls="lane-progress audit-progress",
-            ),
-            cls="progress-line",
-            role="status",
-            aria_live="polite",
-        ),
-    )
-
-
-def _reviewed_list(review: DailyReview) -> object:
-    recorded = (*review.qualified.reviewed_items, *review.rejected_audit.reviewed_items)
-    if not recorded:
-        return None
-    entries = tuple(
-        Li(
-            A(
-                f"{item.job.title} \u00b7 {item.job.company}",
-                href=f"/review/item/{item.id}",
-                cls="reviewed-link",
-            ),
-            Span(f" {item.decision}", cls="reviewed-decision"),
-        )
-        for item in recorded
-    )
-    return Details(
-        Summary(f"Reviewed ({len(recorded)})", cls="reviewed-summary"),
-        Ul(*entries, cls="reviewed-items"),
-        cls="reviewed-panel",
-    )
-
-
-def _job_card(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
-    audit = item.lane == "rejected_audit"
-    submit_label = "Update feedback" if item.reviewed else "Record feedback"
+def _review_header(
+    review: DailyReview,
+    adjacent: tuple[date | None, date | None],
+    csrf_token: str,
+) -> object:
+    previous_day, next_day = adjacent
     return Div(
         Div(
-            Span("Rejected audit" if audit else "Qualified match", cls="status-kicker"),
+            Small("Daily review", cls="eyebrow"),
+            Div(
+                _day_arrow("←", previous_day, "Previous review day"),
+                A("Today", href="/review", cls="day-link day-today"),
+                _day_arrow("→", next_day, "Next review day"),
+                cls="day-nav",
+            ),
+            cls="header-row",
+        ),
+        Div(
+            H1(_day_title(review.day), cls="day-title"),
+            _logout_form(csrf_token),
+            cls="title-row",
+        ),
+        cls="review-header",
+    )
+
+
+def _day_arrow(glyph: str, target_day: date | None, label: str) -> object:
+    if target_day is None:
+        return Span(glyph, cls="day-arrow day-arrow-off", aria_hidden="true")
+    return A(glyph, href=_day_url(target_day), cls="day-arrow", aria_label=label)
+
+
+def _review_tabs(review: DailyReview, active_tab: str) -> object:
+    pending = len(review.qualified.pending) + len(review.rejected_audit.pending)
+    return Div(
+        _tab("To review", pending, _day_url(review.day), active_tab == "to_review"),
+        _tab(
+            "Reviewed",
+            review.completed,
+            _day_url(review.day, "reviewed"),
+            active_tab == "reviewed",
+        ),
+        cls="review-tabs",
+    )
+
+
+def _tab(name: str, count: int, href: str, active: bool) -> object:
+    attributes: dict[str, str] = {}
+    if active:
+        attributes["aria_current"] = "page"
+    return A(f"{name} · {count}", href=href, cls="review-tab", **attributes)
+
+
+def _review_tab_content(review: DailyReview, active_tab: str) -> object:
+    if active_tab == "reviewed":
+        return _reviewed_tab_content(review)
+    return _to_review_tab_content(review)
+
+
+def _to_review_tab_content(review: DailyReview) -> object:
+    pending = (*review.qualified.pending, *review.rejected_audit.pending)
+    if pending:
+        return Ul(
+            *(_pending_row(item, review.day) for item in pending),
+            cls="job-list",
+        )
+    if review.total == 0:
+        return _state_block(
+            "Nothing to review",
+            "No qualified jobs or second-look cases were added for this date.",
+        )
+    return _state_block(
+        "All done for this day",
+        f"You reviewed all {review.total} jobs for this date.",
+        action=A("See the reviewed list", href=_day_url(review.day, "reviewed"), cls="retry"),
+    )
+
+
+def _reviewed_tab_content(review: DailyReview) -> object:
+    reviewed = (*review.qualified.reviewed_items, *review.rejected_audit.reviewed_items)
+    if not reviewed:
+        return _state_block(
+            "Nothing reviewed yet",
+            "Decisions you record on this day are listed here.",
+        )
+    return Ul(
+        *(_reviewed_row(item, review.day) for item in reviewed),
+        cls="job-list",
+    )
+
+
+def _pending_row(item: ReviewItem, review_day: date) -> object:
+    lane_chip = "chip lane-new" if item.lane == "qualified" else "chip lane-second-look"
+    lane_name = "New result" if item.lane == "qualified" else "Second look"
+    return Li(
+        A(
+            Span(lane_name, cls=lane_chip),
+            Strong(item.job.title, cls="job-title"),
+            Span(_job_subline(item.job), cls="job-subline"),
+            href=_item_url(item.id, review_day),
+            cls="job-row",
+        ),
+        cls="job-list-item",
+    )
+
+
+def _reviewed_row(item: ReviewItem, review_day: date) -> object:
+    decision = item.decision or ""
+    return Li(
+        A(
+            Span(
+                decision.capitalize(),
+                cls=f"chip decision-chip decision-{decision}",
+            ),
+            Strong(item.job.title, cls="job-title"),
+            Span(_job_subline(item.job), cls="job-subline"),
+            href=_item_url(item.id, review_day),
+            cls="job-row job-row-reviewed",
+        ),
+        cls="job-list-item",
+    )
+
+
+def _job_subline(job: ReviewJob) -> str:
+    location = job.location or "Location not specified"
+    return f"{job.company} · {location}"
+
+
+def _state_block(title: str, detail: str, *, action: object | None = None) -> object:
+    return Div(
+        H2(title),
+        P(detail),
+        action,
+        cls="state",
+    )
+
+
+def _item_page(
+    review_day: date,
+    items: tuple[ReviewItem, ...],
+    item: ReviewItem,
+    show_form: bool,
+    csrf_token: str,
+) -> object:
+    position = next(i for i, candidate in enumerate(items) if candidate.id == item.id)
+    previous_item = items[position - 1] if position > 0 else None
+    next_item = items[position + 1] if position + 1 < len(items) else None
+    return Main(
+        Div(
+            A(
+                f"← All jobs, {_day_title(review_day)}",
+                href=_day_url(review_day),
+                cls="back-link",
+            ),
+            Span(f"{position + 1} of {len(items)}", cls="position-marker"),
+            Div(
+                _item_arrow("← Prev", previous_item, review_day),
+                _item_arrow("Next →", next_item, review_day),
+                cls="item-nav",
+            ),
+            cls="item-topbar",
+        ),
+        None if show_form else _recorded_banner(review_day, item),
+        _job_card(review_day, item, show_form, csrf_token),
+        cls="review-shell",
+    )
+
+
+def _item_arrow(glyph: str, target: ReviewItem | None, review_day: date) -> object:
+    if target is None:
+        return Span(glyph, cls="item-nav-link item-nav-off", aria_hidden="true")
+    return A(glyph, href=_item_url(target.id, review_day), cls="item-nav-link")
+
+
+def _recorded_banner(review_day: date, item: ReviewItem) -> object:
+    return Div(
+        Strong(f"You decided: {item.decision}", cls="recorded-decision"),
+        P(f"“{item.note}”", cls="recorded-note") if item.note else None,
+        A(
+            "Change",
+            href=f"{_item_url(item.id, review_day)}&edit=1",
+            cls="change-link",
+        ),
+        cls="recorded-banner",
+    )
+
+
+def _job_card(review_day: date, item: ReviewItem, show_form: bool, csrf_token: str) -> object:
+    second_look = item.lane == "rejected_audit"
+    return Div(
+        Div(
+            Span("Second look" if second_look else "New result", cls="status-kicker"),
             A("Open original listing", href=item.job.url, target="_blank", rel="noreferrer"),
             cls="card-topline",
         ),
@@ -453,70 +578,51 @@ def _job_card(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
             Span(item.job.location or "Location not specified"),
             cls="job-meta",
         ),
-        P(item.evaluation_reason, cls="evaluation-reason"),
+        Div(
+            Small("Why it's here", cls="why-label"),
+            P(item.evaluation_reason, cls="evaluation-reason"),
+        ),
         Pre(item.job.description, cls="job-description", aria_label="Job description"),
-        Form(
-            Input(type="hidden", name="review_day", value=review.day.isoformat()),
-            Input(type="hidden", name="csrf_token", value=csrf_token),
-            Input(type="hidden", name="evaluation_id", value=item.evaluation_id),
-            Input(type="hidden", name="snapshot_id", value=item.snapshot_id),
-            Label(
-                "Notes, context, anything worth remembering (optional)",
-                Textarea(
-                    item.note or "",
-                    name="note",
-                    maxlength="2000",
-                    rows="3",
-                    placeholder="Why this decision? Salary signals, location, language, anything.",
-                ),
-                cls="note-field",
-            ),
-            Label(
-                Input(
-                    type="checkbox",
-                    name="block_company",
-                    checked=item.reviewed and item.decision == "reject",
-                ),
-                " Block this company from future results",
-                cls="block-company",
-            ),
-            Fieldset(
-                Legend("Decision"),
-                Button("Pursue", name="decision", value="pursue", cls="decision pursue"),
-                Button("Unsure", name="decision", value="unsure", cls="decision unsure"),
-                Button("Reject", name="decision", value="reject", cls="decision reject"),
-                cls="decision-row",
-            ),
-            action=f"/review/{item.id}",
-            method="post",
-        ),
-        P(
-            submit_label,
-            cls="submit-hint",
-        ),
-        cls="job-card audit-card" if audit else "job-card",
+        _decision_form(review_day, item, csrf_token) if show_form else None,
+        cls="job-card audit-card" if second_look else "job-card",
     )
 
 
-def _finished_state(review: DailyReview, kind: PageKind, csrf_token: str) -> object:
-    if kind == "empty":
-        title = "Nothing to review"
-        detail = "No qualified jobs or rejected audit cases were added for this date."
-    else:
-        title = "Review complete"
-        detail = f"You reviewed all {review.total} jobs for this date."
-    return Main(
-        Small("Daily review", cls="eyebrow"),
-        Time(review.day.strftime("%A, %B %-d"), datetime=review.day.isoformat()),
-        _logout_form(csrf_token),
-        Div(
-            H1(title),
-            P(detail),
-            A("Check again", href=_day_url(review.day), cls="retry"),
-            cls="state",
+def _decision_form(review_day: date, item: ReviewItem, csrf_token: str) -> object:
+    return Form(
+        Input(type="hidden", name="review_day", value=review_day.isoformat()),
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="evaluation_id", value=item.evaluation_id),
+        Input(type="hidden", name="snapshot_id", value=item.snapshot_id),
+        Label(
+            "Notes, context, anything worth remembering (optional)",
+            Textarea(
+                item.note or "",
+                name="note",
+                maxlength="2000",
+                rows="3",
+                placeholder="Why this decision? Salary signals, location, language, anything.",
+            ),
+            cls="note-field",
         ),
-        _reviewed_list(review),
-        cls="review-shell state-shell",
+        Label(
+            Input(
+                type="checkbox",
+                name="block_company",
+                checked=item.reviewed and item.decision == "reject",
+            ),
+            " Block this company from future results",
+            cls="block-company",
+        ),
+        Fieldset(
+            Legend("Decision"),
+            Button("Pursue", name="decision", value="pursue", cls="decision pursue"),
+            Button("Unsure", name="decision", value="unsure", cls="decision unsure"),
+            Button("Reject", name="decision", value="reject", cls="decision reject"),
+            cls="decision-row",
+        ),
+        action=f"/review/{item.id}",
+        method="post",
     )
 
 
@@ -613,8 +719,19 @@ def _safe_next(value: str) -> str:
     return "/"
 
 
-def _day_url(review_day: date) -> str:
-    return f"/review?day={review_day.isoformat()}"
+def _day_url(review_day: date, tab: str | None = None) -> str:
+    url = f"/review?day={review_day.isoformat()}"
+    if tab:
+        return f"{url}&tab={tab}"
+    return url
+
+
+def _item_url(item_id: UUID, review_day: date) -> str:
+    return f"/review/item/{item_id}?day={review_day.isoformat()}"
+
+
+def _day_title(review_day: date) -> str:
+    return review_day.strftime("%A, %B %-d")
 
 
 _CSS = """
@@ -635,19 +752,46 @@ body { margin: 0; min-height: 100vh; background: var(--paper); }
 a { color: var(--accent-dark); text-underline-offset: 0.2em; }
 button, select, textarea { font: inherit; }
 .review-shell { width: min(100% - 2rem, 860px); margin: 0 auto; padding: 3.5rem 0 5rem; }
-.review-header { display: flex; justify-content: space-between; gap: 2rem; align-items: end; }
+.review-header { margin-bottom: 0.5rem; }
+.header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.day-nav { display: flex; gap: 0.5rem; align-items: center; }
+.day-arrow, .item-nav-link { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 0 0.6rem; border: 2px solid var(--line); color: var(--ink); font-weight: 800; text-decoration: none; }
+.day-arrow-off, .item-nav-off { opacity: 0.35; border-style: dashed; }
+.day-today { padding: 0 1rem; border-color: var(--ink); }
 h1, h2 { font-family: Georgia, 'Times New Roman', serif; letter-spacing: -0.025em; margin: 0; }
-h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-height: 0.98; max-width: 10ch; }
-h2 { font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.04; }
-.eyebrow, .status-kicker, .lane-label { text-transform: uppercase; letter-spacing: 0.14em; font-weight: 800; }
-.eyebrow { display: block; color: var(--accent-dark); margin-bottom: 0.75rem; }
-.review-meta { text-align: right; color: var(--muted); }
-.review-meta time { color: var(--ink); font-weight: 750; }
-.progress-copy { margin: 0.35rem 0 0; }
+h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-height: 0.98; max-width: 14ch; }
+h2 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.04; }
+.eyebrow, .status-kicker { text-transform: uppercase; letter-spacing: 0.14em; font-weight: 800; }
+.eyebrow { display: block; color: var(--accent-dark); }
+.title-row { display: flex; justify-content: space-between; align-items: end; gap: 2rem; margin-top: 0.75rem; }
 .logout { border: 0; background: transparent; color: var(--accent-dark); cursor: pointer; padding: 0.5rem 0; }
-.progress-line { display: flex; gap: 1rem; align-items: center; border-bottom: 1px solid var(--line); padding: 1.5rem 0 0.9rem; color: var(--muted); }
-.lane-label { color: var(--accent-dark); margin-right: auto; }
-.audit-progress { opacity: 0.7; }
+.review-tabs { display: flex; gap: 0.5rem; border-bottom: 1px solid var(--line); margin-top: 1.5rem; }
+.review-tab { padding: 0.7rem 1.1rem; border: 2px solid transparent; border-bottom: 0; color: var(--muted); font-weight: 800; text-decoration: none; }
+.review-tab[aria-current="page"] { color: var(--ink); border-color: var(--line); background: var(--panel); position: relative; top: 1px; }
+.job-list { list-style: none; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 0.75rem; }
+.job-row { display: block; background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--accent); padding: 1rem 1.25rem; text-decoration: none; color: inherit; }
+.job-row:hover, .job-row:focus-visible { transform: translateY(-1px); box-shadow: 0 0.35rem 1rem rgb(54 45 32 / 0.12); }
+.job-row.lane-second-look, .job-row.job-row-reviewed { border-left-color: var(--line); }
+.chip { display: inline-block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.lane-new { color: var(--accent-dark); border-color: var(--accent); }
+.decision-pursue { color: #1d6b40; border-color: #1d6b40; }
+.decision-unsure { color: #8a6d1a; border-color: #8a6d1a; }
+.job-title { display: block; margin-top: 0.4rem; font-size: 1.15rem; }
+.job-subline { display: block; margin-top: 0.2rem; color: var(--muted); font-size: 0.95rem; }
+.item-topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 1rem; margin-bottom: 0.5rem; }
+.back-link { color: var(--accent-dark); font-weight: 800; text-decoration: none; }
+.position-marker { color: var(--muted); font-weight: 700; }
+.item-nav { display: flex; gap: 0.5rem; }
+.job-card { margin-top: 2rem; background: var(--panel); border: 1px solid var(--line); border-top: 5px solid var(--accent); padding: clamp(1.25rem, 4vw, 2.5rem); box-shadow: 0 1.2rem 3rem rgb(54 45 32 / 0.08); }
+.audit-card { border-top-color: var(--line); box-shadow: none; }
+.card-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
+.status-kicker { color: var(--accent-dark); font-size: 0.75rem; }
+.audit-card .status-kicker { color: var(--muted); }
+.job-meta { color: var(--muted); font-size: 1.05rem; }
+.company { color: var(--ink); font-weight: 800; }
+.why-label { display: block; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem; font-weight: 800; color: var(--muted); margin-bottom: 0.35rem; }
+.evaluation-reason { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 0; font-weight: 650; }
+.audit-card .evaluation-reason { border-left-color: var(--line); color: var(--muted); }
 .job-card { margin-top: 2rem; background: var(--panel); border: 1px solid var(--line); border-top: 5px solid var(--accent); padding: clamp(1.25rem, 4vw, 2.5rem); box-shadow: 0 1.2rem 3rem rgb(54 45 32 / 0.08); }
 .audit-card { border-top-color: var(--line); box-shadow: none; }
 .card-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
@@ -658,27 +802,20 @@ h2 { font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.04; }
 .evaluation-reason { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1.5rem 0; font-weight: 650; }
 .audit-card .evaluation-reason { border-left-color: var(--line); color: var(--muted); }
 .job-description { max-height: 45vh; overflow: auto; white-space: pre-wrap; font: 1rem/1.7 Inter, ui-sans-serif, system-ui, sans-serif; background: #f8f5ee; border: 0; border-radius: 0; padding: 1.25rem; color: var(--ink); }
-details { margin: 1.5rem 0; border-top: 1px solid var(--line); padding-top: 1rem; }
-summary { cursor: pointer; font-weight: 800; color: var(--accent-dark); min-height: 44px; display: flex; align-items: center; }
 .note-field { display: grid; gap: 0.45rem; font-weight: 700; margin: 1.5rem 0 1rem; }
 .note-field textarea { width: 100%; border: 1px solid var(--line); background: white; padding: 0.8rem; color: var(--ink); }
 .block-company { display: flex; align-items: center; min-height: 44px; font-weight: 700; }
 .block-company input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); margin-right: 0.6rem; }
-.submit-hint { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.85rem; text-align: right; }
-.recorded-banner { background: #f8f5ee; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 0.9rem 1.1rem; margin: 0 0 1.5rem; }
+.recorded-banner { background: #f8f5ee; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 0.9rem 1.1rem; margin: 0 0 1.5rem; display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .recorded-decision { color: var(--ink); text-transform: capitalize; }
-.recorded-hint { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; }
-.reviewed-panel { margin: 0 0 1.25rem; border-top: 0; padding: 0.35rem 0.9rem; background: #f8f5ee; border-radius: 6px; }
-.reviewed-summary { font-size: 0.9rem; min-height: 40px; color: var(--muted); }
-.reviewed-items { list-style: none; padding: 0.25rem 0 0.5rem; margin: 0; display: grid; gap: 0.35rem; }
-.reviewed-link { color: var(--ink); font-weight: 650; }
-.reviewed-decision { color: var(--muted); text-transform: capitalize; font-size: 0.85rem; }
+.recorded-note { margin: 0; color: var(--muted); }
+.change-link { color: var(--accent-dark); font-weight: 800; }
 .block-company input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); }
 .decision-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 0.75rem; padding: 0; border: 0; }
 .decision-row legend { font-weight: 800; margin-bottom: 0.75rem; }
 .decision { min-height: 58px; border: 2px solid var(--ink); background: transparent; color: var(--ink); font-weight: 850; cursor: pointer; }
 .decision:hover, .decision:focus-visible { transform: translateY(-1px); box-shadow: 0 0.35rem 0 var(--ink); }
-.decision:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.decision:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .pursue { background: var(--accent); border-color: var(--accent); color: white; }
 .pursue:hover, .pursue:focus-visible { background: var(--accent-dark); border-color: var(--accent-dark); }
 .reject { color: var(--muted); border-color: var(--muted); }
@@ -696,9 +833,9 @@ summary { cursor: pointer; font-weight: 800; color: var(--accent-dark); min-heig
 @media (max-width: 640px) {
   .review-shell { width: min(100% - 1.25rem, 860px); padding-top: 1.5rem; }
   .review-header { display: block; }
-  .review-meta { text-align: left; margin-top: 1.25rem; }
-  .progress-line { flex-wrap: wrap; gap: 0.5rem 1rem; }
-  .lane-label { width: 100%; }
+  .title-row { display: block; }
+  .day-nav { margin-top: 1rem; }
+  .item-topbar { align-items: start; flex-direction: column; }
   .card-topline { align-items: start; }
   .context-fields { grid-template-columns: 1fr; }
   .note-field, .block-company { grid-column: auto; }
