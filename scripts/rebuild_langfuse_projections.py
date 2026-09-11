@@ -20,12 +20,12 @@ from pydantic import JsonValue, TypeAdapter
 from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
 from job_finder.evaluation.manifests import (
-    _enqueue_projection,
-    _load_promotion_by_key,
-    _load_run,
+    enqueue_projection,
+    load_promotion_decision,
+    load_run,
     load_manifest,
 )
-from job_finder.evaluation.openrouter import _enqueue_model_call_projection
+from job_finder.evaluation.openrouter import enqueue_model_call_projection
 from job_finder.evaluation.models import ModelCallAttempt
 
 _ATTEMPT_COLUMNS = """
@@ -73,7 +73,7 @@ def _rebuild_model_calls(connection: psycopg.Connection[tuple[object, ...]]) -> 
     rows = connection.execute(_ATTEMPT_COLUMNS).fetchall()
     with connection.transaction():
         for row in rows:
-            _enqueue_model_call_projection(connection, _attempt_from_row(row))
+            enqueue_model_call_projection(connection, _attempt_from_row(row))
     return len(rows)
 
 
@@ -116,7 +116,7 @@ def _rebuild_manifests(connection: psycopg.Connection[tuple[object, ...]]) -> in
     with connection.transaction():
         for row in rows:
             manifest = load_manifest(connection, str(row[0]))
-            _enqueue_projection(
+            enqueue_projection(
                 connection,
                 "evaluation_manifest",
                 str(row[0]),
@@ -132,21 +132,22 @@ def _rebuild_runs(connection: psycopg.Connection[tuple[object, ...]]) -> int:
     ).fetchall()
     with connection.transaction():
         for row in rows:
-            run = _load_run(connection, str(row[0]))
-            _enqueue_projection(connection, "evaluation_run", str(row[0]), run, _moment(row[1]))
+            run = load_run(connection, str(row[0]))
+            enqueue_projection(connection, "evaluation_run", str(row[0]), run, _moment(row[1]))
     return len(rows)
 
 
 def _rebuild_promotions(connection: psycopg.Connection[tuple[object, ...]]) -> int:
-    rows = connection.execute(
+    query = (
         "SELECT idempotency_key, created_at FROM prompt_promotion_decisions" " ORDER BY created_at"
-    ).fetchall()
+    )
+    rows = connection.execute(query).fetchall()
     with connection.transaction():
         for row in rows:
-            decision = _load_promotion_by_key(connection, str(row[0]))
+            decision = load_promotion_decision(connection, str(row[0]))
             if decision is None:
                 raise RuntimeError(f"Promotion decision row vanished for {row[0]}")
-            _enqueue_projection(
+            enqueue_projection(
                 connection,
                 "prompt_promotion",
                 str(decision.id),

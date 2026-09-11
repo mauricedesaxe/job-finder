@@ -450,7 +450,7 @@ def postgres_model_call_persistence(
                     attempt.observed_at,
                 ),
             )
-            _enqueue_model_call_projection(connection, attempt)
+            enqueue_model_call_projection(connection, attempt)
 
     return ModelCallPersistence(
         find_completed=find_completed,
@@ -459,7 +459,7 @@ def postgres_model_call_persistence(
     )
 
 
-def _enqueue_model_call_projection(
+def enqueue_model_call_projection(
     connection: psycopg.Connection[tuple[object, ...]], attempt: ModelCallAttempt
 ) -> None:
     payload = TypeAdapter(dict[str, JsonValue]).validate_json(
