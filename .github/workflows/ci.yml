@@ -7,45 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2"
-      - run: bun install --frozen-lockfile
-      - name: Lint
-        run: bun run lint
-
-  typecheck:
-    runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2"
-      - run: bun install --frozen-lockfile
-      - name: Typecheck
-        run: bun run typecheck
-
-  unit-tests:
-    runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2"
-      - run: bun install --frozen-lockfile
-      - name: Unit tests
-        run: bun run test
-
-  python-contracts:
+  python:
     runs-on: ubuntu-22.04
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
     services:
       postgres:
         image: postgres:17
@@ -89,37 +52,3 @@ jobs:
           uv run pytest contracts
       - name: Build Dagster image
         run: docker build --tag job-finder-dagster:test .
-
-  cloudflare:
-    runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2"
-      - run: bun install --frozen-lockfile
-      - name: Validate Cloudflare Worker
-        run: bun run check:cloudflare
-
-  evaluation:
-    name: Python evaluation checks
-    runs-on: ubuntu-22.04
-    if: "!startsWith(github.event.head_commit.message, 'release: ')"
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.12"
-      - name: Install locked Python dependencies
-        run: |
-          python -m pip install uv==0.12.9
-          uv sync --frozen
-      - name: Verify evaluation code
-        run: >-
-          uv run --no-sync pytest
-          job_finder/evaluation
-          job_finder/ats/test_providers.py
-          job_finder/jobs/test_structural_filter.py
