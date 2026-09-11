@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Thread
 from typing import ClassVar, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -27,6 +28,8 @@ _METADATA = TypeAdapter(dict[str, JsonValue])
 _JSON_VALUES = TypeAdapter(list[JsonValue])
 _READ_BACK_TIMEOUT_SECONDS = 30.0
 _READ_BACK_POLL_SECONDS = 1.0
+_SEND_TIMEOUT_SECONDS = 120.0
+_SDK_HTTP_TIMEOUT_SECONDS = 15
 
 
 class ProjectionModel(BaseModel):
@@ -116,17 +119,34 @@ def create_langfuse_projection_sender(
     settings: LangfuseSettings,
     *,
     gateway: LangfuseGateway | None = None,
+    send_timeout: float = _SEND_TIMEOUT_SECONDS,
 ) -> TypedProjectionSender:
     target = gateway or _sdk_gateway(settings)
 
     def send(projection: LangfuseProjection) -> LangfuseProjectionResponse:
-        try:
-            remote_id = _project(target, projection)
-        except ValidationError:
-            raise
-        except Exception as error:
+        remote_ids: list[str] = []
+        failures: list[BaseException] = []
+
+        def call() -> None:
+            try:
+                remote_ids.append(_project(target, projection))
+            except BaseException as error:
+                failures.append(error)
+
+        worker = Thread(target=call, daemon=True)
+        worker.start()
+        worker.join(send_timeout)
+        if worker.is_alive():
+            # A hung SDK call once held the projection pool slot forever.
+            raise LangfuseUnavailable(
+                f"projection send did not finish within {send_timeout:.0f} seconds"
+            )
+        if failures:
+            error = failures[0]
+            if isinstance(error, ValidationError):
+                raise error
             raise LangfuseUnavailable(str(error)) from error
-        return LangfuseProjectionResponse(remote_id=remote_id)
+        return LangfuseProjectionResponse(remote_id=remote_ids[0])
 
     return send
 
@@ -352,6 +372,7 @@ def _sdk_gateway(settings: LangfuseSettings) -> LangfuseGateway:
         secret_key=settings.secret_key,
         base_url=str(settings.base_url),
         environment=settings.environment,
+        timeout=_SDK_HTTP_TIMEOUT_SECONDS,
     )
 
     def create_dataset(name: str, description: str, metadata: dict[str, JsonValue]) -> str:
