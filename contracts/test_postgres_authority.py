@@ -94,11 +94,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0006_stored_prompt_execution.sql",
             "0007_model_call_request_messages.sql",
             "0008_pending_usage_response_model.sql",
+            "0009_frozen_daily_reviews.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (8,)
+        ).fetchone() == (9,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -115,7 +116,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0008_pending_usage_response_model.sql"
+    assert results[0][-1] == "0009_frozen_daily_reviews.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -703,6 +704,9 @@ def test_builds_immutable_daily_membership_with_every_qualified_job(
         first_rows = connection.execute(
             "SELECT id, evaluation_id, lane, position FROM review_items ORDER BY lane, position"
         ).fetchall()
+        late_qualified_id = _insert_review_decision(
+            connection, run_id, release.id, now, 99, "qualified"
+        )
         prepare_daily_review(connection, review_day, created_at=now)
         review = load_daily_review(connection, review_day)
         second_rows = connection.execute(
@@ -712,6 +716,7 @@ def test_builds_immutable_daily_membership_with_every_qualified_job(
         assert second_rows == first_rows
         assert review.qualified.total == 4
         assert {item.evaluation_id for item in review.qualified.pending} == set(qualified_ids)
+        assert late_qualified_id not in {item.evaluation_id for item in review.qualified.pending}
         assert review.rejected_audit.total == 3
         assert {item.evaluation_id for item in review.rejected_audit.pending} == set(
             deterministic_rejected_sample(review_day, rejected_ids)
