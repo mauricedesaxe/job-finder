@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Literal, cast
 from urllib.parse import quote
+from uuid import UUID
 
 import psycopg
 from fasthtml.common import (
@@ -27,14 +28,14 @@ from fasthtml.common import (
     Input,
     Label,
     Legend,
+    Li,
     Main,
     Meta,
-    Option,
     P,
     Pre,
-    Select,
     Small,
     Span,
+    Strong,
     Style,
     Summary,
     Textarea,
@@ -42,6 +43,7 @@ from fasthtml.common import (
     Title,
     FastHTML,
     Request,
+    Ul,
     to_xml,
 )
 from pydantic import ValidationError
@@ -53,11 +55,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from job_finder.config import ReviewAppSettings
 from job_finder.review.models import (
     DailyReview,
-    PrimaryReason,
     ReviewConflict,
     ReviewItem,
     ReviewSubmission,
-    TargetProfile,
 )
 from job_finder.review.postgres import ReviewService
 
@@ -80,22 +80,6 @@ _SECURITY_HEADERS = (
     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
     (b"x-content-type-options", b"nosniff"),
     (b"x-frame-options", b"DENY"),
-)
-TARGET_PROFILES: tuple[tuple[TargetProfile, str], ...] = (
-    ("early-stage-product-engineer", "Early-stage product"),
-    ("applied-ai-product-engineer", "Applied AI product"),
-    ("neither", "Neither profile"),
-)
-PRIMARY_REASONS: tuple[tuple[PrimaryReason, str], ...] = (
-    ("technology-fit", "Technology fit"),
-    ("role-scope", "Role scope"),
-    ("company-quality", "Company quality"),
-    ("work-environment", "Work environment"),
-    ("location", "Location"),
-    ("compensation", "Compensation"),
-    ("crypto-company", "Crypto company"),
-    ("insufficient-information", "Insufficient information"),
-    ("other", "Other"),
 )
 
 
@@ -185,6 +169,30 @@ def create_review_app(
             now=now,
         )
 
+    @app.route("/review/item/{review_item_id}", methods=["GET"])
+    def review_item_page(review_item_id: str, request: Request) -> HTMLResponse:
+        try:
+            daily_review = service.open_day(today())
+        except psycopg.Error:
+            return _unavailable_response(today())
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        items = (
+            *daily_review.qualified.pending,
+            *daily_review.qualified.reviewed_items,
+            *daily_review.rejected_audit.pending,
+            *daily_review.rejected_audit.reviewed_items,
+        )
+        try:
+            item_id = UUID(review_item_id)
+        except ValueError:
+            return _item_not_found_response(today())
+        item = next((candidate for candidate in items if candidate.id == item_id), None)
+        if item is None:
+            return _item_not_found_response(today())
+        return HTMLResponse(_document(_reviewed_item_content(daily_review, item, csrf_token)))
+
     @app.route("/logout", methods=["POST"])
     async def logout(request: Request) -> HTMLResponse | RedirectResponse:
         return await _submit_logout(request)
@@ -261,8 +269,6 @@ async def _submit_review(
                 "evaluation_id": _form_text(form, "evaluation_id"),
                 "snapshot_id": _form_text(form, "snapshot_id"),
                 "decision": _form_text(form, "decision"),
-                "target_profile": _form_text(form, "target_profile"),
-                "primary_reason": _form_text(form, "primary_reason"),
                 "note": _form_text(form, "note"),
                 "block_company": _form_text(form, "block_company") == "on",
                 "actor": actor,
@@ -352,6 +358,28 @@ def _review_content(review: DailyReview, csrf_token: str) -> object:
     )
 
 
+def _reviewed_item_content(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
+    banner = None
+    if item.reviewed:
+        recorded = f"You recorded: {item.decision}"
+        if item.note:
+            recorded += f" \u2014 \u201c{item.note}\u201d"
+        banner = Div(
+            Strong(recorded, cls="recorded-decision"),
+            P(
+                "Every revision below is kept as a new entry; the latest one counts.",
+                cls="recorded-hint",
+            ),
+            cls="recorded-banner",
+        )
+    return Main(
+        _review_header(review, csrf_token),
+        banner,
+        _job_card(review, item, csrf_token),
+        cls="review-shell",
+    )
+
+
 def _review_header(review: DailyReview, csrf_token: str) -> object:
     current = review.current
     lane_label = "Qualified" if current is not None and current.lane == "qualified" else "Audit"
@@ -369,6 +397,7 @@ def _review_header(review: DailyReview, csrf_token: str) -> object:
             ),
             cls="review-header",
         ),
+        _reviewed_list(review),
         Div(
             Span(lane_label, cls="lane-label"),
             Span(
@@ -386,9 +415,31 @@ def _review_header(review: DailyReview, csrf_token: str) -> object:
     )
 
 
+def _reviewed_list(review: DailyReview) -> object:
+    recorded = (*review.qualified.reviewed_items, *review.rejected_audit.reviewed_items)
+    if not recorded:
+        return None
+    entries = tuple(
+        Li(
+            A(
+                f"{item.job.title} \u00b7 {item.job.company}",
+                href=f"/review/item/{item.id}",
+                cls="reviewed-link",
+            ),
+            Span(f" {item.decision}", cls="reviewed-decision"),
+        )
+        for item in recorded
+    )
+    return Details(
+        Summary(f"Reviewed ({len(recorded)})", cls="reviewed-summary"),
+        Ul(*entries, cls="reviewed-items"),
+        cls="reviewed-panel",
+    )
+
+
 def _job_card(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
     audit = item.lane == "rejected_audit"
-    default_profile = _default_profile(item)
+    submit_label = "Update feedback" if item.reviewed else "Record feedback"
     return Div(
         Div(
             Span("Rejected audit" if audit else "Qualified match", cls="status-kicker"),
@@ -409,48 +460,25 @@ def _job_card(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
             Input(type="hidden", name="csrf_token", value=csrf_token),
             Input(type="hidden", name="evaluation_id", value=item.evaluation_id),
             Input(type="hidden", name="snapshot_id", value=item.snapshot_id),
-            Details(
-                Summary("Review context and note"),
-                Div(
-                    Label(
-                        "Target profile",
-                        Select(
-                            *(
-                                Option(label, value=value, selected=value == default_profile)
-                                for value, label in TARGET_PROFILES
-                            ),
-                            name="target_profile",
-                            required=True,
-                        ),
-                    ),
-                    Label(
-                        "Primary reason",
-                        Select(
-                            *(
-                                Option(label, value=value, selected=value == "other")
-                                for value, label in PRIMARY_REASONS
-                            ),
-                            name="primary_reason",
-                            required=True,
-                        ),
-                    ),
-                    Label(
-                        "Optional note",
-                        Textarea(
-                            name="note",
-                            maxlength="2000",
-                            rows="3",
-                            placeholder="What made this decision clear?",
-                        ),
-                        cls="note-field",
-                    ),
-                    Label(
-                        Input(type="checkbox", name="block_company"),
-                        " Block this company from future results",
-                        cls="block-company",
-                    ),
-                    cls="context-fields",
+            Label(
+                "Notes, context, anything worth remembering (optional)",
+                Textarea(
+                    item.note or "",
+                    name="note",
+                    maxlength="2000",
+                    rows="3",
+                    placeholder="Why this decision? Salary signals, location, language, anything.",
                 ),
+                cls="note-field",
+            ),
+            Label(
+                Input(
+                    type="checkbox",
+                    name="block_company",
+                    checked=item.reviewed and item.decision == "reject",
+                ),
+                " Block this company from future results",
+                cls="block-company",
             ),
             Fieldset(
                 Legend("Decision"),
@@ -461,6 +489,10 @@ def _job_card(review: DailyReview, item: ReviewItem, csrf_token: str) -> object:
             ),
             action=f"/review/{item.id}",
             method="post",
+        ),
+        P(
+            submit_label,
+            cls="submit-hint",
         ),
         cls="job-card audit-card" if audit else "job-card",
     )
@@ -483,6 +515,7 @@ def _finished_state(review: DailyReview, kind: PageKind, csrf_token: str) -> obj
             A("Check again", href=_day_url(review.day), cls="retry"),
             cls="state",
         ),
+        _reviewed_list(review),
         cls="review-shell state-shell",
     )
 
@@ -511,6 +544,15 @@ def _conflict_response(review_day: date, reason: str) -> HTMLResponse:
         reason,
         action=A("Load the current job", href=_day_url(review_day), cls="retry"),
         status_code=409,
+    )
+
+
+def _item_not_found_response(review_day: date) -> HTMLResponse:
+    return _state_response(
+        "Review item not found",
+        "This job is not part of the review for this date.",
+        action=A("Back to the review", href=_day_url(review_day), cls="retry"),
+        status_code=404,
     )
 
 
@@ -571,14 +613,6 @@ def _safe_next(value: str) -> str:
     return "/"
 
 
-def _default_profile(item: ReviewItem) -> TargetProfile:
-    if item.matched_profile == "early-stage-product-engineer":
-        return "early-stage-product-engineer"
-    if item.matched_profile == "applied-ai-product-engineer":
-        return "applied-ai-product-engineer"
-    return "neither"
-
-
 def _day_url(review_day: date) -> str:
     return f"/review?day={review_day.isoformat()}"
 
@@ -626,11 +660,19 @@ h2 { font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.04; }
 .job-description { max-height: 45vh; overflow: auto; white-space: pre-wrap; font: 1rem/1.7 Inter, ui-sans-serif, system-ui, sans-serif; background: #f8f5ee; border: 0; border-radius: 0; padding: 1.25rem; color: var(--ink); }
 details { margin: 1.5rem 0; border-top: 1px solid var(--line); padding-top: 1rem; }
 summary { cursor: pointer; font-weight: 800; color: var(--accent-dark); min-height: 44px; display: flex; align-items: center; }
-.context-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding-top: 1rem; }
-.context-fields label { display: grid; gap: 0.45rem; font-weight: 700; }
-.context-fields select, .context-fields textarea { width: 100%; border: 1px solid var(--line); background: white; padding: 0.8rem; color: var(--ink); }
-.note-field, .block-company { grid-column: 1 / -1; }
-.block-company { display: flex !important; grid-template-columns: auto 1fr !important; align-items: center; min-height: 44px; }
+.note-field { display: grid; gap: 0.45rem; font-weight: 700; margin: 1.5rem 0 1rem; }
+.note-field textarea { width: 100%; border: 1px solid var(--line); background: white; padding: 0.8rem; color: var(--ink); }
+.block-company { display: flex; align-items: center; min-height: 44px; font-weight: 700; }
+.block-company input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); margin-right: 0.6rem; }
+.submit-hint { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.85rem; text-align: right; }
+.recorded-banner { background: #f8f5ee; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 0.9rem 1.1rem; margin: 0 0 1.5rem; }
+.recorded-decision { color: var(--ink); text-transform: capitalize; }
+.recorded-hint { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.reviewed-panel { margin: 0 0 1.25rem; border-top: 0; padding: 0.35rem 0.9rem; background: #f8f5ee; border-radius: 6px; }
+.reviewed-summary { font-size: 0.9rem; min-height: 40px; color: var(--muted); }
+.reviewed-items { list-style: none; padding: 0.25rem 0 0.5rem; margin: 0; display: grid; gap: 0.35rem; }
+.reviewed-link { color: var(--ink); font-weight: 650; }
+.reviewed-decision { color: var(--muted); text-transform: capitalize; font-size: 0.85rem; }
 .block-company input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); }
 .decision-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 0.75rem; padding: 0; border: 0; }
 .decision-row legend { font-weight: 800; margin-bottom: 0.75rem; }

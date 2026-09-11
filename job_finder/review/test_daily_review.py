@@ -28,9 +28,16 @@ def test_selects_a_small_stable_rejected_audit_sample() -> None:
 def test_prioritizes_qualified_work_before_the_rejected_audit() -> None:
     qualified = _item("qualified", 1)
     audit = _item("rejected_audit", 2)
+    reviewed = _item("qualified", 3, reviewed=True)
     review = DailyReview(
         day=date(2026, 9, 10),
-        qualified=ReviewLaneState(lane="qualified", total=2, completed=1, pending=(qualified,)),
+        qualified=ReviewLaneState(
+            lane="qualified",
+            total=2,
+            completed=1,
+            pending=(qualified,),
+            reviewed_items=(reviewed,),
+        ),
         rejected_audit=ReviewLaneState(
             lane="rejected_audit", total=1, completed=0, pending=(audit,)
         ),
@@ -57,7 +64,7 @@ def test_treats_a_blank_feedback_note_as_absent() -> None:
     assert review.note is None
 
 
-def _item(lane: str, value: int) -> ReviewItem:
+def _item(lane: str, value: int, *, reviewed: bool = False) -> ReviewItem:
     return ReviewItem.model_validate(
         {
             "id": UUID(int=value),
@@ -68,6 +75,8 @@ def _item(lane: str, value: int) -> ReviewItem:
             "outcome": "qualified" if lane == "qualified" else "rejected",
             "matched_profile": "applied-ai-product-engineer" if lane == "qualified" else None,
             "evaluation_reason": "Matches the role.",
+            "reviewed": reviewed,
+            "decision": "pursue" if reviewed else None,
             "job": ReviewJob(
                 title="Applied AI Engineer",
                 company="Acme",

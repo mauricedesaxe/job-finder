@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -94,22 +95,27 @@ def load_daily_review(connection: Connection, review_day: date) -> DailyReview:
                d.outcome, d.matched_profile, d.reason,
                s.title, s.company, s.raw_url, s.source, s.description,
                s.location, s.keywords, s.date_posted,
-               (e.id IS NOT NULL) AS reviewed
+               (e.id IS NOT NULL) AS reviewed, e.decision, e.note
         FROM review_items i
         JOIN evaluation_decisions d ON d.id = i.evaluation_id
         JOIN job_snapshots s ON s.id = d.snapshot_id
-        LEFT JOIN review_events e ON e.review_item_id = i.id
+        LEFT JOIN LATERAL (
+          SELECT ev.id, ev.decision, ev.note
+          FROM review_events ev
+          WHERE ev.review_item_id = i.id
+          ORDER BY ev.created_at DESC, ev.id DESC
+          LIMIT 1
+        ) e ON TRUE
         WHERE i.review_day = %s
         ORDER BY CASE i.lane WHEN 'qualified' THEN 0 ELSE 1 END, i.position
         """,
         (review_day,),
     ).fetchall()
     items = tuple(_parse_review_item(row) for row in rows)
-    reviewed = tuple(bool(row[16]) for row in rows)
     return DailyReview(
         day=review_day,
-        qualified=_lane_state("qualified", items, reviewed),
-        rejected_audit=_lane_state("rejected_audit", items, reviewed),
+        qualified=_lane_state("qualified", items),
+        rejected_audit=_lane_state("rejected_audit", items),
     )
 
 
@@ -118,7 +124,8 @@ def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSub
     with connection.transaction():
         row = connection.execute(
             """
-            SELECT i.evaluation_id, d.snapshot_id, s.company, s.normalized_company
+            SELECT i.evaluation_id, d.snapshot_id, s.company, s.normalized_company,
+                   d.matched_profile
             FROM review_items i
             JOIN evaluation_decisions d ON d.id = i.evaluation_id
             JOIN job_snapshots s ON s.id = d.snapshot_id
@@ -132,30 +139,43 @@ def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSub
         if str(row[0]) != review.evaluation_id or str(row[1]) != review.snapshot_id:
             return ReviewConflict(reason="This review form no longer matches the stored job.")
 
-        event_id = uuid5(NAMESPACE_URL, f"review-event:{review.review_item_id}")
-        inserted = connection.execute(
+        derived_profile = review.target_profile or str(row[4]) or "neither"
+        content_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    review.decision,
+                    derived_profile,
+                    review.primary_reason,
+                    review.note,
+                    review.block_company,
+                    review.actor,
+                ]
+            ).encode()
+        ).hexdigest()
+        event_id = uuid5(
+            NAMESPACE_URL,
+            f"review-event-revision:{review.review_item_id}:{content_digest}",
+        )
+        _ = connection.execute(
             """
             INSERT INTO review_events (
               id, review_item_id, decision, target_profile, primary_reason,
               note, block_company, actor, created_at
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (review_item_id) DO NOTHING
-            RETURNING id
+            ON CONFLICT (id) DO NOTHING
             """,
             (
                 event_id,
                 review.review_item_id,
                 review.decision,
-                review.target_profile,
+                derived_profile,
                 review.primary_reason,
                 review.note,
                 review.block_company,
                 review.actor,
                 review.created_at,
             ),
-        ).fetchone()
-        if inserted is None:
-            return ReviewConflict(reason="This job already has a review decision.")
+        )
         if review.block_company:
             _block_company(
                 connection,
@@ -288,6 +308,7 @@ def _insert_review_item(
 
 
 def _parse_review_item(row: tuple[object, ...]) -> ReviewItem:
+    reviewed = bool(row[16])
     return ReviewItem.model_validate(
         {
             "id": row[0],
@@ -308,26 +329,23 @@ def _parse_review_item(row: tuple[object, ...]) -> ReviewItem:
                 "keywords": row[14],
                 "date_posted": row[15],
             },
+            "reviewed": reviewed,
+            "decision": row[17] if reviewed else None,
+            "note": row[18] if reviewed else None,
         }
     )
 
 
-def _lane_state(
-    lane: ReviewLane,
-    items: tuple[ReviewItem, ...],
-    reviewed: tuple[bool, ...],
-) -> ReviewLaneState:
+def _lane_state(lane: ReviewLane, items: tuple[ReviewItem, ...]) -> ReviewLaneState:
     lane_items = tuple(item for item in items if item.lane == lane)
-    pending = tuple(
-        item
-        for item, is_reviewed in zip(items, reviewed, strict=True)
-        if item.lane == lane and not is_reviewed
-    )
+    pending = tuple(item for item in lane_items if not item.reviewed)
+    reviewed = tuple(item for item in lane_items if item.reviewed)
     return ReviewLaneState(
         lane=lane,
         total=len(lane_items),
-        completed=len(lane_items) - len(pending),
+        completed=len(reviewed),
         pending=pending,
+        reviewed_items=reviewed,
     )
 
 

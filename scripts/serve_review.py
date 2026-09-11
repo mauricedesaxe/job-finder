@@ -5,6 +5,7 @@ import psycopg
 from fasthtml.common import FastHTML
 
 from job_finder.config import DatabaseSettings, ReviewAppSettings
+from job_finder.database import apply_migrations
 from job_finder.review import create_review_app, postgres_review_service
 
 
@@ -14,6 +15,9 @@ def create_app() -> FastHTML:
 
     def connect() -> psycopg.Connection[tuple[object, ...]]:
         return psycopg.connect(database.postgres_dsn, autocommit=True)
+
+    with connect() as connection:
+        _ = apply_migrations(connection)
 
     def readiness() -> None:
         with connect() as connection:

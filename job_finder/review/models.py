@@ -52,11 +52,16 @@ class ReviewItem(ReviewModel):
     matched_profile: str | None
     evaluation_reason: str
     job: ReviewJob
+    reviewed: bool = False
+    decision: ReviewDecision | None = None
+    note: str | None = None
 
     @model_validator(mode="after")
     def lane_matches_outcome(self) -> Self:
         if (self.lane == "qualified") != (self.outcome == "qualified"):
             raise ValueError("Review lane must match the evaluation outcome")
+        if self.reviewed != (self.decision is not None):
+            raise ValueError("A reviewed item must carry its recorded decision")
         return self
 
 
@@ -65,13 +70,18 @@ class ReviewLaneState(ReviewModel):
     total: int = Field(ge=0)
     completed: int = Field(ge=0)
     pending: tuple[ReviewItem, ...]
+    reviewed_items: tuple[ReviewItem, ...] = ()
 
     @model_validator(mode="after")
     def counts_and_items_match(self) -> Self:
         if self.completed + len(self.pending) != self.total:
             raise ValueError("Review lane counts must account for every item")
+        if self.completed != len(self.reviewed_items):
+            raise ValueError("Completed count must match the reviewed items")
         if any(item.lane != self.lane for item in self.pending):
             raise ValueError("Pending review items must belong to their lane")
+        if any(not item.reviewed for item in self.reviewed_items):
+            raise ValueError("Reviewed items must carry a recorded decision")
         return self
 
 
@@ -110,8 +120,8 @@ class ReviewSubmission(ReviewModel):
     evaluation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: ReviewDecision
-    target_profile: TargetProfile
-    primary_reason: PrimaryReason
+    target_profile: TargetProfile | None = None
+    primary_reason: PrimaryReason | None = None
     note: str | None = Field(default=None, max_length=2000)
     block_company: bool = False
     actor: str = Field(min_length=1)

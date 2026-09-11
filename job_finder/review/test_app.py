@@ -163,7 +163,7 @@ def test_renders_the_rejected_audit_as_a_quiet_secondary_lane() -> None:
 
 def test_distinguishes_empty_and_complete_days() -> None:
     empty = _client(_review()).get("/review")
-    complete_review = _review(completed_qualified=1)
+    complete_review = _review(reviewed_qualified=(_item("qualified", reviewed=True),))
     complete = _client(complete_review).get("/review")
 
     assert "Nothing to review" in empty.text
@@ -212,8 +212,6 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
             "evaluation_id": item.evaluation_id,
             "snapshot_id": item.snapshot_id,
             "decision": "pursue",
-            "target_profile": "applied-ai-product-engineer",
-            "primary_reason": "technology-fit",
             "note": "Strong fit.",
             "block_company": "on",
         },
@@ -228,8 +226,8 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
             evaluation_id=item.evaluation_id,
             snapshot_id=item.snapshot_id,
             decision="pursue",
-            target_profile="applied-ai-product-engineer",
-            primary_reason="technology-fit",
+            target_profile=None,
+            primary_reason=None,
             note="Strong fit.",
             block_company=True,
             actor="owner",
@@ -291,6 +289,82 @@ def test_renders_submit_database_failure_as_retryable_unavailable() -> None:
     assert "Retry" in response.text
 
 
+def test_a_reviewed_item_renders_its_recorded_feedback_and_a_revision_form() -> None:
+    reviewed = _item("qualified", reviewed=True)
+    client = _client(_review(reviewed_qualified=(reviewed,)))
+
+    response = client.get(f"/review/item/{reviewed.id}")
+
+    assert response.status_code == 200
+    assert "You recorded: reject" in response.text
+    assert "Every revision below is kept" in response.text
+    assert 'name="note"' in response.text
+    assert ">Seen it before.</textarea>" in response.text
+    assert 'value="pursue"' in response.text
+    assert "Target profile" not in response.text
+    assert "Primary reason" not in response.text
+
+
+def test_the_header_lists_reviewed_items_with_links_back_to_them() -> None:
+    reviewed = _item("qualified", reviewed=True)
+    client = _client(_review(qualified=(_item("qualified"),), reviewed_qualified=(reviewed,)))
+
+    response = client.get("/review")
+
+    assert "Reviewed (1)" in response.text
+    assert f'href="/review/item/{reviewed.id}"' in response.text
+    assert "reject" in response.text
+
+
+def test_a_revision_submit_still_carries_the_exact_rendered_identities() -> None:
+    submissions: list[ReviewSubmission] = []
+
+    def submit(review: ReviewSubmission) -> ReviewSaved:
+        submissions.append(review)
+        return ReviewSaved(review_event_id=UUID(int=9))
+
+    reviewed = _item("qualified", reviewed=True)
+    client = _client(_review(reviewed_qualified=(reviewed,)), submit=submit)
+
+    response = client.post(
+        f"/review/{reviewed.id}",
+        data={
+            "review_day": TODAY.isoformat(),
+            "csrf_token": _csrf(client),
+            "evaluation_id": reviewed.evaluation_id,
+            "snapshot_id": reviewed.snapshot_id,
+            "decision": "unsure",
+            "note": "Second thoughts.",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert submissions == [
+        ReviewSubmission(
+            review_item_id=reviewed.id,
+            evaluation_id=reviewed.evaluation_id,
+            snapshot_id=reviewed.snapshot_id,
+            decision="unsure",
+            target_profile=None,
+            primary_reason=None,
+            note="Second thoughts.",
+            block_company=False,
+            actor="owner",
+            created_at=NOW,
+        )
+    ]
+
+
+def test_an_unknown_review_item_renders_a_not_found_state() -> None:
+    client = _client(_review(reviewed_qualified=(_item("qualified", reviewed=True),)))
+
+    response = client.get(f"/review/item/{UUID(int=99)}")
+
+    assert response.status_code == 404
+    assert "Review item not found" in response.text
+
+
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
 
 
@@ -321,26 +395,29 @@ def _review(
     *,
     qualified: tuple[ReviewItem, ...] = (),
     audit: tuple[ReviewItem, ...] = (),
-    completed_qualified: int = 0,
+    reviewed_qualified: tuple[ReviewItem, ...] = (),
+    reviewed_audit: tuple[ReviewItem, ...] = (),
 ) -> DailyReview:
     return DailyReview(
         day=TODAY,
         qualified=ReviewLaneState(
             lane="qualified",
-            total=len(qualified) + completed_qualified,
-            completed=completed_qualified,
+            total=len(qualified) + len(reviewed_qualified),
+            completed=len(reviewed_qualified),
             pending=qualified,
+            reviewed_items=reviewed_qualified,
         ),
         rejected_audit=ReviewLaneState(
             lane="rejected_audit",
-            total=len(audit),
-            completed=0,
+            total=len(audit) + len(reviewed_audit),
+            completed=len(reviewed_audit),
             pending=audit,
+            reviewed_items=reviewed_audit,
         ),
     )
 
 
-def _item(lane: ReviewLane) -> ReviewItem:
+def _item(lane: ReviewLane, *, reviewed: bool = False) -> ReviewItem:
     return ReviewItem(
         id=UUID(int=1),
         evaluation_id="a" * 64,
@@ -360,6 +437,9 @@ def _item(lane: ReviewLane) -> ReviewItem:
             keywords=("python",),
             date_posted=date(2026, 9, 9),
         ),
+        reviewed=reviewed,
+        decision="reject" if reviewed else None,
+        note="Seen it before." if reviewed else None,
     )
 
 
@@ -370,8 +450,6 @@ def _form(item: ReviewItem, client: TestClient) -> dict[str, str]:
         "evaluation_id": item.evaluation_id,
         "snapshot_id": item.snapshot_id,
         "decision": "reject",
-        "target_profile": "neither",
-        "primary_reason": "role-scope",
     }
 
 
