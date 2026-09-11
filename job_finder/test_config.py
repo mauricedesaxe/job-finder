@@ -8,6 +8,7 @@ from job_finder.config import (
     LangfuseSettings,
     OpenRouterSettings,
     PostgresContractSettings,
+    ReviewAppSettings,
 )
 
 
@@ -26,6 +27,28 @@ def test_database_settings_rejects_a_missing_production_dsn(
 
     with pytest.raises(ValidationError):
         _ = DatabaseSettings.from_environment()
+
+
+def test_review_app_settings_require_production_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "correct horse battery staple")
+    monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
+    monkeypatch.setenv("JOB_FINDER_REVIEW_COOKIE_SECURE", "false")
+
+    settings = ReviewAppSettings.from_environment()
+
+    assert settings.app_password == "correct horse battery staple"
+    assert settings.session_secret == "s" * 32
+    assert not settings.cookie_secure
+
+
+def test_review_app_settings_reject_missing_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JOB_FINDER_REVIEW_PASSWORD", raising=False)
+    monkeypatch.delenv("JOB_FINDER_REVIEW_SESSION_SECRET", raising=False)
+
+    with pytest.raises(ValidationError):
+        _ = ReviewAppSettings.from_environment()
 
 
 def test_database_settings_reads_the_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:

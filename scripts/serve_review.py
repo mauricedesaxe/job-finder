@@ -2,14 +2,25 @@
 from __future__ import annotations
 
 import psycopg
-from fasthtml.common import serve
+from fasthtml.common import FastHTML
 
-from job_finder.config import DatabaseSettings
+from job_finder.config import DatabaseSettings, ReviewAppSettings
 from job_finder.review import create_review_app, postgres_review_service
 
-settings = DatabaseSettings.from_environment()
-service = postgres_review_service(lambda: psycopg.connect(settings.postgres_dsn, autocommit=True))
-app = create_review_app(service)
 
-if __name__ == "__main__":
-    serve()
+def create_app() -> FastHTML:
+    database = DatabaseSettings.from_environment()
+    settings = ReviewAppSettings.from_environment()
+
+    def connect() -> psycopg.Connection[tuple[object, ...]]:
+        return psycopg.connect(database.postgres_dsn, autocommit=True)
+
+    def readiness() -> None:
+        with connect() as connection:
+            _ = connection.execute("SELECT 1").fetchone()
+
+    return create_review_app(
+        postgres_review_service(connect),
+        settings,
+        readiness=readiness,
+    )
