@@ -615,6 +615,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-fasthtml" },
     { name = "requests" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -637,6 +638,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "python-fasthtml", specifier = "==0.14.13" },
     { name = "requests", specifier = "==2.32.3" },
+    { name = "uvicorn", specifier = "==0.52.4" },
 ]
 
 [package.metadata.requires-dev]
