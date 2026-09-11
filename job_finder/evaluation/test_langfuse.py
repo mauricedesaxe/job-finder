@@ -1,7 +1,9 @@
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from pydantic import TypeAdapter
 
 from job_finder.config import LangfuseSettings
@@ -16,6 +18,7 @@ from job_finder.evaluation.models import (
 from job_finder.evaluation.langfuse import (
     LangfuseGateway,
     LangfuseProjection,
+    LangfuseUnavailable,
     ObservationProjection,
     create_langfuse_projection_sender,
 )
@@ -68,6 +71,27 @@ def test_projects_manifest_run_and_promotion_with_stable_remote_identities() -> 
     assert observations[2].input["messages"] == [{"role": "user", "content": "job body"}]
     assert model_call_response.remote_id == observations[2].trace_id
     assert observations[0].trace_id == observations[3].trace_id
+
+
+def test_a_hanging_gateway_send_becomes_langfuse_unavailable_after_the_timeout() -> None:
+    release = threading.Event()
+
+    def hang(observation: ObservationProjection) -> str:
+        release.wait(10)
+        return observation.trace_id
+
+    gateway = LangfuseGateway(
+        create_dataset=lambda name, _description, _metadata: "dataset-manifest",
+        create_dataset_item=lambda dataset, item_id, _input, _expected, _metadata: item_id,
+        send_observation=hang,
+    )
+    sender = create_langfuse_projection_sender(_settings(), gateway=gateway, send_timeout=0.2)
+
+    try:
+        with pytest.raises(LangfuseUnavailable, match="did not finish within 0 seconds"):
+            _ = sender(_projection("evaluation_run", _run()))
+    finally:
+        release.set()
 
 
 def _record_dataset(records: list[tuple[str, str]], name: str, manifest_id: str) -> str:
