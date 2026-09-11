@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily review — navigation wireframe</title>
+<style>
+  :root {
+    --ink: #20201d; --muted: #6f6c64; --paper: #f4f0e8; --panel: #fffdf8;
+    --line: #d9d2c6; --accent: #bf4b36; --accent-dark: #913522;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); line-height: 1.55; }
+  main { max-width: 1160px; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+  h1 { font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2rem, 5vw, 3.2rem); margin: 0.25rem 0 1rem; letter-spacing: -0.02em; }
+  h2 { font-family: Georgia, 'Times New Roman', serif; font-size: 1.5rem; margin: 2.5rem 0 0.75rem; }
+  .eyebrow { text-transform: uppercase; letter-spacing: 0.14em; font-weight: 800; color: var(--accent-dark); font-size: 0.8rem; }
+  p { max-width: 70ch; }
+  .lede { font-size: 1.1rem; color: var(--ink); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); padding: 1.25rem 1.5rem; margin: 1rem 0; }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1.02rem; }
+  .card p { margin: 0.25rem 0; color: var(--muted); }
+  .card p strong { color: var(--ink); }
+  ol, ul { padding-left: 1.25rem; max-width: 70ch; }
+  li { margin: 0.4rem 0; }
+  .board img { width: 100%; height: auto; border: 1px solid var(--line); background: #fff; display: block; }
+  .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1.25rem 0 0; }
+  .actions a { display: inline-flex; align-items: center; min-height: 48px; padding: 0 1.2rem; border: 2px solid var(--accent); color: var(--accent-dark); font-weight: 800; text-decoration: none; }
+  .actions a.primary { background: var(--accent); color: #fff; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  code { background: #ece7dc; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  .strike { text-decoration: line-through; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <span class="eyebrow">Daily review · wireframe v1</span>
+  <h1>Navigation, redrawn</h1>
+  <p class="lede">The review app had no way back. You could open a reviewed job and get stuck there; reviewed items hid in a collapsed footnote; switching days meant typing a URL. This is the first sketch of the fix, drawn before touching code. Argue with the layout, not the pixels.</p>
+
+  <div class="actions">
+    <a class="primary" href="editor.html">Open the editable board</a>
+    <a href="review-nav.tldr">Download .tldr</a>
+  </div>
+
+  <h2>The board</h2>
+  <div class="board">
+    <img src="review-nav.png" alt="Wireframe: two home tabs (To review, Reviewed), two job page states (needs decision, already reviewed), and the navigation flow between days, tabs and job pages.">
+  </div>
+
+  <h2>What this fixes</h2>
+  <ul>
+    <li><strong>No way back.</strong> Every job page now carries a breadcrumb, <em>← All jobs, September 9</em>, plus Prev/Next that walk the whole day, pending and reviewed alike, with a <em>3 of 12</em> position marker.</li>
+    <li><strong>Reviewed items were a footnote.</strong> They get their own tab, newest first, each row showing its decision chip. Open any of them to read or change your answer.</li>
+    <li><strong>Days were a URL hack.</strong> The header has ← and → arrows that hop to the previous or next day that actually has a review, a <em>Today</em> button, and the date itself opens a picker. Empty days keep the existing empty state.</li>
+    <li><strong>One card at a time became a list you control.</strong> The queue is visible. You pick where to start and what to skip, instead of being served one job the pipeline chose.</li>
+  </ul>
+
+  <h2>Copy calls</h2>
+  <div class="card">
+    <h3><span class="strike">“Every revision below is kept as a new entry; the latest one counts.”</span></h3>
+    <p><strong>Gone.</strong> It explains the database to someone who asked about a job. The page shows the current answer, <strong>You decided: Pursue</strong>, the note under it, and a <strong>Change</strong> button that reopens the form. Every submission still lands as its own immutable row in Postgres; the UI never says so. If we ever need the history, it is one query away, and it stays out of sight until then.</p>
+  </div>
+  <div class="card">
+    <h3><span class="strike">“Audit”</span> → “Second look”</h3>
+    <p>“Audit” is our internal lane name, and it leaked. What the lane actually is: a sample of rejected jobs, kept so the filter cannot silently drop good ones. <strong>Second look</strong> says what you do with it. If you hate it: “Spot check” or “Rejected sample” work too. The internal <code>rejected_audit</code> lane id does not need to change.</p>
+  </div>
+  <div class="card">
+    <h3><span class="strike">“Choose the next move”</span></h3>
+    <p><strong>Gone.</strong> The date is the page title. The list says what is left. The job page just asks for a decision. A slogan above a form is noise.</p>
+  </div>
+
+  <h2>Open questions</h2>
+  <ol>
+    <li>After you decide, jump straight to the next job, or return to the list? The board assumes <em>next job</em>; the list is one ← away either way.</li>
+    <li>Tab names: <em>To review / Reviewed</em>, or something shorter like <em>New / Done</em>?</li>
+    <li>“Second look” — right name for the rejected-sample lane?</li>
+    <li>Should reviewed rows also preview the note, or is the decision chip enough?</li>
+    <li>Keep <em>Block this company</em> on the main form, or tuck it behind the note field?</li>
+  </ol>
+
+  <footer>
+    Hosted on Cloudflare Pages, so this link outlives the session that drew it.
+    Sources: <code>review-nav.tldr</code> (the board above, open it in the editor or drag it into tldraw.com) and the generator that produced it.
+    Sketch is fat-marker on purpose: the next step is arguing, then building it for real in the FastHTML app.
+  </footer>
+</main>
+</body>
+</html>
