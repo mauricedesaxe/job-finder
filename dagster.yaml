@@ -1,3 +1,7 @@
+run_monitoring:
+  enabled: true
+  poll_interval_seconds: 120
+  start_timeout_seconds: 300
 storage:
   postgres:
     postgres_url:
