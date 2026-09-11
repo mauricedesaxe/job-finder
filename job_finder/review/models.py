@@ -114,6 +114,20 @@ class DailyReview(ReviewModel):
             return self.rejected_audit.pending[0]
         return None
 
+    @property
+    def ordered_items(self) -> tuple[ReviewItem, ...]:
+        return tuple(
+            sorted(
+                (
+                    *self.qualified.pending,
+                    *self.qualified.reviewed_items,
+                    *self.rejected_audit.pending,
+                    *self.rejected_audit.reviewed_items,
+                ),
+                key=lambda item: (item.lane != "qualified", item.position),
+            )
+        )
+
 
 class ReviewSubmission(ReviewModel):
     review_item_id: UUID

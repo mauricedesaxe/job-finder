@@ -31,6 +31,7 @@ Clock = Callable[[], datetime]
 class ReviewService:
     open_day: Callable[[date], DailyReview]
     submit: Callable[[ReviewSubmission], ReviewSubmitResult]
+    adjacent_days: Callable[[date], tuple[date | None, date | None]] = lambda _day: (None, None)
 
 
 def postgres_review_service(
@@ -53,7 +54,11 @@ def postgres_review_service(
         with connect() as connection:
             return record_review(connection, review)
 
-    return ReviewService(open_day=open_day, submit=submit)
+    def adjacent_days(review_day: date) -> tuple[date | None, date | None]:
+        with connect() as connection:
+            return load_adjacent_days(connection, review_day)
+
+    return ReviewService(open_day=open_day, submit=submit, adjacent_days=adjacent_days)
 
 
 def prepare_daily_review(
@@ -117,6 +122,32 @@ def load_daily_review(connection: Connection, review_day: date) -> DailyReview:
         qualified=_lane_state("qualified", items),
         rejected_audit=_lane_state("rejected_audit", items),
     )
+
+
+def load_adjacent_days(connection: Connection, review_day: date) -> tuple[date | None, date | None]:
+    """Days a day-arrow may hop to: only days that actually froze review items."""
+    _require_autocommit(connection)
+    row = connection.execute(
+        """
+        SELECT
+          (SELECT max(review_day) FROM review_items WHERE review_day < %s),
+          (SELECT min(review_day) FROM review_items WHERE review_day > %s)
+        """,
+        (review_day, review_day),
+    ).fetchone()
+    if row is None:
+        return (None, None)
+    return (_as_date(row[0]), _as_date(row[1]))
+
+
+def _as_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
 
 
 def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSubmitResult:
