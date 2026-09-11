@@ -17,6 +17,25 @@ class DatabaseSettings(BaseModel):
         return cls.model_validate({"postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN")})
 
 
+class ReviewAppSettings(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    app_password: str = Field(min_length=12)
+    session_secret: str = Field(min_length=32)
+    cookie_secure: bool = True
+
+    @classmethod
+    def from_environment(cls) -> ReviewAppSettings:
+        return cls.model_validate(
+            {
+                "app_password": os.environ.get("JOB_FINDER_REVIEW_PASSWORD"),
+                "session_secret": os.environ.get("JOB_FINDER_REVIEW_SESSION_SECRET"),
+                "cookie_secure": os.environ.get("JOB_FINDER_REVIEW_COOKIE_SECURE", "true")
+                == "true",
+            }
+        )
+
+
 class OpenRouterSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
