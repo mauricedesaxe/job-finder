@@ -50,7 +50,7 @@ from job_finder.jobs.decision_pipeline import (
 from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
-from job_finder.review.models import ReviewConflict, ReviewSaved, ReviewSubmission
+from job_finder.review.models import ReviewSaved, ReviewSubmission
 from job_finder.review.postgres import (
     deterministic_rejected_sample,
     load_daily_review,
@@ -95,11 +95,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0007_model_call_request_messages.sql",
             "0008_pending_usage_response_model.sql",
             "0009_frozen_daily_reviews.sql",
+            "0010_review_event_revisions.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (9,)
+        ).fetchone() == (10,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -116,7 +117,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0009_frozen_daily_reviews.sql"
+    assert results[0][-1] == "0010_review_event_revisions.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -746,8 +747,6 @@ def test_records_feedback_and_company_block_in_one_exact_transaction(
             evaluation_id=item.evaluation_id,
             snapshot_id=item.snapshot_id,
             decision="pursue",
-            target_profile="applied-ai-product-engineer",
-            primary_reason="technology-fit",
             note="Strong fit.",
             block_company=True,
             actor="owner",
@@ -755,21 +754,73 @@ def test_records_feedback_and_company_block_in_one_exact_transaction(
         )
 
         first = record_review(connection, submission)
-        second = record_review(connection, submission.model_copy(update={"decision": "reject"}))
+        revision = record_review(
+            connection,
+            submission.model_copy(
+                update={
+                    "decision": "reject",
+                    "note": "Ukraine-based team.",
+                    "created_at": now + timedelta(minutes=5),
+                }
+            ),
+        )
 
         assert isinstance(first, ReviewSaved)
-        assert isinstance(second, ReviewConflict)
-        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
+        assert isinstance(revision, ReviewSaved)
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (2,)
         assert connection.execute("SELECT policy FROM company_policies").fetchone() == ("blocked",)
-        assert connection.execute(
+        stored = connection.execute(
             """
-            SELECT i.id, d.id, s.id
+            SELECT e.decision, e.target_profile, e.primary_reason, i.id, d.id, s.id
             FROM review_events e
             JOIN review_items i ON i.id = e.review_item_id
             JOIN evaluation_decisions d ON d.id = i.evaluation_id
             JOIN job_snapshots s ON s.id = d.snapshot_id
-            """
-        ).fetchone() == (item.id, item.evaluation_id, item.snapshot_id)
+            WHERE e.created_at = %s
+            """,
+            (now + timedelta(minutes=5),),
+        ).fetchone()
+        assert stored == (
+            "reject",
+            "applied-ai-product-engineer",
+            None,
+            item.id,
+            item.evaluation_id,
+            item.snapshot_id,
+        )
+        review = load_daily_review(connection, now.date())
+        assert review.qualified.reviewed_items[0].decision == "reject"
+        assert review.qualified.reviewed_items[0].note == "Ukraine-based team."
+
+
+def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        prepare_daily_review(connection, now.date(), created_at=now)
+        item = load_daily_review(connection, now.date()).current
+        assert item is not None
+        submission = ReviewSubmission(
+            review_item_id=item.id,
+            evaluation_id=item.evaluation_id,
+            snapshot_id=item.snapshot_id,
+            decision="unsure",
+            note="Need more detail.",
+            actor="owner",
+            created_at=now,
+        )
+
+        first = record_review(connection, submission)
+        repeat = record_review(connection, submission)
+
+        assert isinstance(first, ReviewSaved)
+        assert isinstance(repeat, ReviewSaved)
+        assert first.review_event_id == repeat.review_event_id
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
 
 
 def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
