@@ -66,8 +66,18 @@ def prepare_daily_review(
     if rejected_audit_size < 0:
         raise ValueError("Rejected audit size cannot be negative")
     with connection.transaction():
-        _ = connection.execute("LOCK TABLE review_items IN SHARE ROW EXCLUSIVE MODE")
-        _append_qualified_items(connection, review_day, created_at)
+        created = connection.execute(
+            """
+            INSERT INTO review_days (review_day, created_at)
+            VALUES (%s, %s)
+            ON CONFLICT (review_day) DO NOTHING
+            RETURNING review_day
+            """,
+            (review_day, created_at),
+        ).fetchone()
+        if created is None:
+            return
+        _create_qualified_items(connection, review_day, created_at)
         _create_rejected_audit_items(
             connection,
             review_day,
@@ -173,7 +183,7 @@ def deterministic_rejected_sample(
     return tuple(ranked[:size])
 
 
-def _append_qualified_items(connection: Connection, review_day: date, created_at: datetime) -> None:
+def _create_qualified_items(connection: Connection, review_day: date, created_at: datetime) -> None:
     row = connection.execute(
         """
         SELECT COALESCE(max(position), -1)
