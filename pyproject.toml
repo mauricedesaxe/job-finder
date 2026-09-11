@@ -12,6 +12,7 @@ dependencies = [
     "pydantic==2.13.4",
     "python-fasthtml==0.14.13",
     "requests==2.32.3",
+    "uvicorn==0.52.4",
 ]
 
 [dependency-groups]

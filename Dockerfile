@@ -10,7 +10,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY job_finder ./job_finder
+COPY scripts ./scripts
 COPY dagster.yaml workspace.yaml ./
 
-EXPOSE 3000
-CMD ["sh", "-c", "uv run dagster-webserver -h 0.0.0.0 -p ${PORT:-3000} -w workspace.yaml"]
+EXPOSE 8080
+CMD ["sh", "-c", "uv run --no-sync uvicorn scripts.serve_review:create_app --factory --host 0.0.0.0 --port ${PORT:-8080}"]
