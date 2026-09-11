@@ -48,6 +48,27 @@ def test_prioritizes_qualified_work_before_the_rejected_audit() -> None:
     assert review.total == 3
 
 
+def test_orders_a_day_by_lane_then_position_across_review_states() -> None:
+    audit_pending = _item("rejected_audit", 1, position=0)
+    qualified_reviewed = _item("qualified", 2, position=1, reviewed=True)
+    qualified_pending = _item("qualified", 3, position=0)
+    review = DailyReview(
+        day=date(2026, 9, 10),
+        qualified=ReviewLaneState(
+            lane="qualified",
+            total=2,
+            completed=1,
+            pending=(qualified_pending,),
+            reviewed_items=(qualified_reviewed,),
+        ),
+        rejected_audit=ReviewLaneState(
+            lane="rejected_audit", total=1, completed=0, pending=(audit_pending,)
+        ),
+    )
+
+    assert review.ordered_items == (qualified_pending, qualified_reviewed, audit_pending)
+
+
 def test_treats_a_blank_feedback_note_as_absent() -> None:
     review = ReviewSubmission(
         review_item_id=UUID(int=1),
@@ -64,14 +85,14 @@ def test_treats_a_blank_feedback_note_as_absent() -> None:
     assert review.note is None
 
 
-def _item(lane: str, value: int, *, reviewed: bool = False) -> ReviewItem:
+def _item(lane: str, value: int, *, position: int = 0, reviewed: bool = False) -> ReviewItem:
     return ReviewItem.model_validate(
         {
             "id": UUID(int=value),
             "evaluation_id": f"{value:064x}",
             "snapshot_id": f"{value + 10:064x}",
             "lane": lane,
-            "position": 0,
+            "position": position,
             "outcome": "qualified" if lane == "qualified" else "rejected",
             "matched_profile": "applied-ai-product-engineer" if lane == "qualified" else None,
             "evaluation_reason": "Matches the role.",

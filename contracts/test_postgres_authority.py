@@ -53,6 +53,7 @@ from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.models import ReviewSaved, ReviewSubmission
 from job_finder.review.postgres import (
     deterministic_rejected_sample,
+    load_adjacent_days,
     load_daily_review,
     prepare_daily_review,
     record_review,
@@ -821,6 +822,28 @@ def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
         assert isinstance(repeat, ReviewSaved)
         assert first.review_event_id == repeat.review_event_id
         assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
+
+
+def test_adjacent_review_days_skip_days_without_frozen_items(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    earlier = now - timedelta(days=1)
+    later = now + timedelta(days=1)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, earlier)
+        _insert_review_decision(connection, run_id, release.id, earlier, 1, "qualified")
+        _insert_review_decision(connection, run_id, release.id, later, 2, "qualified")
+        prepare_daily_review(connection, earlier.date(), created_at=earlier)
+        prepare_daily_review(connection, later.date(), created_at=later)
+        prepare_daily_review(connection, now.date(), created_at=now)
+
+        assert load_adjacent_days(connection, earlier.date()) == (None, later.date())
+        assert load_adjacent_days(connection, later.date()) == (earlier.date(), None)
+        assert load_adjacent_days(connection, now.date()) == (earlier.date(), later.date())
 
 
 def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
