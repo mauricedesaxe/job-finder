@@ -25,6 +25,13 @@ repos:
         pass_filenames: false
       - id: conventional-commit
         name: conventional commit message
-        entry: bash -c 'msg=$(head -1 "$1"); if ! echo "$msg" | grep -qE "^(feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert)(\(.+\))?: .+|^(Merge|Revert) "; then echo "Commit message must follow conventional commits format:" >&2; echo "  <type>(<optional scope>): <description>" >&2; echo "  Types: feat, fix, refactor, chore, docs, test, style, perf, ci, build, revert" >&2; echo >&2; echo "Got: $msg" >&2; exit 1; fi'
+        entry: >-
+          bash -c 'msg=$(head -1 "$1"); if ! echo "$msg" | grep -qE
+          "^(feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert)(\(.+\))?: .+|^(Merge|Revert) ";
+          then echo "Commit message must follow conventional commits format:" >&2;
+          echo "  <type>(<optional scope>): <description>" >&2;
+          echo "  Types: feat, fix, refactor, chore, docs, test, style, perf, ci, build, revert" >&2;
+          echo >&2; echo "Got: $msg" >&2; exit 1; fi'
         language: system
+        args: ["--"]
         stages: [commit-msg]
