@@ -1,9 +1,9 @@
+# Build config applies to every service deploying this file. The start command
+# and health check are per-service settings in Railway, because one image hosts
+# three roles: review app, Dagster webserver, and Dagster daemon.
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh -c 'uv run --no-sync uvicorn scripts.serve_review:create_app --factory --host 0.0.0.0 --port $PORT'"
 restartPolicyType = "ON_FAILURE"
-healthcheckPath = "/healthz"
-healthcheckTimeout = 30
