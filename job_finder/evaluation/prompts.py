@@ -17,6 +17,7 @@ class PromptDefinition:
     user_message: str = "{job}"
     output: PromptOutput = "evaluation"
     max_tokens: int = 512
+    model: str | None = None
 
 
 LOCATION = PromptDefinition(
@@ -210,6 +211,7 @@ ENRICHMENT = PromptDefinition(
     phase="enrichment",
     output="enrichment",
     max_tokens=1024,
+    model="google/gemini-2.5-flash-lite",
     system_message="""You normalize and clean up job listing data for a personal job search CRM.
 
 Given raw scraped job data, return cleaned and normalized versions of each field:

@@ -224,6 +224,7 @@ def load_prompt_release(
 
 
 def _build_version(prompt: PromptDefinition) -> PromptVersion:
+    model = prompt.model or MODEL
     definition = PromptExecution(
         name=prompt.name,
         criterion=prompt.criterion,
@@ -251,7 +252,7 @@ def _build_version(prompt: PromptDefinition) -> PromptVersion:
         "phase": prompt.phase,
     }
     content_digest = _digest(
-        _version_content(messages, input_schema, output_schema, MODEL, parameters)
+        _version_content(messages, input_schema, output_schema, model, parameters)
     )
     return PromptVersion(
         id=PromptVersionId(_digest([prompt.name, content_digest])),
@@ -260,7 +261,7 @@ def _build_version(prompt: PromptDefinition) -> PromptVersion:
         messages=messages,
         input_schema=input_schema,
         output_schema=output_schema,
-        model=MODEL,
+        model=model,
         parameters=parameters,
         tool_name=tool_name,
         tool_description=tool_description,

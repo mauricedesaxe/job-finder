@@ -5,8 +5,10 @@ from job_finder.evaluation.prompt_releases import (
     ENRICHMENT_OUTPUT_SCHEMA,
     EVALUATION_OUTPUT_SCHEMA,
     MODEL,
+    _build_version,
     build_prompt_release,
 )
+from job_finder.evaluation.prompts import PromptDefinition
 
 
 def test_builds_the_complete_prompt_release() -> None:
@@ -26,7 +28,7 @@ def test_builds_the_complete_prompt_release() -> None:
     ]
     assert len({version.id for version in release.versions}) == 8
     assert release.id == release.content_digest
-    assert release.id == "47dd3692f6152de9e860ec5a1e46928a440758dd29c51f7002e3aac006875c8c"
+    assert release.id == "a42fe63e013fa853684484cd08dcbc5ed2f7f8cda47069bb81b520c4e7164c1b"
 
 
 def test_preserves_each_prompt_execution_contract() -> None:
@@ -63,3 +65,38 @@ def test_derives_stable_content_identities() -> None:
 
     assert first == second
     assert all(len(version.id) == 64 for version in first.versions)
+
+
+def test_enrichment_version_overrides_the_model() -> None:
+    release = build_prompt_release()
+
+    version = release.version("job-finder-enrichment")
+
+    assert version.model == "google/gemini-2.5-flash-lite"
+
+
+def test_filter_version_keeps_the_default_model() -> None:
+    release = build_prompt_release()
+
+    version = release.version("job-finder-filter-location-eligibility")
+
+    assert version.model == MODEL
+
+
+def test_resolves_missing_model_to_the_default_and_keeps_explicit_overrides() -> None:
+    default = PromptDefinition(
+        name="job-finder-test-default",
+        criterion="test",
+        phase="filter",
+        system_message="test",
+    )
+    override = PromptDefinition(
+        name="job-finder-test-override",
+        criterion="test",
+        phase="filter",
+        system_message="test",
+        model="test/model",
+    )
+
+    assert _build_version(default).model == MODEL
+    assert _build_version(override).model == "test/model"
