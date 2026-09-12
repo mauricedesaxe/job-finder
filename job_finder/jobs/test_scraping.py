@@ -1,5 +1,4 @@
 from datetime import date
-import json
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -100,14 +99,18 @@ class _ReaderPage(BaseModel):
     content: str = ""
 
 
+class _ReaderEnvelope(BaseModel):
+    data: _ReaderPage
+
+
 def test_recovers_the_real_title_for_a_recorded_mis_titled_listing() -> None:
-    envelope = json.loads(
+    envelope = _ReaderEnvelope.model_validate_json(
         (
             Path(__file__).resolve().parents[2]
             / "fixtures/jina/reader_captivateiq_staff_software_engineer.json"
         ).read_text()
     )
-    page = _ReaderPage.model_validate(envelope["data"])
+    page = envelope.data
 
     job = parse_job_details(
         page.content,
