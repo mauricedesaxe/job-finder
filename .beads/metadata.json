@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "job_finder",
+  "project_id": "7ecc5ca1-596e-462f-b26b-01bb49e21497"
+}

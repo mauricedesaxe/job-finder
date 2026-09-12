@@ -1,0 +1,5 @@
+{"id":"int-31321dc96a45cb7501abec03d277c20e","kind":"field_change","created_at":"2026-09-12T14:13:40.259437002Z","actor":"Alex Lazar","issue_id":"job-finder-7x9","extra":{"field":"status","new_value":"closed","old_value":"open"}}
+{"id":"int-221fd853f886002cca7f9765e57e3104","kind":"field_change","created_at":"2026-09-12T14:13:40.726884079Z","actor":"Alex Lazar","issue_id":"job-finder-076","extra":{"field":"status","new_value":"closed","old_value":"open"}}
+{"id":"int-d8eebf86747966a7ba0fae0b0bbd73ac","kind":"field_change","created_at":"2026-09-12T14:13:41.14553063Z","actor":"Alex Lazar","issue_id":"job-finder-3q2","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
+{"id":"int-05dc935d0d2cb160db59147d35382da4","kind":"field_change","created_at":"2026-09-12T14:13:41.600785605Z","actor":"Alex Lazar","issue_id":"job-finder-716","extra":{"field":"status","new_value":"closed","old_value":"open"}}
+{"id":"int-4e12c0ade78f282c477e502d7e7ae150","kind":"field_change","created_at":"2026-09-12T14:14:33.382824274Z","actor":"Alex Lazar","issue_id":"job-finder-886","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
