@@ -266,6 +266,65 @@ def test_classifies_a_content_only_stop_response_as_malformed_function_call() ->
     assert [attempt.status for attempt in attempts] == ["retryable_error"]
 
 
+def test_accepts_a_tool_call_despite_an_error_finish_reason() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "id": "generation-1",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [
+                        {
+                            "finish_reason": "error",
+                            "native_finish_reason": "MALFORMED_FUNCTION_CALL",
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "evaluate_job",
+                                            "arguments": json.dumps(
+                                                {"pass": True, "reason": "matched"}
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert result == CriterionAccepted(
+        prompt_name=prompt.definition.name, passed=True, reason="matched"
+    )
+    assert [attempt.status for attempt in attempts] == ["accepted"]
+
+
 def test_classifies_an_empty_choices_response_as_malformed_function_call() -> None:
     prompt = build_prompt_release().versions[0]
     attempts: list[ModelCallAttempt] = []
@@ -302,7 +361,7 @@ def test_classifies_an_empty_choices_response_as_malformed_function_call() -> No
     assert result == RetryableOperationalError(
         prompt_name=prompt.definition.name,
         error_code="malformed_function_call",
-        reason="response had no choices",
+        reason="response had no usable choices",
     )
     assert [attempt.status for attempt in attempts] == ["retryable_error"]
 
