@@ -14,7 +14,7 @@ from job_finder.evaluation.prompts import PromptDefinition
 def test_builds_the_complete_prompt_release() -> None:
     release = build_prompt_release()
 
-    assert release.name == "release-2026-09-11-16"
+    assert release.name == "release-2026-09-12-1"
     assert len(release.versions) == 8
     assert [version.definition.phase for version in release.versions] == [
         "filter",

@@ -20,7 +20,7 @@ from pydantic import (
 from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
 from job_finder.evaluation.prompts import PROMPTS, PromptDefinition, PromptPhase
 
-RELEASE_NAME = "release-2026-09-11-16"
+RELEASE_NAME = "release-2026-09-12-1"
 MODEL = "google/gemini-2.5-flash"
 EVALUATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "type": "object",
@@ -150,7 +150,7 @@ def bootstrap_prompt_release(
             INSERT INTO prompt_releases (
               id, name, content_digest, expected_member_count, created_at, created_by
             ) VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (id) DO NOTHING
             """,
             (
                 release.id,

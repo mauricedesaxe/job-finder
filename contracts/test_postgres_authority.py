@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -65,6 +66,7 @@ from job_finder.evaluation.openrouter import (
     postgres_model_call_persistence,
     prompt_input_digest,
 )
+from job_finder.evaluation.prompts import ENRICHMENT, PROMPTS
 
 
 @pytest.fixture
@@ -299,6 +301,24 @@ def test_bootstraps_the_complete_prompt_release_idempotently(
         assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (8,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (8,)
+
+
+def test_bootstrap_fails_loudly_when_a_release_name_is_reused(
+    authority_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        first = bootstrap_prompt_release(connection)
+        weakened_prompts = tuple(
+            replace(prompt, model=None) if prompt.name == ENRICHMENT.name else prompt
+            for prompt in PROMPTS
+        )
+        monkeypatch.setattr("job_finder.evaluation.prompt_releases.PROMPTS", weakened_prompts)
+
+        with pytest.raises(psycopg.errors.UniqueViolation, match="prompt_releases_name_key"):
+            bootstrap_prompt_release(connection)
+
+        assert load_prompt_release(connection, first.id) == first
 
 
 def test_resumes_usage_lookup_then_reuses_an_accepted_model_call(
