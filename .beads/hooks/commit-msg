@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Conventional-commit gate from .pre-commit-config.yaml (stages: [commit-msg]).
+# Beads installs no commit-msg shim, so this file is entirely repo-owned.
+exec uv run pre-commit run --hook-stage commit-msg --commit-msg-filename "$1"

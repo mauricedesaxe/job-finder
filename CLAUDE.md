@@ -25,9 +25,12 @@ uv run python -m scripts.evaluate_corpus   # full eval pipeline against real Ope
 ```
 
 Pre-commit runs ruff format, ruff check, basedpyright, and unit tests on every
-commit, and a commit-msg hook enforces conventional commits. Install with
-`uv run pre-commit install --install-hooks -t pre-commit -t commit-msg`. If a
-hook fails, fix the cause — do not bypass with `--no-verify` or `LEFTHOOK`-style
+commit, and a commit-msg hook enforces conventional commits. Both fire through
+`.beads/hooks/`, which `core.hooksPath` points at, so they are wired for every
+clone; beads owns only its marked sections and preserves the repo's gate across
+`bd hooks install`. Do not run `pre-commit install` in this repo; it refuses
+under `core.hooksPath`, and the hooks are already chained by hand. If a hook
+fails, fix the cause — do not bypass with `--no-verify` or `LEFTHOOK`-style
 escapes.
 
 ## Runtime: uv

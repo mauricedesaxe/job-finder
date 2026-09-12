@@ -31,3 +31,6 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.2.2 ---
+# Repo quality gate from .pre-commit-config.yaml. This line sits outside the
+# beads markers, which beads preserves across installs and upgrades.
+exec uv run pre-commit run --hook-stage pre-commit
