@@ -106,7 +106,7 @@ class PromptRelease(PromptModel):
 
 
 def build_prompt_release() -> PromptRelease:
-    versions = tuple(_build_version(prompt) for prompt in PROMPTS)
+    versions = tuple(build_prompt_version(prompt) for prompt in PROMPTS)
     digest = _digest([[version.definition.name, version.id] for version in versions])
     return PromptRelease(
         id=PromptReleaseId(digest),
@@ -223,7 +223,7 @@ def load_prompt_release(
     )
 
 
-def _build_version(prompt: PromptDefinition) -> PromptVersion:
+def build_prompt_version(prompt: PromptDefinition) -> PromptVersion:
     model = prompt.model or MODEL
     definition = PromptExecution(
         name=prompt.name,

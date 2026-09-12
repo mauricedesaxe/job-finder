@@ -77,7 +77,7 @@ def job_finder_cycle(
             discovery.require_complete()
             processing = _process_batch(connection, run, boundaries, settings, observed_at)
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
-            _ping_heartbeat(settings.discovery_heartbeat_url)
+            ping_heartbeat(settings.discovery_heartbeat_url)
         except Exception as error:
             _fail_run(connection, run, error)
             raise
@@ -107,7 +107,7 @@ def job_work_queue_cycle(
         try:
             processing = _process_batch(connection, run, boundaries, settings, observed_at)
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
-            _ping_heartbeat(settings.work_queue_heartbeat_url)
+            ping_heartbeat(settings.work_queue_heartbeat_url)
         except Exception as error:
             _fail_run(connection, run, error)
             raise
@@ -207,7 +207,7 @@ def _fail_run(connection: Connection, run: OrchestrationRun, error: Exception) -
     )
 
 
-def _ping_heartbeat(url: str | None, sender: HeartbeatSender | None = None) -> None:
+def ping_heartbeat(url: str | None, sender: HeartbeatSender | None = None) -> None:
     if url is None:
         return
     try:

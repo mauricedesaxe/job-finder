@@ -5,7 +5,7 @@ from job_finder.evaluation.prompt_releases import (
     ENRICHMENT_OUTPUT_SCHEMA,
     EVALUATION_OUTPUT_SCHEMA,
     MODEL,
-    _build_version,
+    build_prompt_version,
     build_prompt_release,
 )
 from job_finder.evaluation.prompts import PromptDefinition
@@ -98,5 +98,5 @@ def test_resolves_missing_model_to_the_default_and_keeps_explicit_overrides() ->
         model="test/model",
     )
 
-    assert _build_version(default).model == MODEL
-    assert _build_version(override).model == "test/model"
+    assert build_prompt_version(default).model == MODEL
+    assert build_prompt_version(override).model == "test/model"
