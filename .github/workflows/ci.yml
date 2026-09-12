@@ -43,7 +43,7 @@ jobs:
         run: |
           uv run ruff format --check .
           uv run ruff check .
-          uv run basedpyright --outputjson > basedpyright-report.json
+          uv run basedpyright --outputjson > basedpyright-report.json || true
           python3 -c "
           import json
           report = json.load(open('basedpyright-report.json'))
