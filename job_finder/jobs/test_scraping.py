@@ -1,4 +1,6 @@
 from datetime import date
+import json
+from pathlib import Path
 
 from job_finder.jobs.scraping import (
     detect_source,
@@ -64,6 +66,51 @@ def test_parses_a_complete_job_listing() -> None:
 
 def test_does_not_detect_a_source_from_query_text() -> None:
     assert detect_source("https://example.com/job?next=jobs.lever.co/company/id") == "other"
+
+
+def test_prefers_the_reader_page_title_over_markdown_heuristics() -> None:
+    job = parse_job_details(
+        "**About CaptivateIQ**\n\nWe are the leading platform.",
+        "https://jobs.lever.co/captivateiq/25b5dbc3",
+        "ai platform",
+        scraped_on=date(2026, 9, 12),
+        page_title="CaptivateIQ - Staff Software Engineer - AI Platform",
+    )
+
+    assert job.title == "CaptivateIQ - Staff Software Engineer - AI Platform"
+
+
+def test_falls_back_to_markdown_when_the_reader_title_is_empty() -> None:
+    job = parse_job_details(
+        "# DeFi Protocol Engineer\n\nBuild stuff.",
+        "https://jobs.ashbyhq.com/acme/12345",
+        "defi",
+        scraped_on=date(2026, 9, 12),
+        page_title="   ",
+    )
+
+    assert job.title == "DeFi Protocol Engineer"
+
+
+def test_recovers_the_real_title_for_a_recorded_mis_titled_listing() -> None:
+    reader = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "fixtures/jina/reader_captivateiq_staff_software_engineer.json"
+        ).read_text()
+    )
+
+    job = parse_job_details(
+        reader["data"]["content"],
+        reader["data"]["url"],
+        "ai platform",
+        scraped_on=date(2026, 9, 12),
+        page_title=reader["data"]["title"],
+    )
+
+    assert job.title == "CaptivateIQ - Staff Software Engineer - AI Platform"
+    assert job.title != "About CaptivateIQ"
+    assert job.source == "lever"
 
 
 def test_rejects_malformed_urls() -> None:

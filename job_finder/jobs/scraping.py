@@ -29,9 +29,10 @@ def parse_job_details(
     keyword: str,
     *,
     scraped_on: date,
+    page_title: str = "",
 ) -> JobListing:
     return JobListing(
-        title=extract_title(markdown),
+        title=page_title.strip() or extract_title(markdown),
         company=extract_company_from_url(url),
         url=url,
         source=detect_source(url),

@@ -31,6 +31,7 @@ class JinaSearchEnvelope(JinaModel):
 
 
 class JinaReaderData(JinaModel):
+    title: str = ""
     content: str
 
 
@@ -46,6 +47,7 @@ class SearchSucceeded(JinaModel):
 
 class ScrapeSucceeded(JinaModel):
     kind: Literal["succeeded"] = "succeeded"
+    title: str = ""
     markdown: str
 
 
@@ -148,7 +150,7 @@ def scrape_job(
             error_code=f"api_{envelope.code}",
             reason=f"Jina reader returned code {envelope.code}",
         )
-    return ScrapeSucceeded(markdown=envelope.data.content)
+    return ScrapeSucceeded(markdown=envelope.data.content, title=envelope.data.title)
 
 
 def filter_job_urls(results: tuple[JinaSearchItem, ...], domain: str) -> tuple[str, ...]:

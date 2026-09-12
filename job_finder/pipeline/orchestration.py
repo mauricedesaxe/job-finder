@@ -274,6 +274,7 @@ def _process_claim(
         claim.raw_url,
         claim.keyword,
         scraped_on=observed_at.date(),
+        page_title=scrape.title,
     )
     ats_evidence = (
         boundaries.fetch_ats(listing.url, listing.title)

@@ -96,6 +96,34 @@ def test_retries_reader_throttling_and_parses_markdown() -> None:
     assert delays == [0.5]
 
 
+def test_carries_the_reader_title_alongside_the_markdown() -> None:
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, str],
+        _timeout: float,
+    ) -> JinaHttpResponse:
+        return JinaHttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "title": "CaptivateIQ - Staff Software Engineer - AI Platform",
+                        "content": "**About CaptivateIQ**\n\nWe build things.",
+                    },
+                }
+            ),
+        )
+
+    result = scrape_job("https://jobs.lever.co/captivateiq/abc", api_key="key", sender=send)
+
+    assert result == ScrapeSucceeded(
+        title="CaptivateIQ - Staff Software Engineer - AI Platform",
+        markdown="**About CaptivateIQ**\n\nWe build things.",
+    )
+
+
 def test_returns_unavailable_for_an_invalid_reader_response() -> None:
     result = scrape_job(
         "https://jobs.ashbyhq.com/acme/1",
