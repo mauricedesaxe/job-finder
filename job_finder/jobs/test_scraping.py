@@ -2,6 +2,8 @@ from datetime import date
 import json
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from job_finder.jobs.scraping import (
     detect_source,
     extract_company_from_url,
@@ -92,20 +94,27 @@ def test_falls_back_to_markdown_when_the_reader_title_is_empty() -> None:
     assert job.title == "DeFi Protocol Engineer"
 
 
+class _ReaderPage(BaseModel):
+    title: str = ""
+    url: str = ""
+    content: str = ""
+
+
 def test_recovers_the_real_title_for_a_recorded_mis_titled_listing() -> None:
-    reader = json.loads(
+    envelope = json.loads(
         (
             Path(__file__).resolve().parents[2]
             / "fixtures/jina/reader_captivateiq_staff_software_engineer.json"
         ).read_text()
     )
+    page = _ReaderPage.model_validate(envelope["data"])
 
     job = parse_job_details(
-        reader["data"]["content"],
-        reader["data"]["url"],
+        page.content,
+        page.url,
         "ai platform",
         scraped_on=date(2026, 9, 12),
-        page_title=reader["data"]["title"],
+        page_title=page.title,
     )
 
     assert job.title == "CaptivateIQ - Staff Software Engineer - AI Platform"
