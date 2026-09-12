@@ -116,6 +116,8 @@ class OrchestrationSettings(BaseModel):
     work_batch_size: int = Field(default=100, gt=0, le=1000)
     work_lease_seconds: int = Field(default=3600, gt=0)
     work_retry_seconds: int = Field(default=300, ge=0)
+    discovery_heartbeat_url: str | None = None
+    work_queue_heartbeat_url: str | None = None
 
     @classmethod
     def from_environment(cls) -> OrchestrationSettings:
@@ -130,5 +132,7 @@ class OrchestrationSettings(BaseModel):
                 "work_batch_size": os.environ.get("JOB_FINDER_WORK_BATCH_SIZE", "100"),
                 "work_lease_seconds": os.environ.get("JOB_FINDER_WORK_LEASE_SECONDS", "3600"),
                 "work_retry_seconds": os.environ.get("JOB_FINDER_WORK_RETRY_SECONDS", "300"),
+                "discovery_heartbeat_url": os.environ.get("JOB_FINDER_DISCOVERY_HEARTBEAT_URL"),
+                "work_queue_heartbeat_url": os.environ.get("JOB_FINDER_WORK_QUEUE_HEARTBEAT_URL"),
             }
         )

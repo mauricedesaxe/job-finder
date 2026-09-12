@@ -41,6 +41,8 @@ uv sync --frozen
 | `OPENROUTER_API_KEY` | pipeline, evaluation | LLM evaluation calls |
 | `JINA_API_KEY` | pipeline | Search and scraping |
 | `JOB_FINDER_IMPLEMENTATION_REF` | pipeline | Provenance ref recorded on runs |
+| `JOB_FINDER_DISCOVERY_HEARTBEAT_URL` | pipeline | Better Stack heartbeat pinged after each discovery cycle (optional) |
+| `JOB_FINDER_WORK_QUEUE_HEARTBEAT_URL` | pipeline | Better Stack heartbeat pinged after each queue-drain cycle (optional) |
 | `JOB_FINDER_REVIEW_PASSWORD` | review app | Review login (≥12 chars) |
 | `JOB_FINDER_REVIEW_SESSION_SECRET` | review app | Session signing (≥32 chars) |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | projection | Presence enables the projection schedule |

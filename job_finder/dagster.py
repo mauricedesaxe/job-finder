@@ -1,9 +1,10 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import psycopg
+import requests
 from dagster import (
     AssetExecutionContext,
     ConfigurableResource,
@@ -41,6 +42,8 @@ from job_finder.pipeline.state import (
     prepare_orchestration_run,
 )
 
+HeartbeatSender = Callable[[str], None]
+
 
 class JobFinderResource(ConfigurableResource["JobFinderResource"]):
     @contextmanager
@@ -74,6 +77,7 @@ def job_finder_cycle(
             discovery.require_complete()
             processing = _process_batch(connection, run, boundaries, settings, observed_at)
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
+            _ping_heartbeat(settings.discovery_heartbeat_url)
         except Exception as error:
             _fail_run(connection, run, error)
             raise
@@ -103,6 +107,7 @@ def job_work_queue_cycle(
         try:
             processing = _process_batch(connection, run, boundaries, settings, observed_at)
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
+            _ping_heartbeat(settings.work_queue_heartbeat_url)
         except Exception as error:
             _fail_run(connection, run, error)
             raise
@@ -202,6 +207,19 @@ def _fail_run(connection: Connection, run: OrchestrationRun, error: Exception) -
     )
 
 
+def _ping_heartbeat(url: str | None, sender: HeartbeatSender | None = None) -> None:
+    if url is None:
+        return
+    try:
+        _ = (sender or _default_heartbeat_sender)(url)
+    except Exception:
+        pass
+
+
+def _default_heartbeat_sender(url: str) -> None:
+    _ = requests.get(url, timeout=5)
+
+
 def _fetch_rates(observed_at: datetime) -> ExchangeRateSnapshot:
     return fetch_exchange_rates(observed_at=observed_at)
 
@@ -213,7 +231,7 @@ langfuse_projection_job = define_asset_job(
 )
 job_finder_schedule = ScheduleDefinition(
     job=job_finder_job,
-    cron_schedule="0 7 * * WED",
+    cron_schedule="0 7 * * *",
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
 )
