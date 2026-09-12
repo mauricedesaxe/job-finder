@@ -20,7 +20,7 @@ Connection = psycopg.Connection[tuple[object, ...]]
 
 
 class ThawArguments(argparse.Namespace):
-    day: date | None = None
+    day: date = date(1970, 1, 1)
     dry_run: bool = False
 
 
@@ -35,18 +35,19 @@ def main() -> None:
         help="print what a thaw would delete without changing any row",
     )
     arguments = parser.parse_args(namespace=ThawArguments())
-    review_day = arguments.day
-    if review_day is None:
-        raise SystemExit("A review day is required")
     settings = DatabaseSettings.from_environment()
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
-        _ = apply_migrations(connection)
         if arguments.dry_run:
-            _print_plan(connection, review_day)
+            _print_plan(connection, arguments.day)
             return
-        deleted_items, deleted_days = thaw_review_day(connection, review_day)
+        apply_migrations(connection)
+        deleted_items, deleted_days = thaw_review_day(connection, arguments.day)
+        dsn = connection.info.dsn
+    if (deleted_items, deleted_days) == (0, 0):
+        print(f"Nothing to thaw for {arguments.day.isoformat()}: no day row or review items")
+        return
     deleted = f"{deleted_items} review items and {deleted_days} review day row(s)"
-    print(f"Thawed {review_day.isoformat()}: {deleted}")
+    print(f"Thawed {arguments.day.isoformat()} on {dsn}: {deleted}")
 
 
 def _print_plan(connection: Connection, review_day: date) -> None:

@@ -108,14 +108,14 @@ def thaw_review_day(connection: Connection, review_day: date) -> tuple[int, int]
             raise ValueError(
                 f"Review day {review_day.isoformat()} has submitted reviews and cannot be thawed"
             )
-        connection.execute("ALTER TABLE review_items DISABLE TRIGGER review_items_are_immutable")
-        deleted_items = connection.execute(
-            "DELETE FROM review_items WHERE review_day = %s",
-            (review_day,),
-        ).rowcount
         connection.execute("ALTER TABLE review_days DISABLE TRIGGER review_days_are_immutable")
         deleted_days = connection.execute(
             "DELETE FROM review_days WHERE review_day = %s",
+            (review_day,),
+        ).rowcount
+        connection.execute("ALTER TABLE review_items DISABLE TRIGGER review_items_are_immutable")
+        deleted_items = connection.execute(
+            "DELETE FROM review_items WHERE review_day = %s",
             (review_day,),
         ).rowcount
         connection.execute("ALTER TABLE review_items ENABLE TRIGGER review_items_are_immutable")
