@@ -43,6 +43,14 @@ jobs:
         run: |
           uv run ruff format --check .
           uv run ruff check .
+          uv run basedpyright --outputjson > basedpyright-report.json
+          python3 -c "
+          import json
+          report = json.load(open('basedpyright-report.json'))
+          for d in report['generalDiagnostics']:
+              if d['severity'] != 'error':
+                  print(d['severity'], d['file'], d['range']['start']['line'] + 1, d.get('message', '')[:300])
+          "
           uv run basedpyright --level error
           uv run vulture
           uv run xenon --max-absolute C --max-modules B --max-average A job_finder
