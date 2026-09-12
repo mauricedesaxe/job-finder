@@ -37,6 +37,7 @@ OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation"
 RETRYABLE_HTTP_STATUSES = frozenset((429, 500, 502, 503))
 RETRYABLE_GENERATION_HTTP_STATUSES = RETRYABLE_HTTP_STATUSES | frozenset((404, 524, 529))
+_MALFORMED_FINISH_REASONS = frozenset(("MALFORMED_FUNCTION_CALL", "error"))
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _INTEGER: TypeAdapter[int] = TypeAdapter(int)
 _OutputT = TypeVar("_OutputT", bound=EvaluationModel)
@@ -107,6 +108,8 @@ class OpenRouterMessage(OpenRouterModel):
 
 class OpenRouterChoice(OpenRouterModel):
     message: OpenRouterMessage
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
 
 
 class OpenRouterUsage(OpenRouterModel):
@@ -597,11 +600,70 @@ def _interpret_response(
         )
     try:
         completion = OpenRouterCompletion.model_validate(raw)
-        tool_call = completion.choices[0].message.tool_calls[0]
+    except ValidationError as error:
+        no_choices = all(item["loc"] == ("choices",) for item in error.errors())
+        unavailable = RetryableOperationalError(
+            prompt_name=prompt.definition.name,
+            error_code="malformed_function_call" if no_choices else "invalid_response",
+            reason="response had no choices" if no_choices else str(error),
+        )
+        return (
+            unavailable,
+            _failed_attempt(
+                prompt,
+                context,
+                request_id,
+                attempt_number,
+                latency_ms,
+                observed_at,
+                "retryable_error",
+                unavailable.error_code,
+                unavailable.reason,
+                raw,
+                request_messages=request_messages,
+            ),
+            True,
+        )
+    choice = completion.choices[0]
+    if (
+        choice.native_finish_reason in _MALFORMED_FINISH_REASONS
+        or choice.finish_reason in _MALFORMED_FINISH_REASONS
+        or not choice.message.tool_calls
+    ):
+        finish_reason = choice.native_finish_reason or choice.finish_reason
+        reason = (
+            f"provider finished with {finish_reason} and returned no tool call"
+            if finish_reason is not None
+            else "provider returned no tool call"
+        )
+        unavailable = RetryableOperationalError(
+            prompt_name=prompt.definition.name,
+            error_code="malformed_function_call",
+            reason=reason,
+        )
+        return (
+            unavailable,
+            _failed_attempt(
+                prompt,
+                context,
+                request_id,
+                attempt_number,
+                latency_ms,
+                observed_at,
+                "retryable_error",
+                unavailable.error_code,
+                unavailable.reason,
+                raw,
+                request_messages=request_messages,
+            ),
+            True,
+        )
+    try:
+        tool_call = choice.message.tool_calls[0]
         if tool_call.function.name != prompt.tool_name:
             raise ValueError("response returned the wrong tool")
         output = output_type.model_validate_json(tool_call.function.arguments)
-    except (ValidationError, ValueError, IndexError) as error:
+    except (ValidationError, ValueError) as error:
         unavailable = RetryableOperationalError(
             prompt_name=prompt.definition.name,
             error_code="invalid_response",

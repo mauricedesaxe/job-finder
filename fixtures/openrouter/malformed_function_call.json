@@ -1,0 +1,23 @@
+{
+  "id": "gen-1789116627-L9nV4CgWBsfmA4NjXUX2",
+  "model": "google/gemini-2.5-flash",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "reasoning": null
+      },
+      "logprobs": null,
+      "finish_reason": "error",
+      "native_finish_reason": "MALFORMED_FUNCTION_CALL"
+    }
+  ],
+  "created": 1789116627,
+  "provider": "Google",
+  "service_tier": null,
+  "system_fingerprint": null
+}

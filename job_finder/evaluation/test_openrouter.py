@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 from uuid import UUID
 
@@ -166,6 +167,253 @@ def test_retries_network_and_malformed_responses_without_defaulting_a_verdict() 
     )
     assert [attempt.status for attempt in attempts] == ["retryable_error", "retryable_error"]
     assert all(attempt.parsed_output is None for attempt in attempts)
+
+
+def test_classifies_a_recorded_malformed_function_call_response_as_retryable() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+    body = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "openrouter"
+        / "malformed_function_call.json"
+    ).read_text()
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(200, body)
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
+        sleep=lambda _delay: None,
+        now=lambda: NOW,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="malformed_function_call",
+        reason="provider finished with MALFORMED_FUNCTION_CALL and returned no tool call",
+    )
+    assert [attempt.status for attempt in attempts] == ["retryable_error", "retryable_error"]
+    assert all(
+        attempt.error
+        == {
+            "code": "malformed_function_call",
+            "message": "provider finished with MALFORMED_FUNCTION_CALL and returned no tool call",
+        }
+        for attempt in attempts
+    )
+
+
+def test_classifies_a_content_only_stop_response_as_malformed_function_call() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "id": "generation-1",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "answered in prose instead of calling the tool",
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="malformed_function_call",
+        reason="provider finished with stop and returned no tool call",
+    )
+    assert [attempt.status for attempt in attempts] == ["retryable_error"]
+
+
+def test_classifies_an_empty_choices_response_as_malformed_function_call() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "id": "generation-1",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [],
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="malformed_function_call",
+        reason="response had no choices",
+    )
+    assert [attempt.status for attempt in attempts] == ["retryable_error"]
+
+
+def test_keeps_a_wrong_tool_name_as_an_invalid_response() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "id": "generation-1",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {"name": "other_tool", "arguments": "{}"},
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="invalid_response",
+        reason="response returned the wrong tool",
+    )
+    assert [attempt.status for attempt in attempts] == ["retryable_error"]
+
+
+def test_keeps_unparseable_tool_arguments_as_an_invalid_response() -> None:
+    prompt = build_prompt_release().versions[0]
+    attempts: list[ModelCallAttempt] = []
+
+    def send(
+        _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
+    ) -> HttpResponse:
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "id": "generation-1",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "evaluate_job",
+                                            "arguments": "not-json",
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "job body"},
+        _context(),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=RetryPolicy(max_attempts=1, base_delay_seconds=0),
+        now=lambda: NOW,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="invalid_response",
+        reason=result.reason,
+    )
+    assert [attempt.status for attempt in attempts] == ["retryable_error"]
 
 
 def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
