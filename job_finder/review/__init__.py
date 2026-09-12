@@ -21,6 +21,7 @@ from job_finder.review.postgres import (
     postgres_review_service,
     prepare_daily_review,
     record_review,
+    thaw_review_day,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "postgres_review_service",
     "prepare_daily_review",
     "record_review",
+    "thaw_review_day",
 ]

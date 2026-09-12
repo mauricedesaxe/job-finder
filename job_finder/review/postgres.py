@@ -92,6 +92,37 @@ def prepare_daily_review(
         )
 
 
+def thaw_review_day(connection: Connection, review_day: date) -> tuple[int, int]:
+    _require_autocommit(connection)
+    with connection.transaction():
+        row = connection.execute(
+            """
+            SELECT count(*)
+            FROM review_events e
+            JOIN review_items i ON i.id = e.review_item_id
+            WHERE i.review_day = %s
+            """,
+            (review_day,),
+        ).fetchone()
+        if row is not None and int(str(row[0])) > 0:
+            raise ValueError(
+                f"Review day {review_day.isoformat()} has submitted reviews and cannot be thawed"
+            )
+        connection.execute("ALTER TABLE review_items DISABLE TRIGGER review_items_are_immutable")
+        deleted_items = connection.execute(
+            "DELETE FROM review_items WHERE review_day = %s",
+            (review_day,),
+        ).rowcount
+        connection.execute("ALTER TABLE review_days DISABLE TRIGGER review_days_are_immutable")
+        deleted_days = connection.execute(
+            "DELETE FROM review_days WHERE review_day = %s",
+            (review_day,),
+        ).rowcount
+        connection.execute("ALTER TABLE review_items ENABLE TRIGGER review_items_are_immutable")
+        connection.execute("ALTER TABLE review_days ENABLE TRIGGER review_days_are_immutable")
+    return (deleted_items, deleted_days)
+
+
 def load_daily_review(connection: Connection, review_day: date) -> DailyReview:
     _require_autocommit(connection)
     rows = connection.execute(
