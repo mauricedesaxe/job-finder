@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import psycopg
@@ -306,7 +306,7 @@ def test_a_reset_job_flows_through_claim_without_short_circuit(authority_schema:
             connection,
             owner_token=uuid4(),
             claimed_at=_NOW,
-            lease_for=__import__("datetime").timedelta(minutes=30),
+            lease_for=timedelta(minutes=30),
         )
         assert claim is not None
         assert claim.job_id == job_id
