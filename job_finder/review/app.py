@@ -782,16 +782,7 @@ h2 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.04; }
 .back-link { color: var(--accent-dark); font-weight: 800; text-decoration: none; }
 .position-marker { color: var(--muted); font-weight: 700; }
 .item-nav { display: flex; gap: 0.5rem; }
-.job-card { margin-top: 2rem; background: var(--panel); border: 1px solid var(--line); border-top: 5px solid var(--accent); padding: clamp(1.25rem, 4vw, 2.5rem); box-shadow: 0 1.2rem 3rem rgb(54 45 32 / 0.08); }
-.audit-card { border-top-color: var(--line); box-shadow: none; }
-.card-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
-.status-kicker { color: var(--accent-dark); font-size: 0.75rem; }
-.audit-card .status-kicker { color: var(--muted); }
-.job-meta { color: var(--muted); font-size: 1.05rem; }
-.company { color: var(--ink); font-weight: 800; }
 .why-label { display: block; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem; font-weight: 800; color: var(--muted); margin-bottom: 0.35rem; }
-.evaluation-reason { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 0; font-weight: 650; }
-.audit-card .evaluation-reason { border-left-color: var(--line); color: var(--muted); }
 .job-card { margin-top: 2rem; background: var(--panel); border: 1px solid var(--line); border-top: 5px solid var(--accent); padding: clamp(1.25rem, 4vw, 2.5rem); box-shadow: 0 1.2rem 3rem rgb(54 45 32 / 0.08); }
 .audit-card { border-top-color: var(--line); box-shadow: none; }
 .card-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
