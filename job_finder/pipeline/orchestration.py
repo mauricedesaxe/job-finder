@@ -100,8 +100,7 @@ class DiscoverySummary(PipelineServiceModel):
             raise RuntimeError("Every discovery query remained unavailable")
         if self.unavailable_query_count / self.query_count > max_unavailable_ratio:
             raise RuntimeError(
-                f"{self.unavailable_query_count} of {self.query_count} discovery queries "
-                "remained unavailable"
+                f"{self.unavailable_query_count} of {self.query_count} discovery queries remained unavailable"
             )
 
 
