@@ -15,7 +15,7 @@ from job_finder.discovery.jina import (
 from job_finder.pipeline.orchestration import DiscoverySummary
 
 
-def test_rejects_an_incomplete_discovery_summary() -> None:
+def test_rejects_a_discovery_summary_beyond_the_unavailable_ratio() -> None:
     summary = DiscoverySummary(
         query_count=4,
         unavailable_query_count=1,
@@ -23,7 +23,42 @@ def test_rejects_an_incomplete_discovery_summary() -> None:
         new_work_count=3,
     )
 
-    with pytest.raises(RuntimeError, match="1 discovery queries"):
+    with pytest.raises(RuntimeError, match="1 of 4 discovery queries"):
+        summary.require_complete(max_unavailable_ratio=0.2)
+
+
+def test_accepts_a_discovery_summary_within_the_unavailable_ratio() -> None:
+    summary = DiscoverySummary(
+        query_count=100,
+        unavailable_query_count=20,
+        discovered_count=10,
+        new_work_count=10,
+    )
+
+    summary.require_complete()
+
+
+def test_rejects_a_discovery_summary_when_every_query_is_unavailable() -> None:
+    summary = DiscoverySummary(
+        query_count=4,
+        unavailable_query_count=4,
+        discovered_count=0,
+        new_work_count=0,
+    )
+
+    with pytest.raises(RuntimeError, match="Every discovery query remained unavailable"):
+        summary.require_complete()
+
+
+def test_rejects_a_discovery_summary_without_queries() -> None:
+    summary = DiscoverySummary(
+        query_count=0,
+        unavailable_query_count=0,
+        discovered_count=0,
+        new_work_count=0,
+    )
+
+    with pytest.raises(RuntimeError, match="Every discovery query remained unavailable"):
         summary.require_complete()
 
 

@@ -95,10 +95,13 @@ class DiscoverySummary(PipelineServiceModel):
     discovered_count: int
     new_work_count: int
 
-    def require_complete(self) -> None:
-        if self.unavailable_query_count:
+    def require_complete(self, *, max_unavailable_ratio: float = 0.2) -> None:
+        if self.query_count == 0 or self.unavailable_query_count == self.query_count:
+            raise RuntimeError("Every discovery query remained unavailable")
+        if self.unavailable_query_count / self.query_count > max_unavailable_ratio:
             raise RuntimeError(
-                f"{self.unavailable_query_count} discovery queries remained unavailable"
+                f"{self.unavailable_query_count} of {self.query_count} discovery queries "
+                "remained unavailable"
             )
 
 
