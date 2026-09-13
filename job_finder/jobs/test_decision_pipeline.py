@@ -204,18 +204,21 @@ def test_persists_the_qualified_outcome_and_reuses_its_receipt() -> None:
 
 
 def test_applies_duplicate_before_company_policy() -> None:
-    store = DecisionStore(
-        find_completed=lambda _key: None,
-        existing_titles=lambda _company: ("Senior Engineer",),
-        active_company_policy=lambda _company, _at: "blocked",
-        persist=lambda decision: PersistedDecision(
+    def persist(decision: TerminalDecision) -> PersistedDecision:
+        return PersistedDecision(
             decision_id="d" * 64,
             snapshot_id="s" * 64,
             outcome=decision.outcome,
             matched_profile=decision.matched_profile,
             reason=decision.reason,
             job=decision.enriched,
-        ),
+        )
+
+    store = DecisionStore(
+        find_completed=lambda _key: None,
+        existing_titles=lambda _company: ("Senior Engineer",),
+        active_company_policy=lambda _company, _at: "blocked",
+        persist=persist,
     )
     result = process_qualified_job(
         _listing(),
