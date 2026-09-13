@@ -18,6 +18,8 @@ import psycopg
 from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
 
+Connection = psycopg.Connection[tuple[object, ...]]
+
 
 class BackfillArguments(argparse.Namespace):
     dry_run: bool = False
@@ -34,6 +36,7 @@ def main() -> None:
     )
     arguments = parser.parse_args(namespace=BackfillArguments())
     settings = DatabaseSettings.from_environment()
+    connection: Connection
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         _ = apply_migrations(connection)
         rows: list[tuple[str, date]] = [
