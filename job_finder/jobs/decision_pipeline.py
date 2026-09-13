@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -93,7 +93,8 @@ class TerminalDecision:
 CompletedDecisionLookup = Callable[[str], PersistedDecision | None]
 ExistingTitleLookup = Callable[[str], tuple[str, ...]]
 CompanyPolicyLookup = Callable[[str, datetime], CompanyPolicy | None]
-TerminalDecisionWriter = Callable[[TerminalDecision], PersistedDecision]
+EnqueueReviewItem = Callable[[psycopg.Connection[tuple[object, ...]], str, date], None]
+TerminalDecisionWriter = Callable[..., PersistedDecision]
 
 
 @dataclass(frozen=True)
@@ -243,11 +244,19 @@ def postgres_decision_store(
             return value
         raise RuntimeError(f"Unknown company policy: {value}")
 
-    def persist(decision: TerminalDecision) -> PersistedDecision:
+    def persist(
+        decision: TerminalDecision, *, enqueue_review_item: EnqueueReviewItem | None = None
+    ) -> PersistedDecision:
         with connection.transaction():
             _upsert_job(connection, decision)
             snapshot_id = _insert_snapshot(connection, decision)
             authoritative = _insert_decision(connection, decision, snapshot_id)
+            if enqueue_review_item is not None and authoritative.outcome == "qualified":
+                enqueue_review_item(
+                    connection,
+                    authoritative.decision_id,
+                    decision.context.observed_at.astimezone(UTC).date(),
+                )
             _insert_receipt(connection, decision, authoritative)
         completed = find_completed(decision.idempotency_key)
         if completed is None:

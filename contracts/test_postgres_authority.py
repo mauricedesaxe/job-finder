@@ -54,9 +54,9 @@ from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.models import ReviewSaved, ReviewSubmission
 from job_finder.review.postgres import (
     deterministic_rejected_sample,
-    load_adjacent_days,
-    load_daily_review,
-    prepare_daily_review,
+    enqueue_qualified_review_item,
+    enqueue_rejected_audit_sample,
+    load_review_queue,
     record_review,
 )
 from job_finder.evaluation.openrouter import (
@@ -99,11 +99,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0008_pending_usage_response_model.sql",
             "0009_frozen_daily_reviews.sql",
             "0010_review_event_revisions.sql",
+            "0011_review_queue.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (10,)
+        ).fetchone() == (11,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -120,7 +121,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0010_review_event_revisions.sql"
+    assert results[0][-1] == "0011_review_queue.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -703,7 +704,7 @@ def test_rolls_back_every_terminal_row_when_the_decision_is_invalid(
         assert connection.execute("SELECT count(*) FROM pipeline_receipts").fetchone() == (0,)
 
 
-def test_builds_immutable_daily_membership_with_every_qualified_job(
+def test_enqueues_a_stable_review_queue_with_every_qualified_job(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -722,31 +723,53 @@ def test_builds_immutable_daily_membership_with_every_qualified_job(
             for value in range(10, 18)
         )
 
-        prepare_daily_review(connection, review_day, created_at=now)
-        first_rows = connection.execute(
-            "SELECT id, evaluation_id, lane, position FROM review_items ORDER BY lane, position"
-        ).fetchall()
+        enqueued = tuple(
+            enqueue_qualified_review_item(connection, evaluation_id, review_day)
+            for evaluation_id in qualified_ids
+        )
         late_qualified_id = _insert_review_decision(
             connection, run_id, release.id, now, 99, "qualified"
         )
-        prepare_daily_review(connection, review_day, created_at=now)
-        review = load_daily_review(connection, review_day)
-        second_rows = connection.execute(
-            "SELECT id, evaluation_id, lane, position FROM review_items ORDER BY lane, position"
+        late_enqueued = enqueue_qualified_review_item(connection, late_qualified_id, review_day)
+        repeated = tuple(
+            enqueue_qualified_review_item(connection, evaluation_id, review_day)
+            for evaluation_id in qualified_ids
+        )
+        sampled = enqueue_rejected_audit_sample(connection, review_day)
+        resampled = enqueue_rejected_audit_sample(connection, review_day)
+        queue = load_review_queue(connection)
+        rows = connection.execute(
+            """
+            SELECT evaluation_id, lane, position
+            FROM review_items
+            ORDER BY lane, position, created_at
+            """
         ).fetchall()
 
-        assert second_rows == first_rows
-        assert review.qualified.total == 4
-        assert {item.evaluation_id for item in review.qualified.pending} == set(qualified_ids)
-        assert late_qualified_id not in {item.evaluation_id for item in review.qualified.pending}
-        assert review.rejected_audit.total == 3
-        assert {item.evaluation_id for item in review.rejected_audit.pending} == set(
-            deterministic_rejected_sample(review_day, rejected_ids)
-        )
+        first_sample = deterministic_rejected_sample(review_day, rejected_ids)
+        remaining = tuple(sorted(set(rejected_ids) - set(first_sample)))
+        second_sample = deterministic_rejected_sample(review_day, remaining)
+        audit_rows = [row[0] for row in rows if row[1] == "rejected_audit"]
+        audit_positions = sorted(int(str(row[2])) for row in rows if row[1] == "rejected_audit")
+        assert all(enqueued)
+        assert late_enqueued
+        assert not any(repeated)
+        assert sampled == 3
+        assert resampled == 3
+        assert set(audit_rows) == set(first_sample) | set(second_sample)
+        assert audit_positions == [0, 0, 1, 1, 2, 2]
+        assert set(first_sample).isdisjoint(second_sample)
+        assert {item.evaluation_id for item in queue.items} == {
+            *qualified_ids,
+            late_qualified_id,
+            *first_sample,
+            *second_sample,
+        }
+        assert queue.reviewed_counts == {}
         with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
             connection.execute(
                 "UPDATE review_items SET position = 99 WHERE id = %s",
-                (review.qualified.pending[0].id,),
+                (queue.items[0].id,),
             )
 
 
@@ -759,9 +782,9 @@ def test_records_feedback_and_company_block_in_one_exact_transaction(
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
         _insert_prompt_run(connection, run_id, release.id, now)
-        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
-        prepare_daily_review(connection, now.date(), created_at=now)
-        item = load_daily_review(connection, now.date()).current
+        evaluation_id = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+        item = load_review_queue(connection).items[0]
         assert item is not None
         submission = ReviewSubmission(
             review_item_id=item.id,
@@ -809,9 +832,9 @@ def test_records_feedback_and_company_block_in_one_exact_transaction(
             item.evaluation_id,
             item.snapshot_id,
         )
-        review = load_daily_review(connection, now.date())
-        assert review.qualified.reviewed_items[0].decision == "reject"
-        assert review.qualified.reviewed_items[0].note == "Ukraine-based team."
+        queue = load_review_queue(connection)
+        assert queue.items == ()
+        assert queue.reviewed_counts == {now.date(): 1}
 
 
 def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
@@ -821,9 +844,9 @@ def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
         _insert_prompt_run(connection, run_id, release.id, now)
-        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
-        prepare_daily_review(connection, now.date(), created_at=now)
-        item = load_daily_review(connection, now.date()).current
+        evaluation_id = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+        item = load_review_queue(connection).items[0]
         assert item is not None
         submission = ReviewSubmission(
             review_item_id=item.id,
@@ -844,28 +867,6 @@ def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
         assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
 
 
-def test_adjacent_review_days_skip_days_without_frozen_items(
-    authority_schema: str,
-) -> None:
-    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
-    earlier = now - timedelta(days=1)
-    later = now + timedelta(days=1)
-    run_id = uuid4()
-    with _connection(authority_schema) as connection:
-        apply_migrations(connection)
-        release = bootstrap_prompt_release(connection)
-        _insert_prompt_run(connection, run_id, release.id, earlier)
-        _insert_review_decision(connection, run_id, release.id, earlier, 1, "qualified")
-        _insert_review_decision(connection, run_id, release.id, later, 2, "qualified")
-        prepare_daily_review(connection, earlier.date(), created_at=earlier)
-        prepare_daily_review(connection, later.date(), created_at=later)
-        prepare_daily_review(connection, now.date(), created_at=now)
-
-        assert load_adjacent_days(connection, earlier.date()) == (None, later.date())
-        assert load_adjacent_days(connection, later.date()) == (earlier.date(), None)
-        assert load_adjacent_days(connection, now.date()) == (earlier.date(), later.date())
-
-
 def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     run_id = uuid4()
@@ -873,9 +874,9 @@ def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> 
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
         _insert_prompt_run(connection, run_id, release.id, now)
-        _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
-        prepare_daily_review(connection, now.date(), created_at=now)
-        item = load_daily_review(connection, now.date()).current
+        evaluation_id = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+        item = load_review_queue(connection).items[0]
         assert item is not None
         connection.execute(
             """
@@ -920,12 +921,13 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
         _insert_prompt_run(connection, run_id, release.id, now)
-        _insert_review_decision(connection, run_id, release.id, now, 21, "qualified")
+        qualified_decision = _insert_review_decision(
+            connection, run_id, release.id, now, 21, "qualified"
+        )
         _insert_review_decision(connection, run_id, release.id, now, 22, "rejected")
-        prepare_daily_review(connection, now.date(), created_at=now)
-        review = load_daily_review(connection, now.date())
-        qualified = review.qualified.pending[0]
-        rejected = review.rejected_audit.pending[0]
+        assert enqueue_qualified_review_item(connection, qualified_decision, now.date())
+        assert enqueue_rejected_audit_sample(connection, now.date()) == 1
+        qualified, rejected = load_review_queue(connection).items[:2]
         rejected_feedback = record_review(
             connection,
             ReviewSubmission(
@@ -1052,12 +1054,13 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         baseline_release = bootstrap_prompt_release(connection)
         candidate_release_id = _insert_candidate_release(connection, baseline_release.id, now)
         _insert_prompt_run(connection, run_id, baseline_release.id, now)
-        _insert_review_decision(connection, run_id, baseline_release.id, now, 31, "qualified")
+        qualified_decision = _insert_review_decision(
+            connection, run_id, baseline_release.id, now, 31, "qualified"
+        )
         _insert_review_decision(connection, run_id, baseline_release.id, now, 32, "rejected")
-        prepare_daily_review(connection, now.date(), created_at=now)
-        review = load_daily_review(connection, now.date())
-        qualified = review.qualified.pending[0]
-        rejected = review.rejected_audit.pending[0]
+        assert enqueue_qualified_review_item(connection, qualified_decision, now.date())
+        assert enqueue_rejected_audit_sample(connection, now.date()) == 1
+        qualified, rejected = load_review_queue(connection).items[:2]
         negative_feedback = record_review(
             connection,
             ReviewSubmission(

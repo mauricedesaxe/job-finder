@@ -3,13 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from job_finder.review.models import (
-    DailyReview,
-    ReviewItem,
-    ReviewJob,
-    ReviewLaneState,
-    ReviewSubmission,
-)
+from job_finder.review.models import ReviewItem, ReviewJob, ReviewQueue, ReviewSubmission
 from job_finder.review.postgres import deterministic_rejected_sample
 
 
@@ -25,48 +19,39 @@ def test_selects_a_small_stable_rejected_audit_sample() -> None:
     assert set(first).issubset(evaluation_ids)
 
 
-def test_prioritizes_qualified_work_before_the_rejected_audit() -> None:
-    qualified = _item("qualified", 1)
-    audit = _item("rejected_audit", 2)
-    reviewed = _item("qualified", 3, reviewed=True)
-    review = DailyReview(
-        day=date(2026, 9, 10),
-        qualified=ReviewLaneState(
-            lane="qualified",
-            total=2,
-            completed=1,
-            pending=(qualified,),
-            reviewed_items=(reviewed,),
-        ),
-        rejected_audit=ReviewLaneState(
-            lane="rejected_audit", total=1, completed=0, pending=(audit,)
-        ),
+def test_caps_the_rejected_audit_sample_at_the_requested_size() -> None:
+    evaluation_ids = tuple(f"{value:064x}" for value in range(10))
+    review_day = date(2026, 9, 10)
+
+    sample = deterministic_rejected_sample(review_day, evaluation_ids, 2)
+    oversized = deterministic_rejected_sample(review_day, evaluation_ids[:2], 5)
+
+    assert len(sample) == 2
+    assert set(sample).issubset(evaluation_ids)
+    assert set(oversized) == set(evaluation_ids[:2])
+
+
+def test_returns_an_empty_rejected_audit_sample_without_candidates() -> None:
+    assert deterministic_rejected_sample(date(2026, 9, 10), ()) == ()
+
+
+def test_queue_reports_the_reviewed_count_per_day() -> None:
+    review_day = date(2026, 9, 10)
+    queue = ReviewQueue(
+        items=(_item(review_day, 1),),
+        reviewed_counts={review_day: 4, date(2026, 9, 9): 1},
     )
 
-    assert review.current == qualified
-    assert review.completed == 1
-    assert review.total == 3
+    assert queue.reviewed_count(review_day) == 4
+    assert queue.reviewed_count(date(2026, 9, 9)) == 1
+    assert queue.reviewed_count(date(2026, 9, 8)) == 0
 
 
-def test_orders_a_day_by_lane_then_position_across_review_states() -> None:
-    audit_pending = _item("rejected_audit", 1, position=0)
-    qualified_reviewed = _item("qualified", 2, position=1, reviewed=True)
-    qualified_pending = _item("qualified", 3, position=0)
-    review = DailyReview(
-        day=date(2026, 9, 10),
-        qualified=ReviewLaneState(
-            lane="qualified",
-            total=2,
-            completed=1,
-            pending=(qualified_pending,),
-            reviewed_items=(qualified_reviewed,),
-        ),
-        rejected_audit=ReviewLaneState(
-            lane="rejected_audit", total=1, completed=0, pending=(audit_pending,)
-        ),
-    )
+def test_queue_defaults_to_no_items_and_no_reviewed_counts() -> None:
+    queue = ReviewQueue()
 
-    assert review.ordered_items == (qualified_pending, qualified_reviewed, audit_pending)
+    assert queue.items == ()
+    assert queue.reviewed_counts == {}
 
 
 def test_treats_a_blank_feedback_note_as_absent() -> None:
@@ -85,19 +70,18 @@ def test_treats_a_blank_feedback_note_as_absent() -> None:
     assert review.note is None
 
 
-def _item(lane: str, value: int, *, position: int = 0, reviewed: bool = False) -> ReviewItem:
+def _item(review_day: date, value: int) -> ReviewItem:
     return ReviewItem.model_validate(
         {
+            "review_day": review_day.isoformat(),
             "id": UUID(int=value),
             "evaluation_id": f"{value:064x}",
             "snapshot_id": f"{value + 10:064x}",
-            "lane": lane,
-            "position": position,
-            "outcome": "qualified" if lane == "qualified" else "rejected",
-            "matched_profile": "applied-ai-product-engineer" if lane == "qualified" else None,
+            "lane": "qualified",
+            "position": 0,
+            "outcome": "qualified",
+            "matched_profile": "applied-ai-product-engineer",
             "evaluation_reason": "Matches the role.",
-            "reviewed": reviewed,
-            "decision": "pursue" if reviewed else None,
             "job": ReviewJob(
                 title="Applied AI Engineer",
                 company="Acme",

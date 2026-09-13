@@ -2,8 +2,8 @@
 
 Automated job search, evaluation, and review. A Python pipeline discovers job
 listings, filters and evaluates them against target profiles, and surfaces the
-survivors in a daily review where human feedback feeds the next evaluation
-round.
+qualified results in a review queue where human feedback feeds the next
+evaluation round.
 
 ```
 Dagster (schedules, pools, run history)
@@ -14,8 +14,8 @@ Langfuse             ← retryable projections (never a decision input)
 ```
 
 PostgreSQL owns every durable fact: jobs, immutable snapshots, pipeline runs,
-immutable prompt releases, model call attempts, frozen daily review membership,
-and append-only feedback. Dagster owns schedules and run history. Langfuse
+immutable prompt releases, model call attempts, review queue items, and
+append-only feedback. Dagster owns schedules and run history. Langfuse
 receives retryable copies of evaluation traces; a Langfuse outage never changes
 a job decision. `docs/architecture-rewrite.md` records why the system is
 shaped this way.
@@ -56,6 +56,8 @@ uv run pytest contracts                    # authority + Dagster contracts (need
 uv run dagster definitions validate -m job_finder.dagster
 uv run python -m scripts.serve_review      # review app on :8080
 uv run python -m scripts.evaluate_corpus   # full eval pipeline against real OpenRouter
+uv run python -m scripts.backfill_review_queue --dry-run
+                                           # preview items a backfill would create
 ```
 
 Pre-commit runs ruff format, ruff check, basedpyright, and unit tests on every
@@ -89,6 +91,7 @@ Release with generated notes.
 
 - Full discovery: Wednesdays 07:00 UTC
 - Work-queue drain: every 15 minutes
+- Rejected-audit sample: daily 00:15 UTC (samples the just-ended day)
 - Langfuse projection: every minute (self-enables when Langfuse keys are set)
 
 ## Evaluation

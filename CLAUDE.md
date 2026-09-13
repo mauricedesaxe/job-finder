@@ -3,7 +3,7 @@
 Guidance for Claude Code (and any other agent) working in this repository.
 
 This is a single-app Python project deployed to Railway from one Docker image.
-Dagster starts work, FastHTML renders the daily review, PostgreSQL owns every
+Dagster starts work, FastHTML renders the review queue, PostgreSQL owns every
 durable fact, and Langfuse receives retryable projections.
 `docs/architecture-rewrite.md` records the rewrite that produced this shape;
 the legacy Bun/D1/Cloudflare runtime is deleted.
@@ -59,7 +59,7 @@ Langfuse             ← retryable projections (never a decision input)
   - `evaluation/` — prompts, prompt releases, OpenRouter execution, manifests,
     Langfuse projection.
   - `pipeline/` — orchestration runs, claiming, leases.
-  - `review/` — FastHTML app, frozen daily review membership, feedback events.
+  - `review/` — FastHTML app, decision-time review queue, feedback events.
   - `ats/` — Greenhouse/Lever/Ashby/Workable adapters.
   - `migrations/` — ordered SQL migrations applied by `job_finder.database`.
 - `contracts/` — tests that pin the PostgreSQL authority contract and Dagster
@@ -92,8 +92,8 @@ Langfuse             ← retryable projections (never a decision input)
   an exact version. No `>=` ranges for runtime deps. Updates are deliberate,
   lockfile-checked, and land in their own commit.
 - **Modules are domain models.** A file's name describes the subject it owns
-  (`prompt_releases.py`, `title_deduplication.py`, `frozen daily reviews` live
-  in `review/postgres.py`). If a candidate filename describes a role rather
+  (`prompt_releases.py`, `title_deduplication.py`, the review queue live in
+  `review/postgres.py`). If a candidate filename describes a role rather
   than a piece of the domain, push back on the design.
 
 ## Type system
@@ -168,8 +168,12 @@ profiles, frozen fixtures — enforces decisions; the LLM only informs them.
   snapshot, decision, feedback event, or projection.
 - **Terminal results commit atomically** with their pending projections; the
   projection drain removes them after confirmed delivery.
-- **Daily review membership is frozen** (`review_days`): the day's items are
-  chosen exactly once; later-arriving decisions wait for the next day.
+- **The review queue fills at decision time.** A qualified decision enters
+  `review_items` for its UTC decision date in the same transaction; a daily
+  00:15 UTC job samples three rejected decisions from the just-ended day for
+  audit. The app lists unreviewed items grouped by day, and a review event
+  removes the item from the queue. `review_days` is retired but still present;
+  nothing reads or writes it.
 - **Feedback is append-only** and points at the exact decision and snapshot
   shown in FastHTML. Raw feedback does not become an evaluation answer without
   curation.
@@ -183,8 +187,8 @@ profiles, frozen fixtures — enforces decisions; the LLM only informs them.
   and `JOB_FINDER_DAGSTER_POSTGRES_DSN`); domain tables stay in `public`. The
   two namespaces must not mix — both name a `jobs` table.
 - Schedules: full discovery Wednesdays 07:00 UTC, work-queue drain every 15
-  minutes, Langfuse projection every minute (self-enables when Langfuse keys
-  are present).
+  minutes, rejected-audit sample daily 00:15 UTC, Langfuse projection every
+  minute (self-enables when Langfuse keys are present).
 
 ## Deployment
 

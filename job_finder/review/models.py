@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from typing import ClassVar, Literal, Self
 from uuid import UUID
@@ -43,6 +44,7 @@ class ReviewJob(ReviewModel):
 
 
 class ReviewItem(ReviewModel):
+    review_day: date
     id: UUID
     evaluation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -55,6 +57,7 @@ class ReviewItem(ReviewModel):
     reviewed: bool = False
     decision: ReviewDecision | None = None
     note: str | None = None
+    block_company: bool = False
 
     @model_validator(mode="after")
     def lane_matches_outcome(self) -> Self:
@@ -65,68 +68,19 @@ class ReviewItem(ReviewModel):
         return self
 
 
-class ReviewLaneState(ReviewModel):
-    lane: ReviewLane
-    total: int = Field(ge=0)
-    completed: int = Field(ge=0)
-    pending: tuple[ReviewItem, ...]
+class ReviewQueue(ReviewModel):
+    items: tuple[ReviewItem, ...] = ()
     reviewed_items: tuple[ReviewItem, ...] = ()
+    reviewed_counts: Mapping[date, int] = {}
 
     @model_validator(mode="after")
-    def counts_and_items_match(self) -> Self:
-        if self.completed + len(self.pending) != self.total:
-            raise ValueError("Review lane counts must account for every item")
-        if self.completed != len(self.reviewed_items):
-            raise ValueError("Completed count must match the reviewed items")
-        if any(item.lane != self.lane for item in self.pending):
-            raise ValueError("Pending review items must belong to their lane")
-        if any(not item.reviewed for item in self.reviewed_items):
-            raise ValueError("Reviewed items must carry a recorded decision")
+    def counts_are_not_negative(self) -> ReviewQueue:
+        if any(count < 0 for count in self.reviewed_counts.values()):
+            raise ValueError("Reviewed counts cannot be negative")
         return self
 
-
-class DailyReview(ReviewModel):
-    day: date
-    qualified: ReviewLaneState
-    rejected_audit: ReviewLaneState
-
-    @model_validator(mode="after")
-    def require_named_lanes(self) -> DailyReview:
-        if self.qualified.lane != "qualified":
-            raise ValueError("Qualified review state has the wrong lane")
-        if self.rejected_audit.lane != "rejected_audit":
-            raise ValueError("Rejected audit state has the wrong lane")
-        return self
-
-    @property
-    def total(self) -> int:
-        return self.qualified.total + self.rejected_audit.total
-
-    @property
-    def completed(self) -> int:
-        return self.qualified.completed + self.rejected_audit.completed
-
-    @property
-    def current(self) -> ReviewItem | None:
-        if self.qualified.pending:
-            return self.qualified.pending[0]
-        if self.rejected_audit.pending:
-            return self.rejected_audit.pending[0]
-        return None
-
-    @property
-    def ordered_items(self) -> tuple[ReviewItem, ...]:
-        return tuple(
-            sorted(
-                (
-                    *self.qualified.pending,
-                    *self.qualified.reviewed_items,
-                    *self.rejected_audit.pending,
-                    *self.rejected_audit.reviewed_items,
-                ),
-                key=lambda item: (item.lane != "qualified", item.position),
-            )
-        )
+    def reviewed_count(self, review_day: date) -> int:
+        return self.reviewed_counts.get(review_day, 0)
 
 
 class ReviewSubmission(ReviewModel):

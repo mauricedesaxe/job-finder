@@ -41,6 +41,7 @@ from job_finder.pipeline.state import (
     fail_orchestration_run,
     prepare_orchestration_run,
 )
+from job_finder.review.postgres import enqueue_rejected_audit_sample
 
 HeartbeatSender = Callable[[str], None]
 
@@ -112,6 +113,21 @@ def job_work_queue_cycle(
             _fail_run(connection, run, error)
             raise
     metadata = _processing_metadata(processing)
+    context.add_output_metadata(metadata)
+    return metadata
+
+
+@asset(
+    pool="job_finder_pipeline",
+    retry_policy=RetryPolicy(max_retries=2, delay=60),
+)
+def review_audit_sample(
+    context: AssetExecutionContext, job_finder: JobFinderResource
+) -> dict[str, object]:
+    review_day = (datetime.now(UTC) - timedelta(days=1)).date()
+    with job_finder.connection() as connection:
+        enqueued = enqueue_rejected_audit_sample(connection, review_day=review_day)
+    metadata: dict[str, object] = {"enqueued": enqueued, "review_day": review_day.isoformat()}
     context.add_output_metadata(metadata)
     return metadata
 
@@ -229,6 +245,13 @@ job_work_queue_job = define_asset_job("job_work_queue", selection=[job_work_queu
 langfuse_projection_job = define_asset_job(
     "langfuse_projection", selection=[langfuse_projection_queue.key]
 )
+review_sample_job = define_asset_job("review_sample", selection=[review_audit_sample.key])
+review_sample_schedule = ScheduleDefinition(
+    job=review_sample_job,
+    cron_schedule="15 0 * * *",
+    execution_timezone="UTC",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
 job_finder_schedule = ScheduleDefinition(
     job=job_finder_job,
     cron_schedule="0 7 * * *",
@@ -253,11 +276,22 @@ langfuse_projection_schedule = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[job_finder_cycle, job_work_queue_cycle, langfuse_projection_queue],
-    jobs=[job_finder_job, job_work_queue_job, langfuse_projection_job],
+    assets=[
+        job_finder_cycle,
+        job_work_queue_cycle,
+        review_audit_sample,
+        langfuse_projection_queue,
+    ],
+    jobs=[
+        job_finder_job,
+        job_work_queue_job,
+        review_sample_job,
+        langfuse_projection_job,
+    ],
     schedules=[
         job_finder_schedule,
         job_work_queue_schedule,
+        review_sample_schedule,
         langfuse_projection_schedule,
     ],
     resources={"job_finder": JobFinderResource()},

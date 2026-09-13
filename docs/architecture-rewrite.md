@@ -18,14 +18,17 @@ PostgreSQL owns these facts:
 - Pipeline runs, attempts, idempotency keys, and terminal receipts.
 - Immutable prompt versions and complete prompt releases.
 - Model call attempts and accepted structured results.
-- Daily review membership and append-only feedback.
+- The decision-time review queue and append-only feedback.
 - Company blocks and application events.
 - Frozen evaluation manifests, case results, and promotion decisions.
 - Pending Langfuse projections.
 
 Dagster owns schedules, pools, sensors, and operational run history. Dagster does not own job state or evaluation provenance.
 
-FastHTML reads only PostgreSQL domain operations. The main screen shows every new qualified job. A separate section shows a small deterministic sample of rejected jobs. The sample makes false negatives visible without filling the main review list with rejected jobs.
+FastHTML reads only PostgreSQL domain operations. The main screen lists the
+unreviewed queue grouped by review day, qualified jobs before a small
+deterministic sample of rejected jobs from the same day. The sample makes
+false negatives visible without filling the review list with rejected jobs.
 
 ## Language choice
 
@@ -50,7 +53,7 @@ The rewrite does not copy Chartly's generic artifact graph. Job Finder needs dir
 
 1. Dagster discovers and processes jobs.
 2. PostgreSQL stores the exact snapshot, prompt release, criterion results, and terminal decision.
-3. The app creates an immutable daily review list.
+3. A qualified decision enters the review queue for its decision date; a daily 00:15 UTC job samples three rejected decisions from the just-ended day.
 4. FastHTML records `pursue`, `reject`, or `unsure` feedback against one review item.
 5. Optional notes and company blocks enter the same transaction.
 6. A curation action includes or excludes feedback from the next evaluation manifest.

@@ -67,6 +67,7 @@ from job_finder.pipeline.state import (
     register_discoveries,
     terminally_fail_job_claim,
 )
+from job_finder.review import enqueue_qualified_review_item
 
 POLICY_VERSION = "orchestration-v1"
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -521,7 +522,7 @@ def _claim_completing_store(connection: Connection, claim: JobWorkClaim, now: No
 
     def persist(decision: TerminalDecision) -> PersistedDecision:
         with connection.transaction():
-            persisted = store.persist(decision)
+            persisted = store.persist(decision, enqueue_review_item=enqueue_qualified_review_item)
             if not complete_job_claim(
                 connection,
                 claim,

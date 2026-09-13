@@ -11,11 +11,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import psycopg
 
 from job_finder.review.models import (
-    DailyReview,
     ReviewConflict,
     ReviewItem,
-    ReviewLane,
-    ReviewLaneState,
+    ReviewQueue,
     ReviewSaved,
     ReviewSubmission,
     ReviewSubmitResult,
@@ -24,161 +22,160 @@ from job_finder.review.models import (
 REJECTED_AUDIT_SIZE = 3
 Connection = psycopg.Connection[tuple[object, ...]]
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
-Clock = Callable[[], datetime]
 
 
 @dataclass(frozen=True)
 class ReviewService:
-    open_day: Callable[[date], DailyReview]
+    review_queue: Callable[[], ReviewQueue]
     submit: Callable[[ReviewSubmission], ReviewSubmitResult]
-    adjacent_days: Callable[[date], tuple[date | None, date | None]] = lambda _day: (None, None)
 
 
-def postgres_review_service(
-    connect: ConnectionFactory,
-    *,
-    now: Clock = lambda: datetime.now(UTC),
-    rejected_audit_size: int = REJECTED_AUDIT_SIZE,
-) -> ReviewService:
-    def open_day(review_day: date) -> DailyReview:
+def postgres_review_service(connect: ConnectionFactory) -> ReviewService:
+    def review_queue() -> ReviewQueue:
         with connect() as connection:
-            prepare_daily_review(
-                connection,
-                review_day,
-                created_at=now(),
-                rejected_audit_size=rejected_audit_size,
-            )
-            return load_daily_review(connection, review_day)
+            return load_review_queue(connection)
 
     def submit(review: ReviewSubmission) -> ReviewSubmitResult:
         with connect() as connection:
             return record_review(connection, review)
 
-    def adjacent_days(review_day: date) -> tuple[date | None, date | None]:
-        with connect() as connection:
-            return load_adjacent_days(connection, review_day)
-
-    return ReviewService(open_day=open_day, submit=submit, adjacent_days=adjacent_days)
+    return ReviewService(review_queue=review_queue, submit=submit)
 
 
-def prepare_daily_review(
+def enqueue_qualified_review_item(
     connection: Connection,
+    evaluation_id: str,
     review_day: date,
-    *,
-    created_at: datetime,
-    rejected_audit_size: int = REJECTED_AUDIT_SIZE,
-) -> None:
-    _require_autocommit(connection)
-    if rejected_audit_size < 0:
-        raise ValueError("Rejected audit size cannot be negative")
-    with connection.transaction():
-        created = connection.execute(
-            """
-            INSERT INTO review_days (review_day, created_at)
-            VALUES (%s, %s)
-            ON CONFLICT (review_day) DO NOTHING
-            RETURNING review_day
-            """,
-            (review_day, created_at),
-        ).fetchone()
-        if created is None:
-            return
-        _create_qualified_items(connection, review_day, created_at)
-        _create_rejected_audit_items(
-            connection,
-            review_day,
-            created_at,
-            rejected_audit_size,
-        )
-
-
-def thaw_review_day(connection: Connection, review_day: date) -> tuple[int, int]:
-    _require_autocommit(connection)
-    with connection.transaction():
-        row = connection.execute(
-            """
-            SELECT count(*)
-            FROM review_events e
-            JOIN review_items i ON i.id = e.review_item_id
-            WHERE i.review_day = %s
-            """,
-            (review_day,),
-        ).fetchone()
-        if row is not None and int(str(row[0])) > 0:
-            raise ValueError(
-                f"Review day {review_day.isoformat()} has submitted reviews and cannot be thawed"
-            )
-        connection.execute("ALTER TABLE review_days DISABLE TRIGGER review_days_are_immutable")
-        deleted_days = connection.execute(
-            "DELETE FROM review_days WHERE review_day = %s",
-            (review_day,),
-        ).rowcount
-        connection.execute("ALTER TABLE review_items DISABLE TRIGGER review_items_are_immutable")
-        deleted_items = connection.execute(
-            "DELETE FROM review_items WHERE review_day = %s",
-            (review_day,),
-        ).rowcount
-        connection.execute("ALTER TABLE review_items ENABLE TRIGGER review_items_are_immutable")
-        connection.execute("ALTER TABLE review_days ENABLE TRIGGER review_days_are_immutable")
-    return (deleted_items, deleted_days)
-
-
-def load_daily_review(connection: Connection, review_day: date) -> DailyReview:
-    _require_autocommit(connection)
-    rows = connection.execute(
-        """
-        SELECT i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
-               d.outcome, d.matched_profile, d.reason,
-               s.title, s.company, s.raw_url, s.source, s.description,
-               s.location, s.keywords, s.date_posted,
-               (e.id IS NOT NULL) AS reviewed, e.decision, e.note
-        FROM review_items i
-        JOIN evaluation_decisions d ON d.id = i.evaluation_id
-        JOIN job_snapshots s ON s.id = d.snapshot_id
-        LEFT JOIN LATERAL (
-          SELECT ev.id, ev.decision, ev.note
-          FROM review_events ev
-          WHERE ev.review_item_id = i.id
-          ORDER BY ev.created_at DESC, ev.id DESC
-          LIMIT 1
-        ) e ON TRUE
-        WHERE i.review_day = %s
-        ORDER BY CASE i.lane WHEN 'qualified' THEN 0 ELSE 1 END, i.position
-        """,
-        (review_day,),
-    ).fetchall()
-    items = tuple(_parse_review_item(row) for row in rows)
-    return DailyReview(
-        day=review_day,
-        qualified=_lane_state("qualified", items),
-        rejected_audit=_lane_state("rejected_audit", items),
-    )
-
-
-def load_adjacent_days(connection: Connection, review_day: date) -> tuple[date | None, date | None]:
-    """Days a day-arrow may hop to: only days that actually froze review items."""
+) -> bool:
     _require_autocommit(connection)
     row = connection.execute(
         """
-        SELECT
-          (SELECT max(review_day) FROM review_items WHERE review_day < %s),
-          (SELECT min(review_day) FROM review_items WHERE review_day > %s)
+        SELECT COALESCE(max(position), -1)
+        FROM review_items
+        WHERE review_day = %s AND lane = 'qualified'
         """,
-        (review_day, review_day),
+        (review_day,),
     ).fetchone()
     if row is None:
-        return (None, None)
-    return (_as_date(row[0]), _as_date(row[1]))
+        raise RuntimeError("Could not read qualified review position")
+    item_id = uuid5(
+        NAMESPACE_URL,
+        f"daily-review:{review_day.isoformat()}:qualified:{evaluation_id}",
+    )
+    inserted = connection.execute(
+        """
+        INSERT INTO review_items (
+          id, evaluation_id, review_day, lane, position, created_at
+        ) VALUES (%s, %s, %s, 'qualified', %s, %s)
+        ON CONFLICT (evaluation_id) DO NOTHING
+        """,
+        (item_id, evaluation_id, review_day, int(str(row[0])) + 1, datetime.now(UTC)),
+    ).rowcount
+    return inserted == 1
 
 
-def _as_date(value: object) -> date | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return date.fromisoformat(str(value)[:10])
+def enqueue_rejected_audit_sample(
+    connection: Connection,
+    review_day: date,
+    size: int = REJECTED_AUDIT_SIZE,
+) -> int:
+    _require_autocommit(connection)
+    if size < 0:
+        raise ValueError("Rejected audit size cannot be negative")
+    rows = connection.execute(
+        """
+        SELECT d.id
+        FROM evaluation_decisions d
+        LEFT JOIN review_items i ON i.evaluation_id = d.id
+        WHERE d.outcome = 'rejected'
+          AND (d.created_at AT TIME ZONE 'UTC')::date = %s
+          AND i.id IS NULL
+        ORDER BY d.id
+        """,
+        (review_day,),
+    ).fetchall()
+    candidates = tuple(str(row[0]) for row in rows)
+    created_at = datetime.now(UTC)
+    inserted = 0
+    for position, evaluation_id in enumerate(
+        deterministic_rejected_sample(review_day, candidates, size)
+    ):
+        item_id = uuid5(
+            NAMESPACE_URL,
+            f"daily-review:{review_day.isoformat()}:rejected_audit:{evaluation_id}",
+        )
+        inserted += connection.execute(
+            """
+            INSERT INTO review_items (
+              id, evaluation_id, review_day, lane, position, created_at
+            ) VALUES (%s, %s, %s, 'rejected_audit', %s, %s)
+            ON CONFLICT (evaluation_id) DO NOTHING
+            """,
+            (item_id, evaluation_id, review_day, position, created_at),
+        ).rowcount
+    return inserted
+
+
+def load_review_queue(connection: Connection) -> ReviewQueue:
+    _require_autocommit(connection)
+    rows = connection.execute(
+        """
+        SELECT i.review_day, i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
+               d.outcome, d.matched_profile, d.reason,
+               s.title, s.company, s.raw_url, s.source, s.description,
+               s.location, s.keywords, s.date_posted
+        FROM review_items i
+        JOIN evaluation_decisions d ON d.id = i.evaluation_id
+        JOIN job_snapshots s ON s.id = d.snapshot_id
+        WHERE NOT EXISTS (
+          SELECT 1 FROM review_events ev WHERE ev.review_item_id = i.id
+        )
+        ORDER BY i.review_day DESC,
+                 CASE i.lane WHEN 'qualified' THEN 0 ELSE 1 END,
+                 i.position, i.created_at
+        """
+    ).fetchall()
+    reviewed = connection.execute(
+        """
+        SELECT i.review_day, i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
+               d.outcome, d.matched_profile, d.reason,
+               s.title, s.company, s.raw_url, s.source, s.description,
+               s.location, s.keywords, s.date_posted,
+               latest.decision, latest.note, latest.block_company
+        FROM review_items i
+        JOIN evaluation_decisions d ON d.id = i.evaluation_id
+        JOIN job_snapshots s ON s.id = d.snapshot_id
+        JOIN LATERAL (
+          SELECT e.decision, e.note, e.block_company
+          FROM review_events e
+          WHERE e.review_item_id = i.id
+          ORDER BY e.created_at DESC, e.id DESC
+          LIMIT 1
+        ) latest ON TRUE
+        WHERE i.review_day >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY i.review_day DESC, i.position, i.created_at
+        """
+    ).fetchall()
+    reviewed_items = tuple(_parse_review_item(row, row[17:]) for row in reviewed)
+    older_counts = connection.execute(
+        """
+        SELECT review_day, count(*)
+        FROM review_items
+        WHERE review_day < CURRENT_DATE - INTERVAL '30 days'
+          AND EXISTS (SELECT 1 FROM review_events ev WHERE ev.review_item_id = review_items.id)
+        GROUP BY review_day
+        """
+    ).fetchall()
+    reviewed_counts: dict[date, int] = {
+        date.fromisoformat(str(row[0])[:10]): int(str(row[1])) for row in older_counts
+    }
+    for item in reviewed_items:
+        reviewed_counts[item.review_day] = reviewed_counts.get(item.review_day, 0) + 1
+    return ReviewQueue(
+        items=tuple(_parse_review_item(row) for row in rows),
+        reviewed_items=reviewed_items,
+        reviewed_counts=reviewed_counts,
+    )
 
 
 def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSubmitResult:
@@ -265,150 +262,36 @@ def deterministic_rejected_sample(
     return tuple(ranked[:size])
 
 
-def _create_qualified_items(connection: Connection, review_day: date, created_at: datetime) -> None:
-    row = connection.execute(
-        """
-        SELECT COALESCE(max(position), -1)
-        FROM review_items
-        WHERE review_day = %s AND lane = 'qualified'
-        """,
-        (review_day,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Could not read qualified review position")
-    position = int(str(row[0])) + 1
-    candidates = connection.execute(
-        """
-        SELECT d.id
-        FROM evaluation_decisions d
-        LEFT JOIN review_items i ON i.evaluation_id = d.id
-        WHERE d.outcome = 'qualified'
-          AND (d.created_at AT TIME ZONE 'UTC')::date = %s
-          AND i.id IS NULL
-        ORDER BY d.created_at, d.id
-        """,
-        (review_day,),
-    ).fetchall()
-    for row in candidates:
-        evaluation_id = str(row[0])
-        _insert_review_item(
-            connection,
-            evaluation_id,
-            review_day,
-            "qualified",
-            position,
-            created_at,
-        )
-        position += 1
-
-
-def _create_rejected_audit_items(
-    connection: Connection,
-    review_day: date,
-    created_at: datetime,
-    rejected_audit_size: int,
-) -> None:
-    row = connection.execute(
-        """
-        SELECT count(*)
-        FROM review_items
-        WHERE review_day = %s AND lane = 'rejected_audit'
-        """,
-        (review_day,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Could not read rejected audit membership")
-    if int(str(row[0])) > 0 or rejected_audit_size == 0:
-        return
-    rows = connection.execute(
-        """
-        SELECT d.id
-        FROM evaluation_decisions d
-        LEFT JOIN review_items i ON i.evaluation_id = d.id
-        WHERE d.outcome = 'rejected'
-          AND (d.created_at AT TIME ZONE 'UTC')::date = %s
-          AND i.id IS NULL
-        ORDER BY d.id
-        """,
-        (review_day,),
-    ).fetchall()
-    candidates = tuple(str(row[0]) for row in rows)
-    for position, evaluation_id in enumerate(
-        deterministic_rejected_sample(review_day, candidates, rejected_audit_size)
-    ):
-        _insert_review_item(
-            connection,
-            evaluation_id,
-            review_day,
-            "rejected_audit",
-            position,
-            created_at,
-        )
-
-
-def _insert_review_item(
-    connection: Connection,
-    evaluation_id: str,
-    review_day: date,
-    lane: ReviewLane,
-    position: int,
-    created_at: datetime,
-) -> None:
-    item_id = uuid5(
-        NAMESPACE_URL,
-        f"daily-review:{review_day.isoformat()}:{lane}:{evaluation_id}",
-    )
-    _ = connection.execute(
-        """
-        INSERT INTO review_items (
-          id, evaluation_id, review_day, lane, position, created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (evaluation_id) DO NOTHING
-        """,
-        (item_id, evaluation_id, review_day, lane, position, created_at),
-    )
-
-
-def _parse_review_item(row: tuple[object, ...]) -> ReviewItem:
-    reviewed = bool(row[16])
-    return ReviewItem.model_validate(
-        {
-            "id": row[0],
-            "evaluation_id": row[1],
-            "snapshot_id": row[2],
-            "lane": row[3],
-            "position": row[4],
-            "outcome": row[5],
-            "matched_profile": row[6],
-            "evaluation_reason": row[7],
-            "job": {
-                "title": row[8],
-                "company": row[9],
-                "url": row[10],
-                "source": row[11],
-                "description": row[12],
-                "location": row[13],
-                "keywords": row[14],
-                "date_posted": row[15],
-            },
-            "reviewed": reviewed,
-            "decision": row[17] if reviewed else None,
-            "note": row[18] if reviewed else None,
-        }
-    )
-
-
-def _lane_state(lane: ReviewLane, items: tuple[ReviewItem, ...]) -> ReviewLaneState:
-    lane_items = tuple(item for item in items if item.lane == lane)
-    pending = tuple(item for item in lane_items if not item.reviewed)
-    reviewed = tuple(item for item in lane_items if item.reviewed)
-    return ReviewLaneState(
-        lane=lane,
-        total=len(lane_items),
-        completed=len(reviewed),
-        pending=pending,
-        reviewed_items=reviewed,
-    )
+def _parse_review_item(
+    row: tuple[object, ...], event: tuple[object, ...] | None = None
+) -> ReviewItem:
+    fields: dict[str, object] = {
+        "review_day": row[0],
+        "id": row[1],
+        "evaluation_id": row[2],
+        "snapshot_id": row[3],
+        "lane": row[4],
+        "position": row[5],
+        "outcome": row[6],
+        "matched_profile": row[7],
+        "evaluation_reason": row[8],
+        "job": {
+            "title": row[9],
+            "company": row[10],
+            "url": row[11],
+            "source": row[12],
+            "description": row[13],
+            "location": row[14],
+            "keywords": row[15],
+            "date_posted": row[16],
+        },
+    }
+    if event is not None:
+        fields["reviewed"] = True
+        fields["decision"] = event[0]
+        fields["note"] = event[1]
+        fields["block_company"] = event[2]
+    return ReviewItem.model_validate(fields)
 
 
 def _block_company(

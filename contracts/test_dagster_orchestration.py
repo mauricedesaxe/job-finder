@@ -391,9 +391,11 @@ def test_ats_rejection_and_claim_completion_commit_together(authority_schema: st
             """,
             (raw_url,),
         ).fetchone()
+        review_item_count = connection.execute("SELECT count(*) FROM review_items").fetchone()
 
     assert summary.terminal_count == 1
     assert stored == ("rejected", "ats_structural", "completed", True)
+    assert review_item_count == (0,)
 
 
 def test_structural_rejection_persists_a_terminal_decision(authority_schema: str) -> None:
@@ -863,6 +865,16 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
                    (SELECT count(*) FROM processing_attempts)
             """
         ).fetchone()
+        review_item = connection.execute(
+            """
+            SELECT i.lane, i.review_day, i.evaluation_id = d.id
+            FROM review_items i
+            JOIN evaluation_decisions d ON d.id = i.evaluation_id
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            WHERE s.raw_url = %s
+            """,
+            (raw_url,),
+        ).fetchone()
 
     assert summary.terminal_count == 1
     assert stored == (
@@ -875,6 +887,7 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
         "Remote",
     )
     assert counts == (7, 8)
+    assert review_item == ("qualified", now.date(), True)
 
 
 def _prepare_run(connection: psycopg.Connection[tuple[object, ...]], key: str, now: datetime):
