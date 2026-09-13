@@ -36,18 +36,21 @@ def main() -> None:
     settings = DatabaseSettings.from_environment()
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         _ = apply_migrations(connection)
-        rows = connection.execute(
-            """
-            SELECT d.id, (d.created_at AT TIME ZONE 'UTC')::date
-            FROM evaluation_decisions d
-            LEFT JOIN review_items i ON i.evaluation_id = d.id
-            WHERE d.outcome = 'qualified' AND i.id IS NULL
-            ORDER BY (d.created_at AT TIME ZONE 'UTC')::date, d.created_at, d.id
-            """
-        ).fetchall()
+        rows: list[tuple[str, date]] = [
+            (str(row[0]), _as_date(row[1]))
+            for row in connection.execute(
+                """
+                SELECT d.id, (d.created_at AT TIME ZONE 'UTC')::date
+                FROM evaluation_decisions d
+                LEFT JOIN review_items i ON i.evaluation_id = d.id
+                WHERE d.outcome = 'qualified' AND i.id IS NULL
+                ORDER BY (d.created_at AT TIME ZONE 'UTC')::date, d.created_at, d.id
+                """
+            ).fetchall()
+        ]
         if arguments.dry_run:
             print(f"Dry run: {len(rows)} qualified decision(s) would enter the review queue")
-            for row in rows[:20]:
+            for evaluation_id, review_day in rows[:20]:
                 sample = connection.execute(
                     """
                     SELECT s.company, s.title
@@ -55,14 +58,14 @@ def main() -> None:
                     JOIN job_snapshots s ON s.id = d.snapshot_id
                     WHERE d.id = %s
                     """,
-                    (str(row[0]),),
+                    (evaluation_id,),
                 ).fetchone()
                 if sample is not None:
-                    print(f"  {row[1]}  {sample[0]}  |  {sample[1]}")
+                    print(f"  {review_day}  {sample[0]}  |  {sample[1]}")
             if len(rows) > 20:
                 print(f"  ... and {len(rows) - 20} more")
             return
-        positions = {
+        positions: dict[str, int] = {
             _as_date(row[0]).isoformat(): int(str(row[1]))
             for row in connection.execute(
                 """
@@ -74,9 +77,7 @@ def main() -> None:
             ).fetchall()
         }
         inserted = 0
-        for row in rows:
-            evaluation_id = str(row[0])
-            review_day = _as_date(row[1])
+        for evaluation_id, review_day in rows:
             day = review_day.isoformat()
             positions[day] = positions.get(day, -1) + 1
             item_id = uuid5(
