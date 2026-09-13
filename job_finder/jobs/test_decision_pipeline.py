@@ -249,18 +249,21 @@ def test_maps_active_company_policies_to_terminal_outcomes() -> None:
         ) -> CompanyPolicy:
             return value
 
-        store = DecisionStore(
-            find_completed=lambda _key: None,
-            existing_titles=lambda _company: (),
-            active_company_policy=active_policy,
-            persist=lambda decision: PersistedDecision(
+        def persist(decision: TerminalDecision) -> PersistedDecision:
+            return PersistedDecision(
                 decision_id="d" * 64,
                 snapshot_id="s" * 64,
                 outcome=decision.outcome,
                 matched_profile=decision.matched_profile,
                 reason=decision.reason,
                 job=decision.enriched,
-            ),
+            )
+
+        store = DecisionStore(
+            find_completed=lambda _key: None,
+            existing_titles=lambda _company: (),
+            active_company_policy=active_policy,
+            persist=persist,
         )
         result = process_qualified_job(
             _listing(),
