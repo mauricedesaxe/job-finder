@@ -32,6 +32,7 @@ class _AshbyJob(_AshbyWireModel):
     )
     workplace_type: str | None = Field(default=None, alias="workplaceType")
     address: _AshbyAddress | None = None
+    description_plain: str | None = Field(default=None, alias="descriptionPlain")
 
 
 class _AshbyResponse(_AshbyWireModel):
@@ -68,4 +69,5 @@ def parse_ashby_job(payload: object, job_id: str) -> AtsAvailable | None:
         locations=unique_locations(primary, secondary),
         workplace_type=normalize_workplace_type(job.workplace_type),
         country=country,
+        description=job.description_plain,
     )

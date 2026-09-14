@@ -19,6 +19,7 @@ class AtsAvailable(AtsModel):
     locations: tuple[str, ...]
     workplace_type: WorkplaceType | None
     country: str | None
+    description: str | None = None
 
 
 class AtsUnavailable(AtsModel):

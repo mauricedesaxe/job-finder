@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import unescape
+from html.parser import HTMLParser
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, StrictInt
@@ -25,6 +27,7 @@ class _GreenhouseJob(_GreenhouseWireModel):
     id: StrictInt
     location: _GreenhouseLocation | None = None
     offices: list[_GreenhouseOffice] | None = None
+    content: str | None = None
 
 
 def parse_greenhouse_url(url: str) -> tuple[str, str] | None:
@@ -58,7 +61,23 @@ def parse_greenhouse_job(payload: object) -> AtsAvailable:
         locations=unique_locations(primary, office_locations),
         workplace_type=None,
         country=country,
+        description=_strip_html(unescape(job.content)) if job.content else None,
     )
+
+
+class _TextCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        _ = self.parts.append(data)
+
+
+def _strip_html(markup: str) -> str:
+    collector = _TextCollector()
+    _ = collector.feed(markup)
+    return " ".join(collector.parts).strip()
 
 
 def _country_from_location(location: str | None) -> str | None:
