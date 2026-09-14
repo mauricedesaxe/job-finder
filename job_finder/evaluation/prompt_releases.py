@@ -20,7 +20,7 @@ from pydantic import (
 from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
 from job_finder.evaluation.prompts import PROMPTS, PromptDefinition, PromptPhase
 
-RELEASE_NAME = "release-2026-09-12-1"
+RELEASE_NAME = "release-2026-09-14-1"
 MODEL = "google/gemini-2.5-flash"
 EVALUATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "type": "object",
@@ -38,6 +38,17 @@ ENRICHMENT_OUTPUT_SCHEMA: dict[str, JsonValue] = {
         "company": {"type": "string"},
         "description": {"type": "string"},
         "location": {"type": "string"},
+        "compensation": {
+            "type": "object",
+            "properties": {
+                "minimum": {"type": "integer"},
+                "maximum": {"type": "integer"},
+                "currency": {"type": "string"},
+                "period": {"enum": ["year", "month", "week", "day", "hour"]},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
     },
     "required": ["title", "company", "description", "location"],
     "additionalProperties": False,

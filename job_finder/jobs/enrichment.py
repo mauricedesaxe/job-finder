@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from job_finder.ats.models import CompensationObservation
 from job_finder.evaluation.models import (
     OperationalFailure,
     EvaluationModel,
@@ -23,6 +24,7 @@ class EnrichedJob(EvaluationModel):
     company: str
     description: str
     location: str
+    compensation: CompensationObservation | None = None
 
 
 def enrich_job(

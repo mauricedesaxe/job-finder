@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
+from job_finder.ats.models import CompensationObservation
 from job_finder.evaluation.models import (
     RetryableOperationalError,
     TerminalOperationalError,
@@ -52,6 +53,12 @@ def test_calls_the_enrichment_prompt_with_the_legacy_input_shape() -> None:
                 "company": "Acme",
                 "description": "## Overview\nBuild things.",
                 "location": "Remote",
+                "compensation": {
+                    "minimum": 80000,
+                    "maximum": 100000,
+                    "currency": "EUR",
+                    "period": "year",
+                },
             },
         )
 
@@ -66,6 +73,9 @@ def test_calls_the_enrichment_prompt_with_the_legacy_input_shape() -> None:
 
     assert isinstance(result, PromptAccepted)
     assert result.output.company == "Acme"
+    assert result.output.compensation == CompensationObservation(
+        minimum=80000, maximum=100000, currency="EUR", period="year"
+    )
     assert sent_body["tool_choice"] == {
         "type": "function",
         "function": {"name": "enrich_job"},
