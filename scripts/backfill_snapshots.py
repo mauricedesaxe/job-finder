@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import psycopg
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable
@@ -27,10 +28,21 @@ from job_finder.database import apply_migrations
 from job_finder.jobs.scraping import detect_source
 
 ATS_SOURCES = frozenset(("lever", "ashbyhq", "greenhouse", "workable"))
+WORKER_COUNT = 12
 
 
 class _Arguments(argparse.Namespace):
     dry_run: bool = False
+
+
+class _Snapshot(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    snapshot_id: str
+    raw_url: str
+    title: str
+    body_length: int
+    has_compensation: bool
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -43,10 +55,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv, namespace=_Arguments())
     dry_run = bool(arguments.dry_run)
     settings = BackfillSettings.from_environment()
-    ashby_cache: dict[str, JsonValue] = {}
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         applied = apply_migrations(connection)
-        print(f"migrations applied: {len(applied)}")
+        print(f"migrations applied: {len(applied)}", flush=True)
         rows: list[tuple[object, ...]] = connection.execute(
             """
             SELECT s.id, s.raw_url, s.title, length(s.description),
@@ -55,38 +66,56 @@ def main(argv: Sequence[str] | None = None) -> int:
             ORDER BY s.observed_at
             """
         ).fetchall()
-        print(f"snapshots scanned: {len(rows)}")
-        planned = 0
-        written = 0
+        candidates: list[_Snapshot] = []
         for row in rows:
-            snapshot_id = str(row[0])
             raw_url = str(row[1])
-            title = str(row[2])
-            body_length = int(str(row[3]))
-            has_compensation = bool(row[4])
             if detect_source(raw_url) not in ATS_SOURCES:
                 continue
-            evidence = fetch_ats_data(raw_url, title=title, ashby_cache=ashby_cache)
-            if not isinstance(evidence, AtsAvailable):
-                continue
-            correction = _plan_correction(
-                snapshot_id=snapshot_id,
-                body_length=body_length,
-                has_compensation=has_compensation,
-                evidence=evidence,
-                min_body_length=settings.min_body_length,
+            candidates.append(
+                _Snapshot.model_validate(
+                    {
+                        "snapshot_id": str(row[0]),
+                        "raw_url": raw_url,
+                        "title": str(row[2]),
+                        "body_length": int(str(row[3])),
+                        "has_compensation": bool(row[4]),
+                    }
+                )
             )
-            if correction is None:
-                continue
-            planned += 1
-            if dry_run:
-                print(f"would correct {raw_url}: {correction[9]}")
-                continue
-            _write_correction(connection, correction)
-            written += 1
-            time.sleep(0.05)
+        print(f"snapshots scanned: {len(rows)}, ATS candidates: {len(candidates)}", flush=True)
+        ashby_cache: dict[str, JsonValue] = {}
+        planned = 0
+        written = 0
+
+        def fetch(candidate: _Snapshot) -> tuple[_Snapshot, AtsAvailable | None]:
+            evidence = fetch_ats_data(
+                candidate.raw_url, title=candidate.title, ashby_cache=ashby_cache
+            )
+            return candidate, evidence if isinstance(evidence, AtsAvailable) else None
+
+        with ThreadPoolExecutor(max_workers=WORKER_COUNT) as executor:
+            for index, (candidate, evidence) in enumerate(executor.map(fetch, candidates), start=1):
+                if evidence is None:
+                    continue
+                correction = _plan_correction(
+                    snapshot_id=candidate.snapshot_id,
+                    body_length=candidate.body_length,
+                    has_compensation=candidate.has_compensation,
+                    evidence=evidence,
+                    min_body_length=settings.min_body_length,
+                )
+                if correction is None:
+                    continue
+                planned += 1
+                if dry_run:
+                    print(f"would correct {candidate.raw_url}: {correction[8]}", flush=True)
+                    continue
+                _write_correction(connection, correction)
+                written += 1
+                if index % 50 == 0:
+                    print(f"processed {index}/{len(candidates)}", flush=True)
         mode = "planned" if dry_run else "written"
-        print(f"corrections {mode}: {planned if dry_run else written}")
+        print(f"corrections {mode}: {planned if dry_run else written}", flush=True)
     return 0
 
 
