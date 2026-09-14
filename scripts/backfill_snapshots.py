@@ -13,8 +13,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Sequence
 
 import psycopg
 from pydantic import JsonValue
@@ -29,6 +29,10 @@ from job_finder.jobs.scraping import detect_source
 ATS_SOURCES = frozenset(("lever", "ashbyhq", "greenhouse", "workable"))
 
 
+class _Arguments(argparse.Namespace):
+    dry_run: bool = False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument(
@@ -36,13 +40,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="report planned corrections without writing them",
     )
-    arguments = parser.parse_args(argv)
+    arguments = parser.parse_args(argv, namespace=_Arguments())
+    dry_run = bool(arguments.dry_run)
     settings = BackfillSettings.from_environment()
     ashby_cache: dict[str, JsonValue] = {}
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         applied = apply_migrations(connection)
         print(f"migrations applied: {len(applied)}")
-        snapshots = connection.execute(
+        rows: list[tuple[object, ...]] = connection.execute(
             """
             SELECT s.id, s.raw_url, s.title, length(s.description),
                    s.compensation_source IS NOT NULL
@@ -50,33 +55,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             ORDER BY s.observed_at
             """
         ).fetchall()
-        print(f"snapshots scanned: {len(snapshots)}")
+        print(f"snapshots scanned: {len(rows)}")
         planned = 0
         written = 0
-        for snapshot_id, raw_url, title, body_length, has_compensation in snapshots:
+        for row in rows:
+            snapshot_id = str(row[0])
+            raw_url = str(row[1])
+            title = str(row[2])
+            body_length = int(str(row[3]))
+            has_compensation = bool(row[4])
             if detect_source(raw_url) not in ATS_SOURCES:
                 continue
             evidence = fetch_ats_data(raw_url, title=title, ashby_cache=ashby_cache)
             if not isinstance(evidence, AtsAvailable):
                 continue
             correction = _plan_correction(
-                snapshot_id=str(snapshot_id),
-                body_length=int(body_length),
-                has_compensation=bool(has_compensation),
+                snapshot_id=snapshot_id,
+                body_length=body_length,
+                has_compensation=has_compensation,
                 evidence=evidence,
                 min_body_length=settings.min_body_length,
             )
             if correction is None:
                 continue
             planned += 1
-            if arguments.dry_run:
+            if dry_run:
                 print(f"would correct {raw_url}: {correction[9]}")
                 continue
             _write_correction(connection, correction)
             written += 1
             time.sleep(0.05)
-        mode = "planned" if arguments.dry_run else "written"
-        print(f"corrections {mode}: {planned if arguments.dry_run else written}")
+        mode = "planned" if dry_run else "written"
+        print(f"corrections {mode}: {planned if dry_run else written}")
     return 0
 
 
