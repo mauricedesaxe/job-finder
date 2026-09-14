@@ -550,12 +550,12 @@ def test_ats_description_replaces_a_thin_scrape(authority_schema: str) -> None:
         )
         stored = connection.execute(
             """
-            SELECT d.outcome, s.description LIKE '%Own features end to end.%'
+            SELECT d.outcome, s.description LIKE %s
             FROM evaluation_decisions d
             JOIN job_snapshots s ON s.id = d.snapshot_id
             WHERE s.raw_url = %s
             """,
-            (raw_url,),
+            ("%Own features end to end.%", raw_url),
         ).fetchone()
 
     assert summary.terminal_count == 1
