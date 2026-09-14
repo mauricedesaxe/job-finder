@@ -43,14 +43,20 @@ def test_parses_recorded_provider_payloads() -> None:
     greenhouse = parse_greenhouse_job(_fixture("greenhouse-openup-senior-ai-engineer.json"))
     workable = parse_workable_job(_fixture("workable-v2-ai-listing.json"), "CF51DE915D")
 
-    assert ashby == AtsAvailable(
+    def without_description(evidence: AtsAvailable) -> AtsAvailable:
+        return evidence.model_copy(update={"description": None})
+
+    assert ashby is not None
+    assert without_description(ashby) == AtsAvailable(
         source="ashby",
         location="Paris, France",
         locations=("Paris, France",),
         workplace_type="OnSite",
         country="France, Metropolitan",
     )
-    assert lever == AtsAvailable(
+    assert ashby.description is not None
+    assert "About Ledger" in ashby.description
+    assert without_description(lever) == AtsAvailable(
         source="lever",
         location="Argentina",
         locations=(
@@ -73,20 +79,28 @@ def test_parses_recorded_provider_payloads() -> None:
         workplace_type="Remote",
         country="AR",
     )
-    assert greenhouse == AtsAvailable(
+    assert lever.description is not None
+    assert "Who We Are" in lever.description
+    assert greenhouse is not None
+    assert without_description(greenhouse) == AtsAvailable(
         source="greenhouse",
         location="Amsterdam",
         locations=("Amsterdam", "Amsterdam, North Holland, Netherlands"),
         workplace_type=None,
         country="Netherlands",
     )
-    assert workable == AtsAvailable(
+    assert greenhouse.description is not None
+    assert "Who we are" in greenhouse.description
+    assert "<" not in greenhouse.description
+    assert workable is not None
+    assert without_description(workable) == AtsAvailable(
         source="workable",
         location="Sydney, Australia",
         locations=("Sydney, Australia",),
         workplace_type="Hybrid",
         country="Australia",
     )
+    assert workable.description is None
 
 
 @pytest.mark.parametrize(

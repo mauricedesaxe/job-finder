@@ -21,6 +21,8 @@ class _LeverJob(_LeverWireModel):
     categories: _LeverCategories | None = None
     workplace_type: str | None = Field(default=None, alias="workplaceType")
     country: str | None = None
+    description_plain: str | None = Field(default=None, alias="descriptionPlain")
+    description_body_plain: str | None = Field(default=None, alias="descriptionBodyPlain")
 
 
 def parse_lever_url(url: str) -> tuple[str, str] | None:
@@ -45,4 +47,5 @@ def parse_lever_job(payload: object) -> AtsAvailable:
         locations=unique_locations(primary, secondary),
         workplace_type=normalize_workplace_type(job.workplace_type),
         country=job.country,
+        description=job.description_plain or job.description_body_plain,
     )

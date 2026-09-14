@@ -20,13 +20,21 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
-from job_finder.pipeline.orchestration import PipelineBoundaries, process_claimed_jobs
+from job_finder.pipeline.orchestration import (
+    PipelineBoundaries,
+    ProcessingSummary,
+    process_claimed_jobs,
+)
 from job_finder.pipeline.state import (
     claim_next_job,
     fail_job_claim,
     fail_orchestration_run,
     prepare_orchestration_run,
     register_discoveries,
+)
+
+_LONG_MARKDOWN = (
+    "# Senior Product Engineer\n" + "Build the product with a strong remote team. " * 20
 )
 
 
@@ -361,9 +369,7 @@ def test_ats_rejection_and_claim_completion_commit_together(authority_schema: st
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: AtsAvailable(
                     source="ashby",
                     location="London",
@@ -427,9 +433,7 @@ def test_an_active_company_policy_suppresses_the_job_before_ats_and_models(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS must not run for a suppressed job"),
                 model_sender=_unexpected_model_call,
             ),
@@ -479,9 +483,7 @@ def test_structural_rejection_persists_a_terminal_decision(authority_schema: str
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_unexpected_model_call,
             ),
@@ -508,6 +510,114 @@ def test_structural_rejection_persists_a_terminal_decision(authority_schema: str
     assert stored == ("rejected", "structural", "completed")
 
 
+def test_ats_description_replaces_a_thin_scrape(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://jobs.ashbyhq.com/acme/onsite-thin"
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-ats-description", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.ashbyhq.com",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        summary = process_claimed_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(markdown="Overview"),
+                fetch_ats=lambda _url, _title: AtsAvailable(
+                    source="ashby",
+                    location="Berlin",
+                    locations=("Berlin",),
+                    workplace_type="OnSite",
+                    country=None,
+                    description="YOUR MISSION\n\n" + "Own features end to end. " * 30,
+                ),
+                model_sender=_unexpected_model_call,
+            ),
+            openrouter_api_key="unused",
+            owner_token=uuid4(),
+            observed_at=now,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=True,
+        )
+        stored = connection.execute(
+            """
+            SELECT d.outcome, s.description LIKE '%Own features end to end.%'
+            FROM evaluation_decisions d
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            WHERE s.raw_url = %s
+            """,
+            (raw_url,),
+        ).fetchone()
+
+    assert summary.terminal_count == 1
+    assert stored == ("rejected", True)
+
+
+def test_a_thin_scrape_retries_then_dead_letters(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://example.com/careers/thin-role"
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-thin-scrape", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="example.com",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        boundaries = PipelineBoundaries(
+            search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+            scrape=lambda _url: ScrapeSucceeded(markdown="# Senior Product Engineer\nOverview"),
+            fetch_ats=lambda _url, _title: pytest.fail("ATS must not run for unknown sources"),
+            model_sender=_unexpected_model_call,
+        )
+
+        def attempt() -> ProcessingSummary:
+            return process_claimed_jobs(
+                connection,
+                run,
+                boundaries,
+                openrouter_api_key="unused",
+                owner_token=uuid4(),
+                observed_at=now,
+                max_items=1,
+                lease_for=timedelta(minutes=5),
+                retry_after=timedelta(0),
+                enable_ats_enrichment=False,
+                now=lambda: now,
+            )
+
+        first = attempt()
+        second = attempt()
+        third = attempt()
+        fourth = attempt()
+        work = connection.execute(
+            """
+            SELECT state, attempt_count, last_error->>'code'
+            FROM job_work_items
+            """
+        ).fetchone()
+        decision_count = connection.execute("SELECT count(*) FROM evaluation_decisions").fetchone()
+
+    assert first.retry_scheduled_count == 1
+    assert second.retry_scheduled_count == 1
+    assert third.terminal_error_count == 1
+    assert fourth.claimed_count == 0
+    assert work == ("terminal_error", 3, "thin_scrape")
+    assert decision_count == (0,)
+
+
 def test_llm_rejection_persists_every_model_attempt_and_terminal_state(
     authority_schema: str,
 ) -> None:
@@ -529,9 +639,7 @@ def test_llm_rejection_persists_every_model_attempt_and_terminal_state(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_rejecting_model_call,
             ),
@@ -585,9 +693,7 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_retryable_model_call,
                 model_retry_policy=one_attempt,
@@ -650,9 +756,7 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=accepted_sender,
                 model_retry_policy=one_attempt,
@@ -716,9 +820,7 @@ def test_crash_after_terminal_model_attempt_converges_from_the_cached_error(
                     run,
                     PipelineBoundaries(
                         search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                        scrape=lambda _url: ScrapeSucceeded(
-                            markdown="# Senior Product Engineer\nBuild remotely."
-                        ),
+                        scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                         fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                         model_sender=_terminal_model_call,
                     ),
@@ -741,9 +843,7 @@ def test_crash_after_terminal_model_attempt_converges_from_the_cached_error(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_unexpected_model_call,
             ),
@@ -791,9 +891,7 @@ def test_terminal_openrouter_error_dead_letters_work_without_a_decision(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_terminal_model_call,
             ),
@@ -896,9 +994,7 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
             run,
             PipelineBoundaries(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
-                scrape=lambda _url: ScrapeSucceeded(
-                    markdown="# Senior Product Engineer\nBuild the product remotely."
-                ),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=model_sender,
             ),

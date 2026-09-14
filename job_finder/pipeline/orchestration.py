@@ -72,6 +72,8 @@ from job_finder.pipeline.state import (
 from job_finder.review import enqueue_qualified_review_item
 
 POLICY_VERSION = "orchestration-v1"
+THIN_SCRAPE_THRESHOLD = 500
+THIN_SCRAPE_ATTEMPT_LIMIT = 3
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 SearchBoundary = Callable[[str, str], SearchResult]
 ScrapeBoundary = Callable[[str], ScrapeResult]
@@ -302,10 +304,12 @@ def _process_claim(
         else AtsNotApplicable()
     )
     ats_json = _JSON.validate_python(ats_evidence.model_dump(mode="json"))
+    ats_description = ats_evidence.description if isinstance(ats_evidence, AtsAvailable) else None
+    body = ats_description if ats_description is not None else listing.description
     if isinstance(ats_evidence, AtsAvailable):
         listing = listing.model_copy(
             update={
-                "description": f"{format_ats_block(ats_evidence)}\n\n{listing.description}",
+                "description": f"{format_ats_block(ats_evidence)}\n\n{body}",
                 "location": ats_evidence.location,
             }
         )
@@ -332,6 +336,9 @@ def _process_claim(
             ats_evidence=ats_json,
         )
         return "terminal"
+
+    if len(body.strip()) < THIN_SCRAPE_THRESHOLD:
+        return _fail_thin_scrape(connection, claim, now(), retry_after)
 
     evaluation = evaluate_job(
         listing,
@@ -558,6 +565,33 @@ def _record_terminal_error(
         reason=failure.reason,
     )
     return "terminal_error" if recorded else "lease_lost"
+
+
+def _fail_thin_scrape(
+    connection: Connection,
+    claim: JobWorkClaim,
+    failed_at: datetime,
+    retry_after: timedelta,
+) -> Literal["retry", "terminal_error", "lease_lost"]:
+    reason = "Scrape produced no usable job body"
+    if claim.attempt_count >= THIN_SCRAPE_ATTEMPT_LIMIT:
+        recorded = terminally_fail_job_claim(
+            connection,
+            claim,
+            completed_at=failed_at,
+            error_code="thin_scrape",
+            reason=reason,
+        )
+        return "terminal_error" if recorded else "lease_lost"
+    scheduled = fail_job_claim(
+        connection,
+        claim,
+        failed_at=failed_at,
+        retry_after=retry_after,
+        error_code="thin_scrape",
+        reason=reason,
+    )
+    return "retry" if scheduled else "lease_lost"
 
 
 def _schedule_retry(
