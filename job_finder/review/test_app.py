@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal
 import re
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from starlette.testclient import TestClient
 from job_finder.config import ReviewAppSettings
 from job_finder.review.app import create_review_app
 from job_finder.review.models import (
+    Compensation,
     ReviewConflict,
     ReviewDecision,
     ReviewItem,
@@ -113,6 +115,43 @@ def test_a_job_page_names_the_lane_and_why_it_is_here() -> None:
     assert "Open original listing" in response.text
     assert "Why it's here" in response.text
     assert "Strong product delivery fit." in response.text
+
+
+def test_a_job_page_shows_the_compensation_card_between_body_and_notes() -> None:
+    item = _item(TODAY, "qualified")
+    paid = item.model_copy(
+        update={
+            "job": item.job.model_copy(
+                update={
+                    "compensation": Compensation(
+                        minimum=Decimal("80000"),
+                        maximum=Decimal("100000"),
+                        currency="EUR",
+                        period="year",
+                        source="ats",
+                    )
+                }
+            )
+        }
+    )
+
+    response = _client(_queue(paid)).get(f"/review/item/{paid.id}")
+
+    assert response.status_code == 200
+    assert "Compensation" in response.text
+    assert "€80,000 – €100,000" in response.text
+    assert "per year" in response.text
+    assert "from the ATS" in response.text
+    assert response.text.index('class="compensation-card"') < response.text.index('name="note"')
+
+
+def test_a_job_page_omits_the_compensation_card_when_unknown() -> None:
+    item = _item(TODAY, "qualified")
+
+    response = _client(_queue(item)).get(f"/review/item/{item.id}")
+
+    assert response.status_code == 200
+    assert 'class="compensation-card"' not in response.text
 
 
 def test_a_job_page_renders_the_decision_form_for_a_queued_item() -> None:

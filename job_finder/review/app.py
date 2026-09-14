@@ -51,6 +51,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from job_finder.config import ReviewAppSettings
 from job_finder.review.models import (
+    Compensation,
     ReviewConflict,
     ReviewItem,
     ReviewJob,
@@ -466,9 +467,49 @@ def _job_card(item: ReviewItem, csrf_token: str) -> object:
             Small("Why it's here", cls="why-label"),
             P(item.evaluation_reason, cls="evaluation-reason"),
         ),
+        _compensation_card(item.job.compensation),
         Pre(item.job.description, cls="job-description", aria_label="Job description"),
         _decision_form(item, csrf_token),
         cls="job-card audit-card" if second_look else "job-card",
+    )
+
+
+_CURRENCY_SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}
+_PERIOD_LABELS = {
+    "year": "per year",
+    "month": "per month",
+    "week": "per week",
+    "day": "per day",
+    "hour": "per hour",
+}
+_SOURCE_LABELS = {"ats": "from the ATS", "llm": "extracted from the posting"}
+
+
+def _compensation_card(compensation: Compensation | None) -> object:
+    if compensation is None:
+        return None
+    parts: list[str] = []
+    currency = compensation.currency or ""
+    symbol = _CURRENCY_SYMBOLS.get(currency, currency)
+    minimum, maximum = compensation.minimum, compensation.maximum
+    if minimum is not None and maximum is not None and minimum != maximum:
+        parts.append(f"{symbol}{minimum:,.0f} – {symbol}{maximum:,.0f}")
+    elif minimum is not None and maximum is not None:
+        parts.append(f"{symbol}{minimum:,.0f}")
+    elif minimum is not None:
+        parts.append(f"from {symbol}{minimum:,.0f}")
+    elif maximum is not None:
+        parts.append(f"up to {symbol}{maximum:,.0f}")
+    if compensation.period is not None:
+        parts.append(_PERIOD_LABELS.get(compensation.period, compensation.period))
+    if compensation.source is not None:
+        parts.append(_SOURCE_LABELS.get(compensation.source, compensation.source))
+    if not parts:
+        return None
+    return Div(
+        Small("Compensation", cls="why-label"),
+        P(" · ".join(parts), cls="compensation-value"),
+        cls="compensation-card",
     )
 
 
@@ -683,6 +724,8 @@ h2 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.04; }
 .company { color: var(--ink); font-weight: 800; }
 .evaluation-reason { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1.5rem 0; font-weight: 650; }
 .audit-card .evaluation-reason { border-left-color: var(--line); color: var(--muted); }
+.compensation-card { margin: 1.25rem 0; padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.compensation-value { margin: 0.25rem 0 0; font-size: 1.15rem; font-weight: 700; letter-spacing: 0.01em; }
 .job-description { max-height: 45vh; overflow: auto; white-space: pre-wrap; font: 1rem/1.7 Inter, ui-sans-serif, system-ui, sans-serif; background: var(--surface); border: 0; border-radius: 0; padding: 1.25rem; color: var(--ink); }
 .note-field { display: grid; gap: 0.45rem; font-weight: 700; margin: 1.5rem 0 1rem; }
 .note-field textarea { width: 100%; border: 1px solid var(--line); background: var(--field); padding: 0.8rem; color: var(--ink); }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime
+from decimal import Decimal
 from typing import ClassVar, Literal, Self
 from uuid import UUID
 
@@ -41,6 +42,15 @@ class ReviewJob(ReviewModel):
     location: str
     keywords: tuple[str, ...]
     date_posted: date | None
+    compensation: Compensation | None = None
+
+
+class Compensation(ReviewModel):
+    minimum: Decimal | None = None
+    maximum: Decimal | None = None
+    currency: str | None = None
+    period: str | None = None
+    source: str | None = None
 
 
 class ReviewItem(ReviewModel):

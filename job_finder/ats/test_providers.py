@@ -11,6 +11,7 @@ from job_finder.ats import (
     AtsAvailable,
     AtsNotApplicable,
     AtsUnavailable,
+    CompensationObservation,
     JsonHttpResponse,
     ats_structural_filter,
     detect_ats_source,
@@ -101,6 +102,21 @@ def test_parses_recorded_provider_payloads() -> None:
         country="Australia",
     )
     assert workable.description is None
+
+
+def test_parses_structured_compensation_from_a_recorded_ashby_payload() -> None:
+    evidence = parse_ashby_job(
+        _fixture("ashby-cosuno-org-compensation.json"),
+        "424ba681-0989-4961-82ad-10286e4aae71",
+    )
+
+    assert evidence is not None
+    assert evidence.compensation == CompensationObservation(
+        minimum=80000,
+        maximum=100000,
+        currency="EUR",
+        period="year",
+    )
 
 
 @pytest.mark.parametrize(
@@ -217,7 +233,7 @@ def test_dispatches_requests_and_reuses_the_ashby_org_response() -> None:
     assert requests_seen == [
         (
             "GET",
-            "https://api.ashbyhq.com/posting-api/job-board/ledger",
+            "https://api.ashbyhq.com/posting-api/job-board/ledger?includeCompensation=true",
             None,
         )
     ]
