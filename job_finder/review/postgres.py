@@ -123,13 +123,18 @@ def load_review_queue(connection: Connection) -> ReviewQueue:
         """
         SELECT i.review_day, i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
                d.outcome, d.matched_profile, d.reason,
-               s.title, s.company, s.raw_url, s.source, s.description,
+               s.title, s.company, s.raw_url, s.source,
+               COALESCE(sc.description, s.description),
                s.location, s.keywords, s.date_posted,
-               s.compensation_min, s.compensation_max, s.compensation_currency,
-               s.compensation_period, s.compensation_source
+               COALESCE(sc.compensation_min, s.compensation_min),
+               COALESCE(sc.compensation_max, s.compensation_max),
+               COALESCE(sc.compensation_currency, s.compensation_currency),
+               COALESCE(sc.compensation_period, s.compensation_period),
+               COALESCE(sc.compensation_source, s.compensation_source)
         FROM review_items i
         JOIN evaluation_decisions d ON d.id = i.evaluation_id
         JOIN job_snapshots s ON s.id = d.snapshot_id
+        LEFT JOIN snapshot_corrections sc ON sc.snapshot_id = s.id
         WHERE NOT EXISTS (
           SELECT 1 FROM review_events ev WHERE ev.review_item_id = i.id
         )
@@ -148,12 +153,14 @@ def load_review_queue(connection: Connection) -> ReviewQueue:
         """
         SELECT i.review_day, i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
                d.outcome, d.matched_profile, d.reason,
-               s.title, s.company, s.raw_url, s.source, s.description,
+               s.title, s.company, s.raw_url, s.source,
+               COALESCE(sc.description, s.description),
                s.location, s.keywords, s.date_posted,
                latest.decision, latest.note, latest.block_company
         FROM review_items i
         JOIN evaluation_decisions d ON d.id = i.evaluation_id
         JOIN job_snapshots s ON s.id = d.snapshot_id
+        LEFT JOIN snapshot_corrections sc ON sc.snapshot_id = s.id
         JOIN LATERAL (
           SELECT e.decision, e.note, e.block_company
           FROM review_events e

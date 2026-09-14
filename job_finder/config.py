@@ -104,6 +104,17 @@ class PostgresContractSettings(BaseModel):
         return cls.model_validate({"postgres_dsn": os.environ.get("JOB_FINDER_TEST_POSTGRES_DSN")})
 
 
+class BackfillSettings(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    postgres_dsn: str = Field(min_length=1)
+    min_body_length: int = Field(default=500, ge=1)
+
+    @classmethod
+    def from_environment(cls) -> BackfillSettings:
+        return cls.model_validate({"postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN")})
+
+
 class OrchestrationSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
