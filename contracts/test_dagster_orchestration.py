@@ -398,6 +398,68 @@ def test_ats_rejection_and_claim_completion_commit_together(authority_schema: st
     assert review_item_count == (0,)
 
 
+def test_an_active_company_policy_suppresses_the_job_before_ats_and_models(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://jobs.lever.co/acme/senior-product-engineer"
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-policy", now)
+        connection.execute(
+            """
+            INSERT INTO company_policies (
+              normalized_company, company, policy, effective_at, expires_at
+            ) VALUES ('acme', 'Acme', 'recent_application', %s, %s)
+            """,
+            (now - timedelta(days=1), now + timedelta(days=180)),
+        )
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        summary = process_claimed_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(
+                    markdown="# Senior Product Engineer\nBuild the product."
+                ),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS must not run for a suppressed job"),
+                model_sender=_unexpected_model_call,
+            ),
+            openrouter_api_key="unused",
+            owner_token=uuid4(),
+            observed_at=now,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=True,
+        )
+        stored = connection.execute(
+            """
+            SELECT d.outcome, d.decision_stage, w.state, w.terminal_decision_id = d.id
+            FROM evaluation_decisions d
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            JOIN job_work_items w ON w.job_id = s.job_id
+            WHERE s.raw_url = %s
+            """,
+            (raw_url,),
+        ).fetchone()
+        review_item_count = connection.execute("SELECT count(*) FROM review_items").fetchone()
+        model_call_count = connection.execute("SELECT count(*) FROM model_call_attempts").fetchone()
+
+    assert summary.terminal_count == 1
+    assert stored == ("company_applied", "company_policy", "completed", True)
+    assert review_item_count == (0,)
+    assert model_call_count == (0,)
+
+
 def test_structural_rejection_persists_a_terminal_decision(authority_schema: str) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     raw_url = "https://jobs.lever.co/acme"

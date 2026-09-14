@@ -24,6 +24,7 @@ from job_finder.jobs.decision_pipeline import (
     PersistedDecision,
     TerminalDecision,
     normalize_ledger_text,
+    persist_suppressed_job,
     process_qualified_job,
 )
 from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_message
@@ -351,6 +352,47 @@ def test_preserves_a_terminal_deduplication_error_without_a_write() -> None:
 
 def test_normalizes_company_identity_like_the_legacy_ledger() -> None:
     assert normalize_ledger_text("  Iİ   Labs  ") == "ii̇ labs"
+
+
+def test_persists_the_company_policy_suppression_and_reuses_its_receipt() -> None:
+    cases: tuple[tuple[CompanyPolicy, DecisionOutcome, str], ...] = (
+        ("recent_application", "company_applied", "A recent company application is active"),
+        ("blocked", "company_blocked", "Company is blocked"),
+    )
+    listing = _listing()
+    for policy, expected_outcome, expected_reason in cases:
+        captured: list[TerminalDecision] = []
+        persisted: dict[str, PersistedDecision] = {}
+
+        def persist(decision: TerminalDecision) -> PersistedDecision:
+            captured.append(decision)
+            result = PersistedDecision(
+                decision_id="d" * 64,
+                snapshot_id="s" * 64,
+                outcome=decision.outcome,
+                matched_profile=decision.matched_profile,
+                reason=decision.reason,
+                job=decision.enriched,
+            )
+            persisted[decision.idempotency_key] = result
+            return result
+
+        store = DecisionStore(
+            find_completed=lambda key: persisted.get(key),
+            existing_titles=lambda _company: (),
+            active_company_policy=lambda _company, _at: None,
+            persist=persist,
+        )
+        first = persist_suppressed_job(listing, policy, _decision_context(), store)
+        second = persist_suppressed_job(listing, policy, _decision_context(), store)
+
+        assert first == second
+        assert isinstance(first, PersistedDecision)
+        assert first.outcome == expected_outcome
+        assert first.reason == expected_reason
+        assert first.job.company == "acme.io"
+        assert len(captured) == 1
+        assert captured[0].decision_stage == "company_policy"
 
 
 def _listing() -> JobListing:
