@@ -29,7 +29,7 @@ from job_finder.jobs.title_deduplication import TitleDuplicate
 DecisionOutcome = Literal[
     "qualified", "rejected", "duplicate", "company_blocked", "company_applied"
 ]
-DecisionStage = Literal["ats_structural", "structural", "evaluation", "qualified"]
+DecisionStage = Literal["ats_structural", "structural", "evaluation", "qualified", "company_policy"]
 CompanyPolicy = Literal["blocked", "recent_application"]
 Enricher = Callable[[JobListing], PromptAccepted[EnrichedJob] | OperationalFailure]
 TitleDeduplicator = Callable[
@@ -159,6 +159,44 @@ def persist_rejected_job(
     *,
     ats_evidence: JsonValue | None = None,
 ) -> PersistedDecision:
+    return _persist_pre_evaluation_decision(
+        listing,
+        outcome="rejected",
+        reason=reason,
+        decision_stage=decision_stage,
+        context=context,
+        store=store,
+        ats_evidence=ats_evidence,
+    )
+
+
+def persist_suppressed_job(
+    listing: JobListing,
+    policy: CompanyPolicy,
+    context: DecisionContext,
+    store: DecisionStore,
+) -> PersistedDecision:
+    outcome, reason = _policy_outcome(policy)
+    return _persist_pre_evaluation_decision(
+        listing,
+        outcome=outcome,
+        reason=reason,
+        decision_stage="company_policy",
+        context=context,
+        store=store,
+    )
+
+
+def _persist_pre_evaluation_decision(
+    listing: JobListing,
+    *,
+    outcome: Literal["rejected", "company_blocked", "company_applied"],
+    reason: str,
+    decision_stage: Literal["ats_structural", "structural", "evaluation", "company_policy"],
+    context: DecisionContext,
+    store: DecisionStore,
+    ats_evidence: JsonValue | None = None,
+) -> PersistedDecision:
     input_digest = _digest(
         {
             "listing": listing.model_dump(mode="json"),
@@ -170,7 +208,11 @@ def persist_rejected_job(
             "ats_evidence": ats_evidence,
         }
     )
-    idempotency_key = f"rejected-decision:{input_digest}"
+    idempotency_key = (
+        f"suppressed-decision:{input_digest}"
+        if decision_stage == "company_policy"
+        else f"rejected-decision:{input_digest}"
+    )
     completed = store.find_completed(idempotency_key)
     if completed is not None:
         return completed
@@ -186,7 +228,7 @@ def persist_rejected_job(
                 description=listing.description,
                 location=listing.location,
             ),
-            outcome="rejected",
+            outcome=outcome,
             matched_profile=None,
             reason=reason,
             context=context,
@@ -306,11 +348,20 @@ def _terminal_outcome(
     if duplicate.is_duplicate:
         match = duplicate.matched_title or "an existing role"
         return "duplicate", None, f"Duplicate of {match}"
-    if policy == "blocked":
-        return "company_blocked", None, "Company is blocked"
-    if policy == "recent_application":
-        return "company_applied", None, "A recent company application is active"
+    if policy is not None:
+        outcome, reason = _policy_outcome(policy)
+        return outcome, None, reason
     return "qualified", evaluation.profile_name, evaluation.reason
+
+
+def _policy_outcome(
+    policy: CompanyPolicy,
+) -> tuple[Literal["company_blocked", "company_applied"], str]:
+    match policy:
+        case "blocked":
+            return "company_blocked", "Company is blocked"
+        case "recent_application":
+            return "company_applied", "A recent company application is active"
 
 
 def _upsert_job(
@@ -454,6 +505,8 @@ def _parse_decision_stage(value: str) -> DecisionStage:
             return "evaluation"
         case "qualified":
             return "qualified"
+        case "company_policy":
+            return "company_policy"
         case _:
             raise RuntimeError(f"Unknown decision stage: {value}")
 

@@ -44,7 +44,9 @@ from job_finder.jobs.decision_pipeline import (
     DecisionStore,
     PersistedDecision,
     TerminalDecision,
+    normalize_ledger_text,
     persist_rejected_job,
+    persist_suppressed_job,
     postgres_decision_store,
     process_qualified_job,
 )
@@ -279,6 +281,21 @@ def _process_claim(
         scraped_on=observed_at.date(),
         page_title=scrape.title,
     )
+    decision_context = DecisionContext(
+        pipeline_run_id=run.id,
+        prompt_release_id=run.prompt_release_id,
+        policy_version=POLICY_VERSION,
+        implementation_ref=run.implementation_ref,
+        observed_at=observed_at,
+    )
+    store = _claim_completing_store(connection, claim, now)
+    company_policy = store.active_company_policy(
+        normalize_ledger_text(listing.company), observed_at
+    )
+    if company_policy is not None:
+        _ = persist_suppressed_job(listing, company_policy, decision_context, store)
+        return "terminal"
+
     ats_evidence = (
         boundaries.fetch_ats(listing.url, listing.title)
         if enable_ats_enrichment
@@ -292,14 +309,6 @@ def _process_claim(
                 "location": ats_evidence.location,
             }
         )
-    decision_context = DecisionContext(
-        pipeline_run_id=run.id,
-        prompt_release_id=run.prompt_release_id,
-        policy_version=POLICY_VERSION,
-        implementation_ref=run.implementation_ref,
-        observed_at=observed_at,
-    )
-    store = _claim_completing_store(connection, claim, now)
 
     ats_decision = ats_structural_filter(ats_evidence)
     if isinstance(ats_decision, StructuralRejection):
