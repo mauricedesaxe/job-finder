@@ -40,6 +40,8 @@ from job_finder.evaluation.openrouter import (
 )
 from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion, load_prompt_release
 from job_finder.jobs.decision_pipeline import (
+    THIN_BODY_THRESHOLD,
+    THIN_SCRAPE_ATTEMPT_LIMIT,
     DecisionContext,
     DecisionStore,
     PersistedDecision,
@@ -72,8 +74,6 @@ from job_finder.pipeline.state import (
 from job_finder.review import enqueue_qualified_review_item
 
 POLICY_VERSION = "orchestration-v1"
-THIN_SCRAPE_THRESHOLD = 500
-THIN_SCRAPE_ATTEMPT_LIMIT = 3
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 SearchBoundary = Callable[[str, str], SearchResult]
 ScrapeBoundary = Callable[[str], ScrapeResult]
@@ -337,7 +337,7 @@ def _process_claim(
         )
         return "terminal"
 
-    if len(body.strip()) < THIN_SCRAPE_THRESHOLD:
+    if len(body.strip()) < THIN_BODY_THRESHOLD:
         return _fail_thin_scrape(connection, claim, now(), retry_after)
 
     evaluation = evaluate_job(

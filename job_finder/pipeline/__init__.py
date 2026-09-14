@@ -8,7 +8,9 @@ from job_finder.pipeline.orchestration import (
 )
 from job_finder.pipeline.reprocess import (
     reset_mis_titled_jobs,
+    reset_thin_body_jobs,
     select_mis_titled_jobs,
+    select_thin_body_jobs,
 )
 from job_finder.pipeline.state import (
     JobWorkClaim,
@@ -35,5 +37,7 @@ __all__ = [
     "process_claimed_jobs",
     "production_boundaries",
     "reset_mis_titled_jobs",
+    "reset_thin_body_jobs",
     "select_mis_titled_jobs",
+    "select_thin_body_jobs",
 ]
