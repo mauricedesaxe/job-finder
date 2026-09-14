@@ -91,6 +91,7 @@ def _seed_thin_body_job(
     connection: psycopg.Connection[tuple[object, ...]],
     run_id: UUID,
     value: int,
+    description: str = "## Overview\nAcme is hiring.",
 ) -> UUID:
     job_id = UUID(int=value)
     snapshot_id = f"{value + 100:064x}"
@@ -110,7 +111,7 @@ def _seed_thin_body_job(
           normalized_title, source, raw_url, description, location, keywords,
           date_posted, observed_at
         ) VALUES (%s, %s, %s, %s, 'Acme', 'acme', %s, 'ashbyhq', %s,
-          '## Overview\nAcme is hiring.', 'Remote', '["python"]'::jsonb, %s, %s)
+          %s, 'Remote', '["python"]'::jsonb, %s, %s)
         """,
         (
             snapshot_id,
@@ -119,6 +120,7 @@ def _seed_thin_body_job(
             f"About Acme {value}",
             f"about acme {value}",
             raw_url,
+            description,
             _NOW.date(),
             _NOW,
         ),
@@ -170,14 +172,7 @@ def test_selects_only_corrected_thin_bodies_and_reset_requeues_them(
         apply_migrations(connection)
         _release_id, run_id = _seed_release_and_run(connection)
         thin = _seed_thin_body_job(connection, run_id, 1)
-        fat = _seed_thin_body_job(connection, run_id, 2)
-        connection.execute(
-            """
-            UPDATE job_snapshots SET description = 'A full posting. ' || repeat('x', 600)
-            WHERE job_id = %s
-            """,
-            (fat,),
-        )
+        fat = _seed_thin_body_job(connection, run_id, 2, description="A full posting. " + "x" * 600)
         _seed_correction(connection, 1)
         _seed_correction(connection, 2)
 
