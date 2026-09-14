@@ -31,7 +31,7 @@ class _AshbyAddress(_AshbyWireModel):
 
 
 class _AshbyCompensationComponent(_AshbyWireModel):
-    model_config = ConfigDict(strict=True, extra="ignore")
+    model_config: ClassVar[ConfigDict] = ConfigDict(strict=True, extra="ignore")
 
     compensation_type: str | None = Field(default=None, alias="compensationType")
     interval: str | None = None
@@ -41,7 +41,7 @@ class _AshbyCompensationComponent(_AshbyWireModel):
 
 
 class _AshbyCompensation(_AshbyWireModel):
-    model_config = ConfigDict(strict=True, extra="ignore")
+    model_config: ClassVar[ConfigDict] = ConfigDict(strict=True, extra="ignore")
 
     summary_components: list[_AshbyCompensationComponent] | None = Field(
         default=None, alias="summaryComponents"
@@ -50,7 +50,7 @@ class _AshbyCompensation(_AshbyWireModel):
 
 
 class _AshbyCompensationTier(_AshbyWireModel):
-    model_config = ConfigDict(strict=True, extra="ignore")
+    model_config: ClassVar[ConfigDict] = ConfigDict(strict=True, extra="ignore")
 
     components: list[_AshbyCompensationComponent] | None = None
 
