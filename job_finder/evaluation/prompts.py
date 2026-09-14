@@ -225,7 +225,8 @@ Given raw scraped job data, return cleaned and normalized versions of each field
   * A mentioned office is NOT a restriction. "Remote-friendly with an NYC office" -> "Remote", NOT "Remote (US/NYC preferred)". "Hybrid in San Francisco" -> "Hybrid (San Francisco)" only because the listing states the requirement.
   * Do not write phrases like "preferred" or "primarily" unless those exact words appear in the source.
   * If the listing says "remote" without a region -> "Remote".
-  * If the listing gives no location/eligibility signal at all -> "Not specified".""",
+  * If the listing gives no location/eligibility signal at all -> "Not specified".
+- **compensation**: Only when the listing states concrete pay figures, extract them as structured data: **minimum** and **maximum** as integers in whole currency units, **currency** as the ISO code (e.g. "EUR", "USD", "GBP"), and **period** as one of "year", "month", "week", "day", "hour" (the period the figures refer to). If only one figure is stated, set it as both minimum and maximum. Omit the compensation field entirely when no concrete numbers are stated. Never estimate, invent, or convert between currencies.""",
 )
 
 TITLE_DEDUPLICATION = PromptDefinition(

@@ -403,7 +403,7 @@ def _insert_snapshot(
     }
     content_digest = _digest(snapshot)
     snapshot_id = _digest([str(decision.job_id), content_digest])
-    compensation = _compensation_from_ats_evidence(decision.ats_evidence)
+    compensation = _compensation_fields(decision)
     _ = connection.execute(
         """
         INSERT INTO job_snapshots (
@@ -436,6 +436,26 @@ def _insert_snapshot(
         ),
     )
     return snapshot_id
+
+
+def _compensation_fields(
+    decision: TerminalDecision,
+) -> tuple[int | None, int | None, str | None, str | None, str | None]:
+    from_ats = _compensation_from_ats_evidence(decision.ats_evidence)
+    if from_ats[4] is not None:
+        return from_ats
+    compensation = decision.enriched.compensation
+    if compensation is None:
+        return (None, None, None, None, None)
+    if compensation.minimum is None and compensation.maximum is None:
+        return (None, None, None, None, None)
+    return (
+        compensation.minimum,
+        compensation.maximum,
+        compensation.currency,
+        compensation.period,
+        "llm",
+    )
 
 
 def _compensation_from_ats_evidence(
