@@ -103,11 +103,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0011_review_queue.sql",
             "0012_company_application_cooldown.sql",
             "0013_snapshot_compensation.sql",
+            "0014_snapshot_corrections.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (13,)
+        ).fetchone() == (14,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -124,7 +125,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0013_snapshot_compensation.sql"
+    assert results[0][-1] == "0014_snapshot_corrections.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -1155,6 +1156,51 @@ def test_a_blocked_company_is_not_downgraded_by_a_pursue(authority_schema: str) 
         ).fetchone()
         assert policy == ("blocked", now, None)
         assert connection.execute("SELECT count(*) FROM application_events").fetchone() == (2,)
+
+
+def test_a_snapshot_correction_replaces_the_broken_body_and_adds_compensation(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        _ = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, f"{1001:064x}", now.date())
+        thin = load_review_queue(connection).items[0]
+        assert len(thin.job.description) < 500
+        _ = connection.execute(
+            """
+            INSERT INTO snapshot_corrections (
+              snapshot_id, description, compensation_min, compensation_max,
+              compensation_currency, compensation_period, compensation_source,
+              reason, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                thin.snapshot_id,
+                "## Your mission\n" + "Own features end to end. " * 40,
+                Decimal("80000"),
+                Decimal("100000"),
+                "EUR",
+                "year",
+                "ats",
+                "ats backfill",
+                now,
+            ),
+        )
+
+        queue = load_review_queue(connection)
+
+    assert queue.items[0].job.description.startswith("## Your mission")
+    compensation = queue.items[0].job.compensation
+    assert compensation is not None
+    assert compensation.minimum == Decimal("80000")
+    assert compensation.maximum == Decimal("100000")
+    assert compensation.currency == "EUR"
+    assert compensation.source == "ats"
 
 
 def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
