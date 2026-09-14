@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from html import unescape
 from html.parser import HTMLParser
-from typing import ClassVar
+from typing import ClassVar, override
 
 from pydantic import BaseModel, ConfigDict, StrictInt
 
@@ -70,6 +70,7 @@ class _TextCollector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
 
+    @override
     def handle_data(self, data: str) -> None:
         _ = self.parts.append(data)
 
