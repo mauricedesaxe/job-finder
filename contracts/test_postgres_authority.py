@@ -912,6 +912,136 @@ def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> 
         assert connection.execute("SELECT count(*) FROM company_policies").fetchone() == (0,)
 
 
+def test_a_pursue_records_the_application_and_cooldowns_the_company(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        first = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        second = _insert_review_decision(connection, run_id, release.id, now, 2, "qualified")
+        assert enqueue_qualified_review_item(connection, first, now.date())
+        assert enqueue_qualified_review_item(connection, second, now.date())
+        first_item, second_item = load_review_queue(connection).items
+
+        saved = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=first_item.id,
+                evaluation_id=first_item.evaluation_id,
+                snapshot_id=first_item.snapshot_id,
+                decision="pursue",
+                note="Strong fit.",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+
+        assert isinstance(saved, ReviewSaved)
+        application = connection.execute(
+            """
+            SELECT job_id, kind, source_review_event_id, actor, occurred_at
+            FROM application_events
+            """
+        ).fetchone()
+        assert application == (
+            UUID(int=1),
+            "applied",
+            saved.review_event_id,
+            "owner",
+            now,
+        )
+        policy = connection.execute(
+            """
+            SELECT policy, effective_at, expires_at, source_review_event_id
+            FROM company_policies
+            """
+        ).fetchone()
+        assert policy == (
+            "recent_application",
+            now,
+            now + timedelta(days=180),
+            saved.review_event_id,
+        )
+
+        queue = load_review_queue(connection)
+        assert queue.items == ()
+        assert len(queue.reviewed_items) == 1
+
+        resaved = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=second_item.id,
+                evaluation_id=second_item.evaluation_id,
+                snapshot_id=second_item.snapshot_id,
+                decision="pursue",
+                note="Even stronger fit.",
+                actor="owner",
+                created_at=now + timedelta(days=30),
+            ),
+        )
+
+        assert isinstance(resaved, ReviewSaved)
+        assert connection.execute("SELECT count(*) FROM application_events").fetchone() == (2,)
+        policy = connection.execute(
+            "SELECT policy, effective_at, expires_at FROM company_policies"
+        ).fetchone()
+        assert policy == (
+            "recent_application",
+            now + timedelta(days=30),
+            now + timedelta(days=30) + timedelta(days=180),
+        )
+
+
+def test_a_blocked_company_is_not_downgraded_by_a_pursue(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        first = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        second = _insert_review_decision(connection, run_id, release.id, now, 2, "qualified")
+        assert enqueue_qualified_review_item(connection, first, now.date())
+        assert enqueue_qualified_review_item(connection, second, now.date())
+        first_item, second_item = load_review_queue(connection).items
+
+        blocked = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=first_item.id,
+                evaluation_id=first_item.evaluation_id,
+                snapshot_id=first_item.snapshot_id,
+                decision="pursue",
+                block_company=True,
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        pursued = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=second_item.id,
+                evaluation_id=second_item.evaluation_id,
+                snapshot_id=second_item.snapshot_id,
+                decision="pursue",
+                actor="owner",
+                created_at=now + timedelta(minutes=5),
+            ),
+        )
+
+        assert isinstance(blocked, ReviewSaved)
+        assert isinstance(pursued, ReviewSaved)
+        policy = connection.execute(
+            "SELECT policy, effective_at, expires_at FROM company_policies"
+        ).fetchone()
+        assert policy == ("blocked", now, None)
+        assert connection.execute("SELECT count(*) FROM application_events").fetchone() == (2,)
+
+
 def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
     authority_schema: str,
 ) -> None:
