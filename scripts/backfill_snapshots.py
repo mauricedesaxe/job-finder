@@ -11,7 +11,6 @@ fields. Re-runs converge: corrections are upserted, never duplicated.
 from __future__ import annotations
 
 import argparse
-import hashlib
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -148,7 +147,6 @@ def _plan_correction(
         return None
     reason = "; ".join(reason_parts) or "canonical ATS data"
     return (
-        _correction_id(snapshot_id),
         snapshot_id,
         description,
         *fields,
@@ -157,20 +155,16 @@ def _plan_correction(
     )
 
 
-def _correction_id(snapshot_id: str) -> str:
-    return hashlib.sha256(f"snapshot-correction:{snapshot_id}".encode()).hexdigest()
-
-
 def _write_correction(
     connection: psycopg.Connection[tuple[object, ...]], correction: tuple[object, ...]
 ) -> None:
     _ = connection.execute(
         """
         INSERT INTO snapshot_corrections (
-          id, snapshot_id, description, compensation_min, compensation_max,
+          snapshot_id, description, compensation_min, compensation_max,
           compensation_currency, compensation_period, compensation_source,
           reason, created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (snapshot_id) DO UPDATE
         SET description = EXCLUDED.description,
             compensation_min = EXCLUDED.compensation_min,
