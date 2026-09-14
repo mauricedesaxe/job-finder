@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
@@ -20,6 +20,7 @@ from job_finder.review.models import (
 )
 
 REJECTED_AUDIT_SIZE = 3
+COMPANY_APPLICATION_COOLDOWN = timedelta(days=180)
 Connection = psycopg.Connection[tuple[object, ...]]
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
 
@@ -130,6 +131,12 @@ def load_review_queue(connection: Connection) -> ReviewQueue:
         WHERE NOT EXISTS (
           SELECT 1 FROM review_events ev WHERE ev.review_item_id = i.id
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM company_policies p
+          WHERE p.normalized_company = s.normalized_company
+            AND p.effective_at <= CURRENT_TIMESTAMP
+            AND (p.expires_at IS NULL OR p.expires_at > CURRENT_TIMESTAMP)
+        )
         ORDER BY i.review_day DESC,
                  CASE i.lane WHEN 'qualified' THEN 0 ELSE 1 END,
                  i.position, i.created_at
@@ -184,7 +191,7 @@ def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSub
         row = connection.execute(
             """
             SELECT i.evaluation_id, d.snapshot_id, s.company, s.normalized_company,
-                   d.matched_profile
+                   d.matched_profile, s.job_id
             FROM review_items i
             JOIN evaluation_decisions d ON d.id = i.evaluation_id
             JOIN job_snapshots s ON s.id = d.snapshot_id
@@ -235,6 +242,16 @@ def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSub
                 review.created_at,
             ),
         )
+        if review.decision == "pursue":
+            _record_company_application(
+                connection,
+                event_id,
+                job_id=UUID(str(row[5])),
+                company=str(row[2]),
+                normalized_company=str(row[3]),
+                actor=review.actor,
+                effective_at=review.created_at,
+            )
         if review.block_company:
             _block_company(
                 connection,
@@ -292,6 +309,55 @@ def _parse_review_item(
         fields["note"] = event[1]
         fields["block_company"] = event[2]
     return ReviewItem.model_validate(fields)
+
+
+def _record_company_application(
+    connection: Connection,
+    review_event_id: UUID,
+    *,
+    job_id: UUID,
+    company: str,
+    normalized_company: str,
+    actor: str,
+    effective_at: datetime,
+) -> None:
+    _ = connection.execute(
+        """
+        INSERT INTO application_events (
+          id, job_id, kind, source_review_event_id, actor, occurred_at
+        ) VALUES (%s, %s, 'applied', %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        (
+            uuid5(NAMESPACE_URL, f"application-event:{review_event_id}"),
+            job_id,
+            review_event_id,
+            actor,
+            effective_at,
+        ),
+    )
+    _ = connection.execute(
+        """
+        INSERT INTO company_policies (
+          normalized_company, company, policy, source_review_event_id,
+          effective_at, expires_at
+        ) VALUES (%s, %s, 'recent_application', %s, %s, %s)
+        ON CONFLICT (normalized_company) DO UPDATE
+        SET company = EXCLUDED.company,
+            policy = 'recent_application',
+            source_review_event_id = EXCLUDED.source_review_event_id,
+            effective_at = EXCLUDED.effective_at,
+            expires_at = EXCLUDED.expires_at
+        WHERE company_policies.policy <> 'blocked'
+        """,
+        (
+            normalized_company,
+            company,
+            review_event_id,
+            effective_at,
+            effective_at + COMPANY_APPLICATION_COOLDOWN,
+        ),
+    )
 
 
 def _block_company(
