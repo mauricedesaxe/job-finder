@@ -100,11 +100,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0009_frozen_daily_reviews.sql",
             "0010_review_event_revisions.sql",
             "0011_review_queue.sql",
+            "0012_company_application_cooldown.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (11,)
+        ).fetchone() == (12,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -121,7 +122,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0011_review_queue.sql"
+    assert results[0][-1] == "0012_company_application_cooldown.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
