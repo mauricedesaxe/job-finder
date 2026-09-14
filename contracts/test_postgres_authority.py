@@ -669,6 +669,65 @@ def test_persists_a_terminal_decision_atomically_and_idempotently(
         assert connection.execute("SELECT count(*) FROM pipeline_receipts").fetchone() == (1,)
 
 
+def test_persists_structured_compensation_on_the_snapshot(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        store = postgres_decision_store(connection)
+        listing = _decision_listing()
+        context = DecisionContext(
+            pipeline_run_id=run_id,
+            prompt_release_id=release.id,
+            policy_version="policy-1",
+            implementation_ref="test-ref",
+            observed_at=now,
+        )
+        result = process_qualified_job(
+            listing,
+            Qualified(reason="Matches", profile_name="applied-ai"),
+            context,
+            store,
+            lambda _listing: PromptAccepted(
+                prompt_name="job-finder-enrichment", output=_decision_enrichment()
+            ),
+            lambda _title, _existing: PromptAccepted(
+                prompt_name="job-finder-title-deduplication",
+                output=TitleDuplicate(isDuplicate=False),
+            ),
+            ats_evidence={
+                "kind": "available",
+                "source": "ashby",
+                "location": "Berlin/Remote",
+                "locations": ["Berlin/Remote"],
+                "workplace_type": "Remote",
+                "country": None,
+                "description": None,
+                "compensation": {
+                    "minimum": 80000,
+                    "maximum": 100000,
+                    "currency": "EUR",
+                    "period": "year",
+                },
+            },
+        )
+
+        assert isinstance(result, PersistedDecision)
+        row = connection.execute(
+            """
+            SELECT compensation_min, compensation_max, compensation_currency,
+                   compensation_period, compensation_source
+            FROM job_snapshots
+            WHERE raw_url = %s
+            """,
+            (listing.url,),
+        ).fetchone()
+
+    assert row == (Decimal("80000"), Decimal("100000"), "EUR", "year", "ats")
+
+
 def test_rolls_back_every_terminal_row_when_the_decision_is_invalid(
     authority_schema: str,
 ) -> None:

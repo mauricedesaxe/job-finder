@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from job_finder.ats.models import AtsAvailable, normalize_workplace_type, unique_locations
+from job_finder.ats.models import (
+    AtsAvailable,
+    CompensationObservation,
+    compensation_period_from_interval,
+    normalize_workplace_type,
+    unique_locations,
+)
 from job_finder.urls import parse_http_url
 
 
@@ -24,6 +30,31 @@ class _AshbyAddress(_AshbyWireModel):
     postal_address: _AshbyPostalAddress | None = Field(default=None, alias="postalAddress")
 
 
+class _AshbyCompensationComponent(_AshbyWireModel):
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    compensation_type: str | None = Field(default=None, alias="compensationType")
+    interval: str | None = None
+    currency_code: str | None = Field(default=None, alias="currencyCode")
+    min_value: StrictInt | None = Field(default=None, alias="minValue")
+    max_value: StrictInt | None = Field(default=None, alias="maxValue")
+
+
+class _AshbyCompensation(_AshbyWireModel):
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    summary_components: list[_AshbyCompensationComponent] | None = Field(
+        default=None, alias="summaryComponents"
+    )
+    tiers: list[_AshbyCompensationTier] | None = Field(default=None, alias="compensationTiers")
+
+
+class _AshbyCompensationTier(_AshbyWireModel):
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    components: list[_AshbyCompensationComponent] | None = None
+
+
 class _AshbyJob(_AshbyWireModel):
     id: str
     location: str | None = None
@@ -33,6 +64,7 @@ class _AshbyJob(_AshbyWireModel):
     workplace_type: str | None = Field(default=None, alias="workplaceType")
     address: _AshbyAddress | None = None
     description_plain: str | None = Field(default=None, alias="descriptionPlain")
+    compensation: _AshbyCompensation | None = None
 
 
 class _AshbyResponse(_AshbyWireModel):
@@ -70,4 +102,32 @@ def parse_ashby_job(payload: object, job_id: str) -> AtsAvailable | None:
         workplace_type=normalize_workplace_type(job.workplace_type),
         country=country,
         description=job.description_plain,
+        compensation=_compensation_from(job.compensation),
+    )
+
+
+def _compensation_from(
+    compensation: _AshbyCompensation | None,
+) -> CompensationObservation | None:
+    if compensation is None:
+        return None
+    components = tuple(compensation.summary_components or ())
+    if not components:
+        components = tuple(
+            component for tier in compensation.tiers or () for component in tier.components or ()
+        )
+    salary = next(
+        (component for component in components if component.compensation_type == "Salary"),
+        None,
+    )
+    component = salary if salary is not None else next(iter(components), None)
+    if component is None:
+        return None
+    if component.min_value is None and component.max_value is None:
+        return None
+    return CompensationObservation(
+        minimum=component.min_value,
+        maximum=component.max_value,
+        currency=component.currency_code,
+        period=compensation_period_from_interval(component.interval),
     )

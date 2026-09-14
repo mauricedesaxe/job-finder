@@ -403,13 +403,17 @@ def _insert_snapshot(
     }
     content_digest = _digest(snapshot)
     snapshot_id = _digest([str(decision.job_id), content_digest])
+    compensation = _compensation_from_ats_evidence(decision.ats_evidence)
     _ = connection.execute(
         """
         INSERT INTO job_snapshots (
           id, job_id, content_digest, title, company, normalized_company,
           normalized_title, source, raw_url, description, location, keywords,
-          date_posted, observed_at, ats_evidence
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+          date_posted, observed_at, ats_evidence,
+          compensation_min, compensation_max, compensation_currency,
+          compensation_period, compensation_source
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
         """,
         (
@@ -428,9 +432,33 @@ def _insert_snapshot(
             decision.listing.date_posted,
             decision.context.observed_at,
             Jsonb(decision.ats_evidence) if decision.ats_evidence is not None else None,
+            *compensation,
         ),
     )
     return snapshot_id
+
+
+def _compensation_from_ats_evidence(
+    ats_evidence: JsonValue | None,
+) -> tuple[int | None, int | None, str | None, str | None, str | None]:
+    if not isinstance(ats_evidence, dict):
+        return (None, None, None, None, None)
+    compensation = ats_evidence.get("compensation")
+    if not isinstance(compensation, dict):
+        return (None, None, None, None, None)
+    minimum = compensation.get("minimum")
+    maximum = compensation.get("maximum")
+    if not isinstance(minimum, int) and not isinstance(maximum, int):
+        return (None, None, None, None, None)
+    currency = compensation.get("currency")
+    period = compensation.get("period")
+    return (
+        minimum if isinstance(minimum, int) else None,
+        maximum if isinstance(maximum, int) else None,
+        currency if isinstance(currency, str) else None,
+        period if isinstance(period, str) else None,
+        "ats",
+    )
 
 
 def _insert_decision(

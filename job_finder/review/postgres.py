@@ -124,7 +124,9 @@ def load_review_queue(connection: Connection) -> ReviewQueue:
         SELECT i.review_day, i.id, i.evaluation_id, d.snapshot_id, i.lane, i.position,
                d.outcome, d.matched_profile, d.reason,
                s.title, s.company, s.raw_url, s.source, s.description,
-               s.location, s.keywords, s.date_posted
+               s.location, s.keywords, s.date_posted,
+               s.compensation_min, s.compensation_max, s.compensation_currency,
+               s.compensation_period, s.compensation_source
         FROM review_items i
         JOIN evaluation_decisions d ON d.id = i.evaluation_id
         JOIN job_snapshots s ON s.id = d.snapshot_id
@@ -282,6 +284,26 @@ def deterministic_rejected_sample(
 def _parse_review_item(
     row: tuple[object, ...], event: tuple[object, ...] | None = None
 ) -> ReviewItem:
+    job: dict[str, object] = {
+        "title": row[9],
+        "company": row[10],
+        "url": row[11],
+        "source": row[12],
+        "description": row[13],
+        "location": row[14],
+        "keywords": row[15],
+        "date_posted": row[16],
+    }
+    if event is None:
+        compensation_fields = row[17:22]
+        if any(value is not None for value in compensation_fields):
+            job["compensation"] = {
+                "minimum": compensation_fields[0],
+                "maximum": compensation_fields[1],
+                "currency": compensation_fields[2],
+                "period": compensation_fields[3],
+                "source": compensation_fields[4],
+            }
     fields: dict[str, object] = {
         "review_day": row[0],
         "id": row[1],
@@ -292,16 +314,7 @@ def _parse_review_item(
         "outcome": row[6],
         "matched_profile": row[7],
         "evaluation_reason": row[8],
-        "job": {
-            "title": row[9],
-            "company": row[10],
-            "url": row[11],
-            "source": row[12],
-            "description": row[13],
-            "location": row[14],
-            "keywords": row[15],
-            "date_posted": row[16],
-        },
+        "job": job,
     }
     if event is not None:
         fields["reviewed"] = True

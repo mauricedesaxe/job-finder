@@ -100,7 +100,7 @@ def _fetch_ashby(
     if payload is None:
         response = fetch(
             "GET",
-            f"https://api.ashbyhq.com/posting-api/job-board/{org}",
+            f"https://api.ashbyhq.com/posting-api/job-board/{org}?includeCompensation=true",
             None,
         )
         if response.status_code != 200:
