@@ -99,11 +99,64 @@ def test_a_job_page_links_back_and_walks_the_queue() -> None:
     assert response.status_code == 200
     assert "← All jobs" in response.text
     assert 'href="/review"' in response.text
-    assert "2 of 3" in response.text
+    assert "2 of 3 waiting" in response.text
+    assert 'class="workbench"' in response.text
+    assert 'class="evidence-panel"' in response.text
+    assert 'class="decision-panel"' in response.text
     assert f'href="/review/item/{first.id}"' in response.text
     assert f'href="/review/item/{last.id}"' in response.text
     assert "← Prev" in response.text
     assert "Next →" in response.text
+
+
+def test_the_login_uses_the_editorial_split_and_route_line() -> None:
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            SETTINGS,
+            now=lambda: NOW,
+        )
+    )
+
+    response = client.get("/login")
+
+    assert response.status_code == 200
+    assert 'class="login-editorial"' in response.text
+    assert 'class="login-card"' in response.text
+    assert "Review the work worth doing." in response.text
+    assert "Discover" in response.text
+    assert "Filter" in response.text
+    assert "Evaluate" in response.text
+    assert "Review" in response.text
+    assert "<link" not in response.text
+    assert "<script" not in response.text
+
+
+def test_a_job_page_shows_the_existing_job_metadata() -> None:
+    item = _item(TODAY, "qualified")
+
+    response = _client(_queue(item)).get(f"/review/item/{item.id}")
+
+    assert response.status_code == 200
+    assert 'aria-label="Job metadata"' in response.text
+    assert "Posted" in response.text
+    assert "Sep 9, 2026" in response.text
+    assert "Source" in response.text
+    assert "Other" in response.text
+    assert "Profile" in response.text
+    assert "applied ai product engineer" in response.text
+
+
+def test_a_job_page_marks_every_decision_as_not_recorded_before_review() -> None:
+    item = _item(TODAY, "qualified")
+
+    response = _client(_queue(item)).get(f"/review/item/{item.id}")
+
+    assert re.findall(r'<button[^>]+aria-pressed="(true|false)"', response.text) == [
+        "false",
+        "false",
+        "false",
+    ]
 
 
 def test_a_job_page_names_the_lane_and_why_it_is_here() -> None:
@@ -179,7 +232,8 @@ def test_a_day_section_renders_reviewed_jobs_after_the_waiting_ones() -> None:
     assert response.status_code == 200
     assert "1 waiting · 1 reviewed" in response.text
     assert "Reviewed (1)" in response.text
-    assert '<span class="chip">reject</span>' in response.text
+    assert '<span class="chip decision-chip">reject</span>' in response.text
+    assert 'class="job-list-item reviewed-item"' in response.text
     assert "Applied AI Engineer 2" in response.text
     assert "Acme · Remote" in response.text
     assert "Wrong location." in response.text
@@ -216,7 +270,14 @@ def test_a_reviewed_item_page_opens_in_revision_mode() -> None:
     assert "Need salary detail." in response.text
     assert '<input type="checkbox" name="block_company" checked>' in response.text
     assert 'value="unsure" aria-pressed="true"' in response.text
-    assert response.text.count("aria-pressed") == 1
+    assert 'value="pursue" aria-pressed="false"' in response.text
+    assert 'value="reject" aria-pressed="false"' in response.text
+    assert re.findall(r'<button[^>]+aria-pressed="(true|false)"', response.text) == [
+        "false",
+        "true",
+        "false",
+    ]
+    assert 'class="workbench"' in response.text
 
 
 def test_submitting_a_revision_returns_to_the_item_page_with_the_update() -> None:
