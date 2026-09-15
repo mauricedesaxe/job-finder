@@ -314,10 +314,26 @@ def _require_owner(request: Request) -> Response | None:
 def _login_content(next_url: str, error: str | None = None) -> object:
     return Main(
         Div(
-            Small("Private access", cls="eyebrow"),
-            H1("Daily job review"),
-            P("Enter the review password to continue."),
-            P(error, cls="error") if error else None,
+            Small("JF / PRIVATE REVIEW", cls="eyebrow"),
+            H1("Review the work worth doing."),
+            P(
+                Span("Discover", cls="route-stage"),
+                Span("/", cls="route-divider", aria_hidden="true"),
+                Span("Filter", cls="route-stage"),
+                Span("/", cls="route-divider", aria_hidden="true"),
+                Span("Evaluate", cls="route-stage"),
+                Span("/", cls="route-divider", aria_hidden="true"),
+                Span("Review", cls="route-stage"),
+                cls="route-line",
+                aria_label="Discover, Filter, Evaluate, Review",
+            ),
+            P("A focused editorial pass over today's job matches.", cls="login-intro"),
+            cls="login-editorial",
+        ),
+        Div(
+            Small("Owner access", cls="eyebrow"),
+            H2("Enter the workbench"),
+            P(error, cls="error", role="alert") if error else None,
             Form(
                 Input(type="hidden", name="next", value=next_url),
                 Label(
@@ -342,8 +358,13 @@ def _login_content(next_url: str, error: str | None = None) -> object:
 def _review_page(queue: ReviewQueue, csrf_token: str) -> object:
     return Main(
         Div(
+            Div(Strong("JF", cls="wordmark"), Small("Review desk", cls="masthead-label")),
+            _logout_form(csrf_token),
+            cls="masthead",
+        ),
+        Div(
             Small("Review queue", cls="eyebrow"),
-            Div(H1("Jobs waiting for review"), _logout_form(csrf_token), cls="title-row"),
+            H1("Jobs waiting for review"),
             cls="review-header",
         ),
         *_day_sections(queue),
@@ -358,7 +379,9 @@ def _day_sections(queue: ReviewQueue) -> list[object]:
         reverse=True,
     )
     if not days:
-        return [Div(H2("No jobs waiting for review."), cls="state")]
+        return [
+            Div(Small("Queue clear", cls="eyebrow"), H2("No jobs waiting for review."), cls="state")
+        ]
     sections: list[object] = []
     for review_day in days:
         grouped = tuple(item for item in queue.items if item.review_day == review_day)
@@ -381,12 +404,18 @@ def _day_sections(queue: ReviewQueue) -> list[object]:
 
 def _reviewed_row(item: ReviewItem) -> object:
     return Li(
-        Span(item.decision or "", cls="chip"),
-        Strong(item.job.title, cls="job-title"),
-        Span(_job_subline(item.job), cls="job-subline"),
-        Span(item.note[:120], cls="job-subline") if item.note else None,
-        A("Change", href=_item_url(item.id)),
-        cls="job-list-item",
+        Div(
+            Span(item.decision or "", cls="chip decision-chip"),
+            Div(
+                Strong(item.job.title, cls="job-title"),
+                Span(_job_subline(item.job), cls="job-subline"),
+                Span(item.note[:120], cls="job-subline") if item.note else None,
+                cls="row-copy",
+            ),
+            A("Change", href=_item_url(item.id), cls="change-link"),
+            cls="reviewed-row",
+        ),
+        cls="job-list-item reviewed-item",
     )
 
 
@@ -417,7 +446,7 @@ def _item_page(items: tuple[ReviewItem, ...], item: ReviewItem, csrf_token: str)
     return Main(
         Div(
             A("← All jobs", href="/review", cls="back-link"),
-            Span(f"{position + 1} of {len(items)}", cls="position-marker"),
+            Span(f"{position + 1} of {len(items)} waiting", cls="position-marker"),
             Div(
                 _item_arrow("← Prev", previous_item),
                 _item_arrow("Next →", next_item),
@@ -452,25 +481,50 @@ def _job_card(item: ReviewItem, csrf_token: str) -> object:
     second_look = item.lane == "rejected_audit"
     return Div(
         Div(
-            Span("Second look" if second_look else "New result", cls="status-kicker"),
-            A("Open original listing", href=item.job.url, target="_blank", rel="noreferrer"),
-            cls="card-topline",
-        ),
-        H2(item.job.title),
-        P(
-            Span(item.job.company, cls="company"),
-            Span(" · "),
-            Span(item.job.location or "Location not specified"),
-            cls="job-meta",
+            Div(
+                Span("Second look" if second_look else "New result", cls="status-kicker"),
+                A("Open original listing", href=item.job.url, target="_blank", rel="noreferrer"),
+                cls="card-topline",
+            ),
+            H2(item.job.title),
+            P(
+                Span(item.job.company, cls="company"),
+                Span(" / ", aria_hidden="true"),
+                Span(item.job.location or "Location not specified"),
+                cls="job-meta",
+            ),
+            _metadata_strip(item),
+            Div(
+                Small("Why it's here", cls="why-label"),
+                P(item.evaluation_reason, cls="evaluation-reason"),
+            ),
+            _compensation_card(item.job.compensation),
+            Div(
+                Small("Job evidence", cls="why-label"),
+                Pre(item.job.description, cls="job-description", aria_label="Job description"),
+                cls="description-block",
+            ),
+            cls="evidence-panel",
         ),
         Div(
-            Small("Why it's here", cls="why-label"),
-            P(item.evaluation_reason, cls="evaluation-reason"),
+            Small("Decision desk", cls="eyebrow"),
+            H2("Make the call" if not item.reviewed else "Review the call"),
+            _decision_form(item, csrf_token),
+            cls="decision-panel",
         ),
-        _compensation_card(item.job.compensation),
-        Pre(item.job.description, cls="job-description", aria_label="Job description"),
-        _decision_form(item, csrf_token),
-        cls="job-card audit-card" if second_look else "job-card",
+        cls="workbench audit-card" if second_look else "workbench",
+    )
+
+
+def _metadata_strip(item: ReviewItem) -> object:
+    posted = item.job.date_posted.strftime("%b %-d, %Y") if item.job.date_posted else "Date unknown"
+    profile = item.matched_profile.replace("-", " ") if item.matched_profile else "No profile match"
+    return Div(
+        Div(Small("Posted"), Span(posted)),
+        Div(Small("Source"), Span(item.job.source.replace("_", " ").title())),
+        Div(Small("Profile"), Span(profile)),
+        cls="metadata-strip",
+        aria_label="Job metadata",
     )
 
 
@@ -552,7 +606,7 @@ def _decision_button(label: str, value: str, current: str | None) -> object:
         name="decision",
         value=value,
         cls=f"decision {value}",
-        aria_pressed="true" if current == value else None,
+        aria_pressed="true" if current == value else "false",
     )
 
 
@@ -668,117 +722,144 @@ def _day_title(review_day: date) -> str:
 
 _CSS = """
 :root {
-  --ink: #20201d;
-  --muted: #6f6c64;
-  --paper: #f4f0e8;
-  --panel: #fffdf8;
-  --line: #d9d2c6;
-  --accent: #bf4b36;
-  --accent-dark: #913522;
-  --accent-hover: #913522;
-  --surface: #f8f5ee;
-  --field: #ffffff;
-  --ok: #1d6b40;
-  --caution: #8a6d1a;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --ink: #151515;
+  --paper: #f3f0e7;
+  --panel: #fffdf5;
+  --muted: #5d5b54;
+  --line: #151515;
+  --acid: #dfff00;
+  --caution: #ffd86b;
+  --reviewed: #dedbd1;
+  font-family: Arial, Helvetica, ui-sans-serif, system-ui, sans-serif;
   color: var(--ink);
   background: var(--paper);
-  color-scheme: light dark;
+  color-scheme: light;
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: var(--paper); }
-a { color: var(--accent-dark); text-underline-offset: 0.2em; }
-button, select, textarea { font: inherit; }
-.review-shell { width: min(100% - 2rem, 860px); margin: 0 auto; padding: 3.5rem 0 5rem; }
-.review-header { margin-bottom: 0.5rem; }
-.title-row { display: flex; justify-content: space-between; align-items: end; gap: 2rem; margin-top: 0.75rem; }
-.logout { border: 0; background: transparent; color: var(--accent-dark); cursor: pointer; padding: 0.5rem 0; }
-h1, h2 { font-family: Georgia, 'Times New Roman', serif; letter-spacing: -0.025em; margin: 0; }
-h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-height: 0.98; max-width: 14ch; }
-h2 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.04; }
-.eyebrow, .status-kicker { text-transform: uppercase; letter-spacing: 0.14em; font-weight: 800; }
-.eyebrow { display: block; color: var(--accent-dark); }
-.day-section { margin-top: 2.5rem; }
-.day-summary { margin: 0.4rem 0 0; color: var(--muted); font-weight: 600; }
-.job-list { list-style: none; padding: 0; margin: 1.25rem 0 0; display: grid; gap: 0.75rem; }
-.job-row { display: block; background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--accent); padding: 1rem 1.25rem; text-decoration: none; color: inherit; }
-.job-row:hover, .job-row:focus-visible { transform: translateY(-1px); box-shadow: 0 0.35rem 1rem rgb(54 45 32 / 0.12); }
-.chip { display: inline-block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-.lane-new { color: var(--accent-dark); border-color: var(--accent); }
-.lane-second-look { color: var(--muted); }
-.job-title { display: block; margin-top: 0.4rem; font-size: 1.15rem; }
-.job-subline { display: block; margin-top: 0.2rem; color: var(--muted); font-size: 0.95rem; }
-.item-topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 1rem; margin-bottom: 0.5rem; }
-.back-link { color: var(--accent-dark); font-weight: 800; text-decoration: none; }
-.position-marker { color: var(--muted); font-weight: 700; }
-.item-nav { display: flex; gap: 0.5rem; }
-.day-arrow, .item-nav-link { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 0 0.6rem; border: 2px solid var(--line); color: var(--ink); font-weight: 800; text-decoration: none; }
-.item-nav-off { opacity: 0.35; border-style: dashed; }
-.why-label { display: block; text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem; font-weight: 800; color: var(--muted); margin-bottom: 0.35rem; }
-.job-card { margin-top: 2rem; background: var(--panel); border: 1px solid var(--line); border-top: 5px solid var(--accent); padding: clamp(1.25rem, 4vw, 2.5rem); box-shadow: 0 1.2rem 3rem rgb(54 45 32 / 0.08); }
-.audit-card { border-top-color: var(--line); box-shadow: none; }
-.card-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
-.status-kicker { color: var(--accent-dark); font-size: 0.75rem; }
-.audit-card .status-kicker { color: var(--muted); }
-.job-meta { color: var(--muted); font-size: 1.05rem; }
-.company { color: var(--ink); font-weight: 800; }
-.evaluation-reason { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1.5rem 0; font-weight: 650; }
-.audit-card .evaluation-reason { border-left-color: var(--line); color: var(--muted); }
-.compensation-card { margin: 1.25rem 0; padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
-.compensation-value { margin: 0.25rem 0 0; font-size: 1.15rem; font-weight: 700; letter-spacing: 0.01em; }
-.job-description { max-height: 45vh; overflow: auto; white-space: pre-wrap; font: 1rem/1.7 Inter, ui-sans-serif, system-ui, sans-serif; background: var(--surface); border: 0; border-radius: 0; padding: 1.25rem; color: var(--ink); }
-.note-field { display: grid; gap: 0.45rem; font-weight: 700; margin: 1.5rem 0 1rem; }
-.note-field textarea { width: 100%; border: 1px solid var(--line); background: var(--field); padding: 0.8rem; color: var(--ink); }
-.block-company { display: flex; align-items: center; min-height: 44px; font-weight: 700; }
-.block-company input { width: 1.2rem; height: 1.2rem; accent-color: var(--accent); margin-right: 0.6rem; }
-.decision-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 0.75rem; padding: 0; border: 0; }
-.decision-row legend { font-weight: 800; margin-bottom: 0.75rem; }
-.decision { min-height: 58px; border: 2px solid var(--ink); background: transparent; color: var(--ink); font-weight: 850; cursor: pointer; }
-.decision:hover, .decision:focus-visible { transform: translateY(-1px); box-shadow: 0 0.35rem 0 var(--ink); }
-.decision:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-.pursue { background: var(--accent); border-color: var(--accent); color: white; }
-.pursue:hover, .pursue:focus-visible { background: var(--accent-hover); border-color: var(--accent-hover); }
-.reject { color: var(--muted); border-color: var(--muted); }
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--paper);
+  background-image: linear-gradient(rgb(21 21 21 / 0.06) 1px, transparent 1px), linear-gradient(90deg, rgb(21 21 21 / 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+a { color: inherit; text-underline-offset: 0.2em; }
+button, select, textarea, input { font: inherit; }
+h1, h2 { margin: 0; font-family: Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
+h1 { max-width: 14ch; font-size: clamp(2.4rem, 7vw, 5.2rem); line-height: 0.9; }
+h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
+.eyebrow, .status-kicker, .masthead-label, .why-label, .metadata-strip small {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+.eyebrow { display: block; margin-bottom: 0.7rem; }
+.review-shell { width: min(100% - 2rem, 1180px); margin: 0 auto; padding: 1.25rem 0 5rem; }
+.masthead { display: flex; align-items: center; justify-content: space-between; min-height: 56px; border: 2px solid var(--line); background: var(--panel); }
+.masthead > div { display: flex; align-items: center; }
+.wordmark { display: grid; place-items: center; align-self: stretch; min-width: 58px; padding: 0.6rem; background: var(--ink); color: var(--acid); font-size: 1.35rem; }
+.masthead-label { padding: 0 0.85rem; }
+.logout { min-width: 88px; min-height: 52px; border: 0; border-left: 2px solid var(--line); background: var(--acid); color: var(--ink); cursor: pointer; font-weight: 900; }
+.review-header { padding: clamp(2rem, 6vw, 5rem) 0 1.5rem; }
+.review-header .eyebrow { width: fit-content; padding: 0.25rem 0.4rem; background: var(--acid); }
+.day-section { margin-top: 2.4rem; }
+.day-summary { margin: 0.55rem 0 0; color: var(--muted); font-weight: 700; }
+.job-list { list-style: none; padding: 0; margin: 0.8rem 0 0; border: 2px solid var(--line); border-bottom: 0; }
+.job-list-item { border-bottom: 2px solid var(--line); }
+.job-row, .reviewed-row { min-height: 92px; background: var(--panel); color: inherit; }
+.job-row { display: block; padding: 0.9rem 1rem; text-decoration: none; }
+.job-row:hover, .job-row:focus-visible { background: var(--acid); }
+.reviewed-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 1rem; padding-left: 1rem; background: var(--reviewed); }
+.row-copy { padding: 0.8rem 0; }
+.change-link { display: inline-flex; align-items: center; justify-content: center; align-self: stretch; min-width: 84px; min-height: 44px; border-left: 2px solid var(--line); font-weight: 900; }
+.chip { display: inline-block; width: fit-content; padding: 0.22rem 0.45rem; border: 2px solid var(--line); font-size: 0.7rem; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; }
+.lane-new { background: var(--acid); }
+.lane-second-look { background: var(--caution); }
+.decision-chip { background: var(--ink); color: var(--panel); }
+.job-title { display: block; margin-top: 0.35rem; font-size: 1.08rem; }
+.job-subline { display: block; margin-top: 0.18rem; color: var(--muted); font-size: 0.92rem; }
+.item-topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem; margin-top: 0.75rem; padding: 0.65rem 0; border-bottom: 2px solid var(--line); }
+.back-link { min-height: 44px; display: inline-flex; align-items: center; font-weight: 900; text-decoration: none; }
+.position-marker { font-weight: 900; text-transform: uppercase; letter-spacing: 0.06em; }
+.item-nav { display: flex; justify-content: end; gap: 0.5rem; }
+.item-nav-link { min-width: 72px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 0 0.6rem; border: 2px solid var(--line); background: var(--panel); font-weight: 900; text-decoration: none; }
+.item-nav-off { opacity: 0.45; border-style: dashed; }
+.workbench { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.85fr); margin-top: 1.25rem; border: 2px solid var(--line); background: var(--panel); box-shadow: 8px 8px 0 var(--ink); }
+.evidence-panel, .decision-panel { min-width: 0; padding: clamp(1rem, 3vw, 2rem); }
+.decision-panel { border-left: 2px solid var(--line); background: #ebe7dc; }
+.audit-card { box-shadow: 8px 8px 0 var(--caution); }
+.card-topline { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.4rem; }
+.status-kicker { padding: 0.25rem 0.4rem; background: var(--acid); }
+.audit-card .status-kicker { background: var(--caution); }
+.job-meta { margin: 0.75rem 0 1.1rem; color: var(--muted); font-size: 1.05rem; }
+.company { color: var(--ink); font-weight: 900; }
+.metadata-strip { display: grid; grid-template-columns: repeat(3, 1fr); border: 2px solid var(--line); }
+.metadata-strip > div { min-width: 0; padding: 0.6rem; border-right: 2px solid var(--line); }
+.metadata-strip > div:last-child { border-right: 0; }
+.metadata-strip small, .metadata-strip span { display: block; }
+.metadata-strip span { margin-top: 0.3rem; overflow-wrap: anywhere; font-size: 0.88rem; }
+.why-label { display: block; margin-bottom: 0.4rem; color: var(--muted); }
+.evaluation-reason { margin: 1.25rem 0; padding: 0.85rem 1rem; border-left: 6px solid var(--acid); background: #f1eee5; font-weight: 750; }
+.compensation-card { margin: 1.25rem 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--acid); }
+.compensation-value { margin: 0.25rem 0 0; font-size: 1.1rem; font-weight: 900; }
+.description-block { margin-top: 1.5rem; }
+.job-description { max-height: 52vh; overflow: auto; white-space: pre-wrap; margin: 0; padding: 1rem; border: 2px solid var(--line); background: #f7f4eb; color: var(--ink); font: 1rem/1.65 Arial, Helvetica, ui-sans-serif, system-ui, sans-serif; }
+.decision-panel h2 { margin-bottom: 1.5rem; }
+.note-field { display: grid; gap: 0.45rem; margin: 0 0 1rem; font-weight: 800; }
+.note-field textarea { width: 100%; min-height: 112px; padding: 0.75rem; border: 2px solid var(--line); border-radius: 0; background: var(--panel); color: var(--ink); }
+.block-company { display: flex; align-items: center; min-height: 56px; margin: 1rem 0; padding: 0.6rem; border: 2px solid var(--line); background: var(--caution); font-weight: 900; }
+.block-company input { width: 22px; height: 22px; margin-right: 0.65rem; accent-color: var(--ink); }
+.decision-row { display: grid; grid-template-columns: 1fr; gap: 0.65rem; padding: 0; border: 0; }
+.decision-row legend { margin-bottom: 0.75rem; font-weight: 900; }
+.decision { min-height: 52px; border: 2px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font-weight: 900; }
+.decision:hover, .decision:focus-visible { background: var(--acid); box-shadow: 4px 4px 0 var(--ink); }
+.decision[aria-pressed="true"] { background: var(--ink); color: var(--acid); box-shadow: 4px 4px 0 var(--acid); }
+.decision.reject[aria-pressed="true"] { color: var(--caution); }
+.decision:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #315cff; outline-offset: 3px; }
 .state-shell { min-height: 100vh; display: grid; align-content: center; }
-.state { margin-top: 1.25rem; background: var(--panel); border-left: 5px solid var(--accent); padding: clamp(1.5rem, 5vw, 3rem); }
-.state h1 { max-width: 14ch; }
-.state h2 { font-size: clamp(1.6rem, 4vw, 2.4rem); }
-.state p { color: var(--muted); font-size: 1.08rem; max-width: 48ch; line-height: 1.6; }
-.retry { display: inline-flex; min-height: 48px; align-items: center; padding: 0 1.1rem; margin-top: 0.5rem; border: 2px solid var(--accent); font-weight: 800; }
-.login-shell { display: grid; min-height: 100vh; place-items: center; padding: 1rem; }
-.login-card { width: min(100%, 440px); background: var(--panel); border: 1px solid var(--line); padding: 2rem; }
-.login-card label { display: grid; gap: 0.5rem; font-weight: 700; }
-.login-card input { width: 100%; border: 1px solid var(--line); padding: 0.8rem; }
-.login-card button { width: 100%; min-height: 48px; margin-top: 1rem; border: 0; background: var(--accent); color: white; font-weight: 800; cursor: pointer; }
-.error { color: var(--accent-dark); font-weight: 700; }
-@media (max-width: 640px) {
-  .review-shell { width: min(100% - 1.25rem, 860px); padding-top: 1.5rem; }
-  .review-header { display: block; }
-  .title-row { display: block; }
-  .item-topbar { align-items: start; flex-direction: column; }
-  .card-topline { align-items: start; }
-  .decision-row { grid-template-columns: 1fr; }
-  .pursue { order: -2; }
-  .unsure { order: -1; }
-  .job-description { max-height: 50vh; }
+.state { margin-top: 1.25rem; padding: clamp(1.5rem, 5vw, 3rem); border: 2px solid var(--line); background-color: var(--panel); background-image: linear-gradient(rgb(21 21 21 / 0.08) 1px, transparent 1px), linear-gradient(90deg, rgb(21 21 21 / 0.08) 1px, transparent 1px); background-size: 20px 20px; box-shadow: 8px 8px 0 var(--ink); }
+.state h1, .state h2 { max-width: 14ch; }
+.state p { max-width: 48ch; color: var(--muted); font-size: 1.08rem; line-height: 1.6; }
+.retry { display: inline-flex; min-height: 48px; align-items: center; margin-top: 0.5rem; padding: 0 1.1rem; border: 2px solid var(--line); background: var(--acid); font-weight: 900; }
+.login-shell { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr); min-height: 100vh; }
+.login-editorial { display: grid; align-content: center; padding: clamp(2rem, 7vw, 7rem); background: var(--ink); color: var(--panel); }
+.login-editorial h1 { color: var(--acid); }
+.route-line { display: flex; flex-wrap: wrap; gap: 0.55rem; margin: 1.8rem 0 0; font-weight: 900; text-transform: uppercase; letter-spacing: 0.06em; }
+.route-line .route-divider { color: var(--acid); }
+.login-intro { max-width: 40ch; line-height: 1.5; }
+.login-card { align-self: center; width: min(100% - 2rem, 430px); margin: 2rem auto; padding: 2rem; border: 2px solid var(--line); background: var(--panel); box-shadow: 8px 8px 0 var(--acid); }
+.login-card h2 { margin-bottom: 1.5rem; }
+.login-card label { display: grid; gap: 0.5rem; font-weight: 800; }
+.login-card input { width: 100%; min-height: 48px; padding: 0.75rem; border: 2px solid var(--line); border-radius: 0; background: white; }
+.login-card button { width: 100%; min-height: 48px; margin-top: 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--ink); cursor: pointer; font-weight: 900; }
+.error { padding: 0.75rem; border: 2px solid var(--line); background: var(--caution); font-weight: 800; }
+@media (max-width: 760px) {
+  .review-shell { width: min(100% - 1rem, 1180px); padding-top: 0.5rem; }
+  .login-shell { grid-template-columns: 1fr; }
+  .login-editorial { min-height: 48vh; padding: 2rem 1rem; }
+  .workbench { grid-template-columns: 1fr; box-shadow: 5px 5px 0 var(--ink); }
+  .decision-panel { border-top: 2px solid var(--line); border-left: 0; }
+  .item-topbar { grid-template-columns: 1fr auto; }
+  .position-marker { grid-column: 1 / -1; grid-row: 1; }
+  .back-link, .item-nav { grid-row: 2; }
+  .metadata-strip { grid-template-columns: 1fr; }
+  .metadata-strip > div { border-right: 0; border-bottom: 2px solid var(--line); }
+  .metadata-strip > div:last-child { border-bottom: 0; }
+  .reviewed-row { grid-template-columns: 1fr auto; padding-left: 0.75rem; }
+  .reviewed-row .decision-chip { grid-column: 1; margin-top: 0.7rem; }
+  .row-copy { grid-column: 1; }
+  .change-link { grid-column: 2; grid-row: 1 / 3; }
+  .card-topline { align-items: flex-start; flex-direction: column; }
+  .job-description { max-height: none; overflow: visible; }
+}
+@media (max-width: 360px) {
+  .masthead-label { display: none; }
+  .evidence-panel, .decision-panel, .login-card { padding: 1rem; }
+  .item-nav-link { min-width: 64px; padding: 0 0.35rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .decision:hover, .decision:focus-visible { transform: none; }
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ink: #ece7db;
-    --muted: #a8a294;
-    --paper: #17150f;
-    --panel: #201d15;
-    --line: #3d382c;
-    --surface: #262218;
-    --field: #191611;
-    --accent: #c64c37;
-    --accent-dark: #e88a74;
-    --accent-hover: #a63e2c;
-    --ok: #6fce97;
-    --caution: #d9b35c;
-  }
+  .job-row:hover, .job-row:focus-visible, .decision:hover, .decision:focus-visible { transform: none; }
 }
 """
