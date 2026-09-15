@@ -795,7 +795,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .audit-card .status-kicker { background: var(--caution); }
 .job-meta { margin: 0.75rem 0 1.1rem; color: var(--muted); font-size: 1.05rem; }
 .company { color: var(--ink); font-weight: 900; }
-.metadata-strip { display: grid; grid-template-columns: repeat(3, 1fr); border: 2px solid var(--line); }
+.metadata-strip { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 2rem; border: 2px solid var(--line); }
 .metadata-strip > div { min-width: 0; padding: 0.6rem; border-right: 2px solid var(--line); }
 .metadata-strip > div:last-child { border-right: 0; }
 .metadata-strip small, .metadata-strip span { display: block; }
