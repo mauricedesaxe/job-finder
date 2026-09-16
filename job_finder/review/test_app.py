@@ -132,6 +132,14 @@ def test_the_login_uses_the_editorial_split_and_route_line() -> None:
     assert "<script" not in response.text
 
 
+def test_the_theme_follows_the_system_color_scheme() -> None:
+    response = _client(_queue()).get("/review")
+
+    assert '<meta name="color-scheme" content="light dark">' in response.text
+    assert "color-scheme: light dark" in response.text
+    assert "@media (prefers-color-scheme: dark)" in response.text
+
+
 def test_a_job_page_shows_the_existing_job_metadata() -> None:
     item = _item(TODAY, "qualified")
 
