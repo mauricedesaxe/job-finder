@@ -5,6 +5,10 @@ and puts the strongest matches in a private review queue. It uses Dagster to
 run the search pipeline, PostgreSQL to store results, Jina to find and scrape
 listings, and OpenRouter to evaluate them.
 
+[![I made my job search even easier with AI (I improved my job finder)](https://i.ytimg.com/vi/bO7vzA0xbWg/hqdefault.jpg)](https://youtu.be/bO7vzA0xbWg)
+
+[Watch the Job Finder demo on YouTube](https://youtu.be/bO7vzA0xbWg).
+
 This README has two setup paths:
 
 - [Run Job Finder for yourself](#run-job-finder-for-yourself) if you want job
