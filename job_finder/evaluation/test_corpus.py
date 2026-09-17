@@ -16,6 +16,7 @@ from job_finder.evaluation.corpus import (
     load_evaluation_corpus,
     score_evaluation_corpus,
 )
+from scripts.evaluate_corpus import _parse_arguments
 from job_finder.evaluation.models import Qualified
 
 
@@ -152,6 +153,12 @@ def test_exposes_the_corpus_gate_as_a_module_command() -> None:
 
     assert result.returncode == 0
     assert "--suite {direct,ats}" in result.stdout
+    assert "--provider {openrouter,jev}" in result.stdout
+
+
+def test_parses_the_provider_with_openrouter_as_the_default() -> None:
+    assert _parse_arguments([]).provider == "openrouter"
+    assert _parse_arguments(["--provider", "jev"]).provider == "jev"
 
 
 def test_scores_false_positives_and_false_negatives_against_separate_populations() -> None:

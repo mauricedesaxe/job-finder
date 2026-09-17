@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from job_finder.config import (
+    CorpusEvaluationSettings,
     DatabaseSettings,
     LangfuseSettings,
     OpenRouterSettings,
@@ -74,6 +75,31 @@ def test_openrouter_settings_rejects_a_missing_api_key(
 
     with pytest.raises(ValidationError):
         _ = OpenRouterSettings.from_environment()
+
+
+def test_corpus_settings_default_to_openrouter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://example/evaluation")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "test-ref")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+
+    settings = CorpusEvaluationSettings.from_environment()
+
+    assert settings.provider == "openrouter"
+    assert settings.api_key == "openrouter-secret"
+
+
+def test_jev_corpus_settings_only_require_the_typesafe_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://example/evaluation")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "test-ref")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "typesafe-secret")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    settings = CorpusEvaluationSettings.from_environment("jev")
+
+    assert settings.provider == "jev"
+    assert settings.api_key == "typesafe-secret"
 
 
 def test_langfuse_settings_require_valid_credentials(

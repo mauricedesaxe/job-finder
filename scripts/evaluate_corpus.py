@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -25,6 +27,12 @@ from job_finder.evaluation.corpus import (
     score_evaluation_corpus,
 )
 from job_finder.evaluation.evaluate import evaluate_job
+from job_finder.evaluation.jev import (
+    JevCriterionObservation,
+    JevRunMetrics,
+    evaluate_prompt as evaluate_jev_prompt,
+    summarize_observations,
+)
 from job_finder.evaluation.models import (
     CriterionResult,
     ModelCallContext,
@@ -46,15 +54,22 @@ Connection = psycopg.Connection[tuple[object, ...]]
 
 class CorpusArguments(argparse.Namespace):
     suite: CorpusSuite = "direct"
+    provider: Literal["openrouter", "jev"] = "openrouter"
+
+
+@dataclass(frozen=True)
+class JevCaseEvaluation:
+    result: EvaluationCorpusResult
+    observations: tuple[JevCriterionObservation, ...]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    suite = _parse_suite(argv)
-    settings = CorpusEvaluationSettings.from_environment()
+    arguments = _parse_arguments(argv)
+    settings = CorpusEvaluationSettings.from_environment(arguments.provider)
     observed_at = datetime.now(UTC)
     rates = format_compensation_rates(fetch_exchange_rates(observed_at=observed_at).rates)
     cases: tuple[EvaluationCorpusCase, ...] = (
-        load_ats_evaluation_corpus() if suite == "ats" else load_evaluation_corpus()
+        load_ats_evaluation_corpus() if arguments.suite == "ats" else load_evaluation_corpus()
     )
     run_id = uuid4()
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
@@ -65,32 +80,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id,
             release,
             settings.implementation_ref,
-            suite,
+            arguments.suite,
+            arguments.provider,
             len(cases),
             observed_at,
         )
+    observations: tuple[JevCriterionObservation, ...] = ()
     with ThreadPoolExecutor(max_workers=settings.worker_count) as executor:
-        futures = tuple(
-            executor.submit(
-                _evaluate_case,
-                case,
-                release,
-                settings.postgres_dsn,
-                settings.openrouter_api_key,
-                run_id,
-                rates,
+        if settings.provider == "openrouter":
+            futures = tuple(
+                executor.submit(
+                    _evaluate_case,
+                    case,
+                    release,
+                    settings.postgres_dsn,
+                    settings.api_key,
+                    run_id,
+                    rates,
+                )
+                for case in cases
             )
-            for case in cases
-        )
-        results = tuple(future.result() for future in futures)
+            results = tuple(future.result() for future in futures)
+        else:
+            jev_futures = tuple(
+                executor.submit(
+                    _evaluate_jev_case,
+                    case,
+                    release,
+                    settings.api_key,
+                    rates,
+                )
+                for case in cases
+            )
+            case_evaluations = tuple(future.result() for future in jev_futures)
+            results = tuple(evaluation.result for evaluation in case_evaluations)
+            observations = tuple(
+                observation
+                for evaluation in case_evaluations
+                for observation in evaluation.observations
+            )
     report = score_evaluation_corpus(results)
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         _complete_run(connection, run_id, report, datetime.now(UTC))
     _print_report(report)
+    if settings.provider == "jev":
+        _print_jev_metrics(summarize_observations(observations))
     return 0 if report.passed else 1
 
 
-def _parse_suite(argv: Sequence[str] | None) -> CorpusSuite:
+def _parse_arguments(argv: Sequence[str] | None) -> CorpusArguments:
     parser = argparse.ArgumentParser(description="Run the Python evaluation corpus gate.")
     _ = parser.add_argument(
         "--suite",
@@ -98,8 +136,44 @@ def _parse_suite(argv: Sequence[str] | None) -> CorpusSuite:
         default="direct",
         help="fixture suite to evaluate (default: direct)",
     )
+    _ = parser.add_argument(
+        "--provider",
+        choices=("openrouter", "jev"),
+        default="openrouter",
+        help="evaluation provider (default: openrouter)",
+    )
     arguments = parser.parse_args(argv, namespace=CorpusArguments())
-    return arguments.suite
+    return arguments
+
+
+def _evaluate_jev_case(
+    case: EvaluationCorpusCase,
+    release: PromptRelease,
+    api_key: str,
+    rates: str,
+) -> JevCaseEvaluation:
+    observations: list[JevCriterionObservation] = []
+
+    def evaluate(prompt: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        result = evaluate_jev_prompt(prompt, values, api_key=api_key)
+        if isinstance(result, JevCriterionObservation):
+            observations.append(result)
+            return result.result
+        return result
+
+    try:
+        result = evaluate_corpus_case(
+            case,
+            lambda job: evaluate_job(job, release, evaluate, rates=rates),
+        )
+    except Exception as error:
+        result = EvaluationCorpusResult(
+            name=case.name,
+            expected_outcome=case.expected_outcome,
+            actual_outcome=None,
+            reason=f"{type(error).__name__}: {error}",
+        )
+    return JevCaseEvaluation(result=result, observations=tuple(observations))
 
 
 def _evaluate_case(
@@ -187,6 +261,7 @@ def _start_run(
     release: PromptRelease,
     implementation_ref: str,
     suite: CorpusSuite,
+    provider: Literal["openrouter", "jev"],
     case_count: int,
     started_at: datetime,
 ) -> None:
@@ -202,7 +277,13 @@ def _start_run(
             f"corpus:{run_id}",
             implementation_ref,
             release.id,
-            Jsonb({"corpus": f"python-{suite}-markdown-v1", "case_count": case_count}),
+            Jsonb(
+                {
+                    "corpus": f"python-{suite}-markdown-v1",
+                    "case_count": case_count,
+                    "provider": provider,
+                }
+            ),
             started_at,
         ),
     )
@@ -297,6 +378,21 @@ def _print_report(report: EvaluationCorpusReport) -> None:
         )
     )
     print(f"Operational failures: {report.operational_failure_count}")
+
+
+def _print_jev_metrics(metrics: JevRunMetrics) -> None:
+    print(f"Jev requests: {metrics.request_count}")
+    print(f"Jev tokens: {metrics.input_tokens} input, {metrics.output_tokens} output")
+    print(f"Jev estimated cost: ${metrics.estimated_cost_usd:.6f}")
+    if metrics.p50_latency_ms is None or metrics.p95_latency_ms is None:
+        print("Jev request latency: unavailable")
+    else:
+        print(
+            "Jev request latency: p50 {:.1f} ms, p95 {:.1f} ms".format(
+                metrics.p50_latency_ms,
+                metrics.p95_latency_ms,
+            )
+        )
 
 
 if __name__ == "__main__":

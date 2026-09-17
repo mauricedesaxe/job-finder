@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
@@ -78,16 +78,21 @@ class CorpusEvaluationSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     postgres_dsn: str = Field(min_length=1)
-    openrouter_api_key: str = Field(min_length=1)
+    provider: Literal["openrouter", "jev"]
+    api_key: str = Field(min_length=1)
     implementation_ref: str = Field(min_length=1)
     worker_count: int = Field(default=12, gt=0, le=32)
 
     @classmethod
-    def from_environment(cls) -> CorpusEvaluationSettings:
+    def from_environment(
+        cls, provider: Literal["openrouter", "jev"] = "openrouter"
+    ) -> CorpusEvaluationSettings:
+        api_key_name = "OPENROUTER_API_KEY" if provider == "openrouter" else "TYPESAFE_API_KEY"
         return cls.model_validate(
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),
-                "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY"),
+                "provider": provider,
+                "api_key": os.environ.get(api_key_name),
                 "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF"),
                 "worker_count": os.environ.get("JOB_FINDER_EVAL_WORKER_COUNT", "12"),
             }
