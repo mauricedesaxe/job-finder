@@ -66,7 +66,7 @@ class JevCaseEvaluation:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = _parse_arguments(argv)
+    arguments = parse_arguments(argv)
     settings = CorpusEvaluationSettings.from_environment(arguments.provider)
     observed_at = datetime.now(UTC)
     rates = format_compensation_rates(fetch_exchange_rates(observed_at=observed_at).rates)
@@ -137,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if report.passed else 1
 
 
-def _parse_arguments(argv: Sequence[str] | None) -> CorpusArguments:
+def parse_arguments(argv: Sequence[str] | None) -> CorpusArguments:
     parser = argparse.ArgumentParser(description="Run the Python evaluation corpus gate.")
     _ = parser.add_argument(
         "--suite",
