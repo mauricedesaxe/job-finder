@@ -15,8 +15,10 @@ from job_finder.evaluation.jev import (
     JevCriterionObservation,
     JevHttpResponse,
     JevRunMetrics,
+    JevRetryPolicy,
     JevSystemOneResponse,
     evaluate_prompt,
+    jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.models import (
@@ -34,7 +36,7 @@ def test_validates_the_frozen_noul_response_boundary() -> None:
     assert response.model == JEV_MODEL
     assert response.answers["remote-europe-eligible"].noul == 0.75
     with pytest.raises(ValidationError):
-        response.model = "jev-latest"
+        setattr(response, "model", "jev-latest")
     with pytest.raises(ValidationError):
         _ = JevSystemOneResponse.model_validate_json(
             _response_body(0.75).replace(JEV_MODEL, "jev-latest")
@@ -104,7 +106,7 @@ def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result()
     )
 
 
-@pytest.mark.parametrize("status", (429, 500, 529))
+@pytest.mark.parametrize("status", (408, 429, 500, 529, 599))
 def test_maps_retryable_http_errors(status: int) -> None:
     prompt = build_prompt_release().versions[0]
 
@@ -112,6 +114,7 @@ def test_maps_retryable_http_errors(status: int) -> None:
         prompt,
         {"job": "Remote in Europe"},
         api_key="secret",
+        retry_policy=JevRetryPolicy(max_attempts=1),
         sender=lambda _url, _headers, _body, _timeout: JevHttpResponse(
             status_code=status, body="{}"
         ),
@@ -122,6 +125,34 @@ def test_maps_retryable_http_errors(status: int) -> None:
         error_code=f"http_{status}",
         reason=f"Jev returned HTTP {status}",
     )
+
+
+def test_retries_transient_responses_with_exponential_backoff() -> None:
+    prompt = build_prompt_release().versions[0]
+    responses = iter(
+        (
+            JevHttpResponse(status_code=429, body="{}"),
+            JevHttpResponse(status_code=529, body="{}", retry_after_seconds=0.75),
+            JevHttpResponse(status_code=200, body=_response_body(0.75)),
+        )
+    )
+    delays: list[float] = []
+    latencies: list[int] = []
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Remote in Europe"},
+        api_key="secret",
+        sender=lambda _url, _headers, _body, _timeout: next(responses),
+        retry_policy=JevRetryPolicy(max_attempts=3, base_delay_seconds=0.25),
+        sleep=delays.append,
+        clock=iter((0.0, 0.1, 1.0, 1.2, 2.0, 2.3)).__next__,
+        observe_request=latencies.append,
+    )
+
+    assert isinstance(result, JevCriterionObservation)
+    assert delays == [0.25, 0.75]
+    assert latencies == [100, 200, 300]
 
 
 def test_maps_terminal_network_and_invalid_response_errors() -> None:
@@ -144,6 +175,7 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
         {"job": "Remote in Europe"},
         api_key="secret",
         sender=timeout,
+        retry_policy=JevRetryPolicy(max_attempts=1),
     )
     invalid = evaluate_prompt(
         prompt,
@@ -158,7 +190,7 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
     assert terminal.error_code == "http_401"
     assert isinstance(network, RetryableOperationalError)
     assert network.error_code == "network_error"
-    assert isinstance(invalid, RetryableOperationalError)
+    assert isinstance(invalid, TerminalOperationalError)
     assert invalid.error_code == "invalid_response"
 
 
@@ -176,6 +208,16 @@ def test_summarizes_tokens_cost_and_interpolated_latency_percentiles() -> None:
     assert metrics.estimated_cost_usd == Decimal("0.0000168")
     assert metrics.p50_latency_ms == 200
     assert metrics.p95_latency_ms == 290
+
+    metrics_with_failed_attempt = summarize_observations(observations, (50, 100, 300))
+    assert metrics_with_failed_attempt.request_count == 3
+    assert metrics_with_failed_attempt.p50_latency_ms == 100
+
+
+def test_jev_policy_identity_is_stable() -> None:
+    digest = jev_policy_digest("1 EUR ~= 1.10 USD")
+    assert digest == "21b93830db6d2d425e16d4ed521615fc96bffc17f862034ac901cde3eb09251b"
+    assert digest != jev_policy_digest("1 EUR ~= 1.20 USD")
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,7 @@ from job_finder.evaluation.jev import (
     JevCriterionObservation,
     JevRunMetrics,
     evaluate_prompt as evaluate_jev_prompt,
+    jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.models import (
@@ -61,6 +62,7 @@ class CorpusArguments(argparse.Namespace):
 class JevCaseEvaluation:
     result: EvaluationCorpusResult
     observations: tuple[JevCriterionObservation, ...]
+    request_latencies_ms: tuple[int, ...]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -83,9 +85,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.suite,
             arguments.provider,
             len(cases),
+            rates,
             observed_at,
         )
     observations: tuple[JevCriterionObservation, ...] = ()
+    request_latencies_ms: tuple[int, ...] = ()
     with ThreadPoolExecutor(max_workers=settings.worker_count) as executor:
         if settings.provider == "openrouter":
             futures = tuple(
@@ -119,12 +123,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for evaluation in case_evaluations
                 for observation in evaluation.observations
             )
+            request_latencies_ms = tuple(
+                latency
+                for evaluation in case_evaluations
+                for latency in evaluation.request_latencies_ms
+            )
     report = score_evaluation_corpus(results)
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         _complete_run(connection, run_id, report, datetime.now(UTC))
     _print_report(report)
     if settings.provider == "jev":
-        _print_jev_metrics(summarize_observations(observations))
+        _print_jev_metrics(summarize_observations(observations, request_latencies_ms))
     return 0 if report.passed else 1
 
 
@@ -153,9 +162,15 @@ def _evaluate_jev_case(
     rates: str,
 ) -> JevCaseEvaluation:
     observations: list[JevCriterionObservation] = []
+    request_latencies_ms: list[int] = []
 
     def evaluate(prompt: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
-        result = evaluate_jev_prompt(prompt, values, api_key=api_key)
+        result = evaluate_jev_prompt(
+            prompt,
+            values,
+            api_key=api_key,
+            observe_request=request_latencies_ms.append,
+        )
         if isinstance(result, JevCriterionObservation):
             observations.append(result)
             return result.result
@@ -173,7 +188,11 @@ def _evaluate_jev_case(
             actual_outcome=None,
             reason=f"{type(error).__name__}: {error}",
         )
-    return JevCaseEvaluation(result=result, observations=tuple(observations))
+    return JevCaseEvaluation(
+        result=result,
+        observations=tuple(observations),
+        request_latencies_ms=tuple(request_latencies_ms),
+    )
 
 
 def _evaluate_case(
@@ -263,6 +282,7 @@ def _start_run(
     suite: CorpusSuite,
     provider: Literal["openrouter", "jev"],
     case_count: int,
+    rates: str,
     started_at: datetime,
 ) -> None:
     _ = connection.execute(
@@ -282,6 +302,9 @@ def _start_run(
                     "corpus": f"python-{suite}-markdown-v1",
                     "case_count": case_count,
                     "provider": provider,
+                    **(
+                        {"jev_policy_digest": jev_policy_digest(rates)} if provider == "jev" else {}
+                    ),
                 }
             ),
             started_at,
