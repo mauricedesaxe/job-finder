@@ -94,6 +94,22 @@ class CorpusEvaluationSettings(BaseModel):
         )
 
 
+class JevCorpusEvaluationSettings(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    api_key: str = Field(min_length=1)
+    worker_count: int = Field(default=4, gt=0, le=32)
+
+    @classmethod
+    def from_environment(cls) -> JevCorpusEvaluationSettings:
+        return cls.model_validate(
+            {
+                "api_key": os.environ.get("TYPESAFE_API_KEY"),
+                "worker_count": os.environ.get("JOB_FINDER_EVAL_WORKER_COUNT", "4"),
+            }
+        )
+
+
 class PostgresContractSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
