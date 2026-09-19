@@ -132,7 +132,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0014_snapshot_corrections.sql"
+    assert results[0][-1] == "0015_manifest_idempotency.sql"
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
