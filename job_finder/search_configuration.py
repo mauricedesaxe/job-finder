@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
+from job_finder.evaluation.models import PromptReleaseId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 
 Connection = psycopg.Connection[tuple[object, ...]]
@@ -122,6 +123,13 @@ class SearchConfigurationRevision(SearchConfigurationModel):
     configuration: SearchConfiguration
     created_at: datetime
     created_by: str = Field(min_length=1)
+
+
+class SearchConfigurationPublication(SearchConfigurationModel):
+    revision_id: Annotated[SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")]
+    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    published_at: datetime
+    published_by: str = Field(min_length=1)
 
 
 class SearchConfigurationDraft(SearchConfigurationModel):
@@ -253,6 +261,30 @@ def store_search_configuration_revision(
             f"Stored search configuration differs from revision {revision.id}"
         )
     return stored
+
+
+def load_search_configuration_publication(
+    connection: Connection,
+    revision_id: SearchConfigurationRevisionId,
+) -> SearchConfigurationPublication:
+    row = connection.execute(
+        """
+        SELECT prompt_release_id, published_at, published_by
+        FROM search_configuration_publications
+        WHERE revision_id = %s
+        """,
+        (revision_id,),
+    ).fetchone()
+    if row is None:
+        raise SearchConfigurationError(f"Search configuration publication not found: {revision_id}")
+    return SearchConfigurationPublication.model_validate(
+        {
+            "revision_id": revision_id,
+            "prompt_release_id": row[0],
+            "published_at": row[1],
+            "published_by": row[2],
+        }
+    )
 
 
 def load_search_configuration_draft(connection: Connection) -> SearchConfigurationDraft:

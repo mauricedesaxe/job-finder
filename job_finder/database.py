@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from typing import LiteralString, cast
 
@@ -10,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 MIGRATIONS_PATH = Path(__file__).with_name("migrations")
 SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"
+SEARCH_CONFIGURATION_PUBLICATION_MIGRATION = "0017_search_configuration_publications.sql"
 INITIAL_SEARCH_CONFIGURATION_REVISION_ID = (
     "621346c249608e7d8766902c2cd9fbcfb83ac687f58de8a8fdb7f81980a14099"
 )
@@ -56,6 +58,8 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
         _ = connection.execute(sql.SQL(cast(LiteralString, content.decode())), prepare=False)
         if path.name == SEARCH_CONFIGURATION_MIGRATION:
             _seed_initial_search_configuration(connection)
+        if path.name == SEARCH_CONFIGURATION_PUBLICATION_MIGRATION:
+            _backfill_search_configuration_publications(connection)
         _ = connection.execute(
             "INSERT INTO job_finder_schema_migrations (name, sha256) VALUES (%s, %s)",
             (path.name, digest),
@@ -105,3 +109,55 @@ def _seed_initial_search_configuration(
         """,
         (revision_id, actor),
     )
+
+
+def _backfill_search_configuration_publications(
+    connection: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    from job_finder.evaluation.prompt_releases import (  # noqa: PLC0415
+        build_prompt_release,
+        store_prompt_release,
+    )
+    from job_finder.search_configuration import (  # noqa: PLC0415
+        SearchConfigurationRevisionId,
+        load_search_configuration_publication,
+        load_search_configuration_revision,
+    )
+
+    actor = f"migration:{SEARCH_CONFIGURATION_PUBLICATION_MIGRATION}"
+    published_at_row = connection.execute("SELECT CURRENT_TIMESTAMP").fetchone()
+    assert published_at_row is not None
+    published_at = cast(datetime, published_at_row[0])
+    revision_ids = connection.execute(
+        """
+        SELECT base_revision_id FROM search_configuration_drafts
+        UNION
+        SELECT revision_id FROM active_search_configuration
+        ORDER BY 1
+        """
+    ).fetchall()
+    for row in revision_ids:
+        revision = load_search_configuration_revision(
+            connection, SearchConfigurationRevisionId(str(row[0]))
+        )
+        release = build_prompt_release(revision.configuration)
+        _ = store_prompt_release(
+            connection,
+            release,
+            created_at=published_at,
+            created_by=actor,
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT (revision_id) DO NOTHING
+            """,
+            (revision.id, release.id, published_at, actor),
+        )
+        publication = load_search_configuration_publication(connection, revision.id)
+        if publication.prompt_release_id != release.id:
+            raise SchemaMigrationError(
+                f"Published search configuration differs from revision {revision.id}"
+            )
