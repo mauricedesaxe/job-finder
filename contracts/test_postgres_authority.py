@@ -4,10 +4,12 @@ from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
+from typing import LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -16,7 +18,7 @@ from psycopg import sql
 
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
-from job_finder.database import apply_migrations
+from job_finder.database import MIGRATIONS_PATH, apply_migrations
 from job_finder.evaluation import (
     EvaluationManifestCase,
     LangfuseProjection,
@@ -66,6 +68,16 @@ from job_finder.review.postgres import (
     load_review_queue,
     record_review,
 )
+from job_finder.search_configuration import (
+    DEFAULT_SEARCH_CONFIGURATION,
+    build_search_configuration_revision,
+    compare_and_swap_active_search_configuration,
+    load_active_search_configuration,
+    load_search_configuration_draft,
+    load_search_configuration_revision,
+    replace_search_configuration_draft,
+    store_search_configuration_revision,
+)
 from job_finder.evaluation.openrouter import (
     HttpResponse,
     RetryPolicy,
@@ -111,11 +123,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0013_snapshot_compensation.sql",
             "0014_snapshot_corrections.sql",
             "0015_manifest_idempotency.sql",
+            "0016_search_configuration_revisions.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (15,)
+        ).fetchone() == (16,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -132,7 +145,246 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0015_manifest_idempotency.sql"
+    assert results[0][-1] == "0016_search_configuration_revisions.sql"
+
+
+def test_search_configuration_migration_preserves_every_legacy_row(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0015_manifest_idempotency.sql")
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        decision_id = _insert_review_decision(connection, run_id, release.id, now, 91, "qualified")
+        assert enqueue_qualified_review_item(connection, decision_id, now.date())
+        review_item = load_review_queue(connection).items[0]
+        saved = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=review_item.id,
+                evaluation_id=review_item.evaluation_id,
+                snapshot_id=review_item.snapshot_id,
+                decision="pursue",
+                target_profile="applied-ai-product-engineer",
+                actor="owner",
+                created_at=now,
+            ),
+        )
+        assert isinstance(saved, ReviewSaved)
+        include_review_event(
+            connection,
+            review_event_id=saved.review_event_id,
+            critical=True,
+            reason="Preserve this evidence.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="configuration-migration-preservation",
+        )
+        _ = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now,
+            created_by="owner",
+            idempotency_key="configuration-migration-preservation",
+        )
+        legacy_tables = _public_tables(connection)
+        before = _table_contents(connection, legacy_tables)
+
+        migrations = apply_migrations(connection)
+
+        assert migrations[-1] == "0016_search_configuration_revisions.sql"
+        assert _table_contents(connection, legacy_tables) == before
+
+
+def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        active = load_active_search_configuration(connection)
+        draft = load_search_configuration_draft(connection)
+        stored = load_search_configuration_revision(connection, active.revision.id)
+
+        assert active.generation == 0
+        assert active.revision.configuration == DEFAULT_SEARCH_CONFIGURATION
+        assert stored == active.revision
+        assert draft.base_revision_id == active.revision.id
+        assert draft.version == 0
+        assert draft.configuration == DEFAULT_SEARCH_CONFIGURATION
+
+
+def test_search_configuration_revision_and_pointer_invariants(authority_schema: str) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        initial = load_active_search_configuration(connection)
+        changed_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+            update={
+                "search_keywords": (*DEFAULT_SEARCH_CONFIGURATION.search_keywords, "cto café"),
+                "personal_criteria": (
+                    DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                        update={"name": "Éligibilité géographique"}
+                    ),
+                    *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+                ),
+            }
+        )
+        changed = build_search_configuration_revision(
+            changed_configuration,
+            created_at=now,
+            created_by="owner",
+        )
+        assert store_search_configuration_revision(connection, changed) == changed
+        assert store_search_configuration_revision(connection, changed) == changed
+
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                "UPDATE search_configuration_revisions SET created_by = 'other' WHERE id = %s",
+                (changed.id,),
+            )
+
+        draft = replace_search_configuration_draft(
+            connection,
+            expected_version=0,
+            base_revision_id=initial.revision.id,
+            configuration=changed_configuration,
+            updated_at=now,
+            updated_by="owner",
+        )
+        assert draft is not None
+        assert draft.version == 1
+        assert (
+            replace_search_configuration_draft(
+                connection,
+                expected_version=0,
+                base_revision_id=initial.revision.id,
+                configuration=DEFAULT_SEARCH_CONFIGURATION,
+                updated_at=now,
+                updated_by="stale-owner",
+            )
+            is None
+        )
+
+        activated = compare_and_swap_active_search_configuration(
+            connection,
+            expected_revision_id=initial.revision.id,
+            expected_generation=0,
+            revision_id=changed.id,
+            activated_at=now,
+            activated_by="owner",
+        )
+        assert activated is not None
+        assert activated.generation == 1
+        assert activated.revision == changed
+        restored = compare_and_swap_active_search_configuration(
+            connection,
+            expected_revision_id=changed.id,
+            expected_generation=1,
+            revision_id=initial.revision.id,
+            activated_at=now + timedelta(seconds=1),
+            activated_by="owner",
+        )
+        assert restored is not None
+        assert restored.generation == 2
+        assert (
+            compare_and_swap_active_search_configuration(
+                connection,
+                expected_revision_id=initial.revision.id,
+                expected_generation=0,
+                revision_id=changed.id,
+                activated_at=now + timedelta(seconds=2),
+                activated_by="stale-owner",
+            )
+            is None
+        )
+
+
+def test_search_configuration_database_rejects_malformed_content(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                """
+                INSERT INTO search_configuration_revisions (
+                  id, content, created_at, created_by
+                ) VALUES (%s, '{"schema_version": 1}'::jsonb, CURRENT_TIMESTAMP, 'owner')
+                """,
+                ("f" * 64,),
+            )
+
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="search_configuration_revision_matches_content",
+        ):
+            connection.execute(
+                """
+                INSERT INTO search_configuration_revisions (
+                  id, content, created_at, created_by
+                )
+                SELECT %s, content, CURRENT_TIMESTAMP, 'owner'
+                FROM search_configuration_revisions
+                LIMIT 1
+                """,
+                ("f" * 64,),
+            )
+
+
+def test_concurrent_search_configuration_activation_has_one_winner(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        initial = load_active_search_configuration(connection)
+        revisions = tuple(
+            build_search_configuration_revision(
+                DEFAULT_SEARCH_CONFIGURATION.model_copy(
+                    update={
+                        "search_keywords": (
+                            *DEFAULT_SEARCH_CONFIGURATION.search_keywords,
+                            keyword,
+                        )
+                    }
+                ),
+                created_at=now,
+                created_by="owner",
+            )
+            for keyword in ("cto", "vp engineering")
+        )
+        for revision in revisions:
+            _ = store_search_configuration_revision(connection, revision)
+
+    activation_start = Barrier(2)
+
+    def activate(revision_index: int) -> bool:
+        with _connection(authority_schema) as connection:
+            _ = activation_start.wait()
+            return (
+                compare_and_swap_active_search_configuration(
+                    connection,
+                    expected_revision_id=initial.revision.id,
+                    expected_generation=0,
+                    revision_id=revisions[revision_index].id,
+                    activated_at=now,
+                    activated_by=f"owner-{revision_index}",
+                )
+                is not None
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(activate, range(2)))
+
+    assert sorted(results) == [False, True]
+    with _connection(authority_schema) as connection:
+        active = load_active_search_configuration(connection)
+    assert active.generation == 1
+    assert active.revision.id in {revision.id for revision in revisions}
 
 
 def test_transaction_rolls_back_receipt_when_projection_fails(authority_schema: str) -> None:
@@ -1788,6 +2040,64 @@ def _connection(
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
         yield connection
+
+
+def _apply_migrations_through(
+    connection: psycopg.Connection[tuple[object, ...]],
+    final_name: str,
+) -> None:
+    _ = connection.execute(
+        """
+        CREATE TABLE job_finder_schema_migrations (
+          name TEXT PRIMARY KEY,
+          sha256 CHAR(64) NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    for path in sorted(MIGRATIONS_PATH.glob("*.sql")):
+        if path.name > final_name:
+            break
+        content = path.read_bytes()
+        _ = connection.execute(sql.SQL(cast(LiteralString, content.decode())), prepare=False)
+        _ = connection.execute(
+            "INSERT INTO job_finder_schema_migrations (name, sha256) VALUES (%s, %s)",
+            (path.name, hashlib.sha256(content).hexdigest()),
+        )
+
+
+def _public_tables(connection: psycopg.Connection[tuple[object, ...]]) -> tuple[str, ...]:
+    return tuple(
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = current_schema()
+              AND tablename <> 'job_finder_schema_migrations'
+            ORDER BY tablename
+            """
+        ).fetchall()
+    )
+
+
+def _table_contents(
+    connection: psycopg.Connection[tuple[object, ...]],
+    tables: tuple[str, ...],
+) -> dict[str, object]:
+    contents: dict[str, object] = {}
+    for table in tables:
+        row = connection.execute(
+            sql.SQL(
+                """
+                SELECT COALESCE(jsonb_agg(row_data ORDER BY row_data::text), '[]'::jsonb)
+                FROM (SELECT to_jsonb(stored_row) AS row_data FROM {} AS stored_row) AS rows
+                """
+            ).format(sql.Identifier(table))
+        ).fetchone()
+        assert row is not None
+        contents[table] = row[0]
+    return contents
 
 
 def _insert_run_and_job(
