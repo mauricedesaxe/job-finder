@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -18,7 +19,17 @@ from pydantic import (
 )
 
 from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
-from job_finder.evaluation.prompts import PROMPTS, PromptDefinition, PromptPhase
+from job_finder.evaluation.prompts import (
+    ENRICHMENT,
+    EVALUATION_PROMPTS,
+    PROMPTS,
+    TITLE_DEDUPLICATION,
+    PromptDefinition,
+    PromptPhase,
+)
+
+if TYPE_CHECKING:
+    from job_finder.search_configuration import SearchConfiguration
 
 RELEASE_NAME = "release-2026-09-14-1"
 MODEL = "google/gemini-2.5-flash"
@@ -63,6 +74,10 @@ DEDUPLICATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "additionalProperties": False,
 }
 _STRINGS = TypeAdapter(tuple[str, ...])
+_CONFIGURED_PROMPTS = {
+    (prompt.phase, prompt.criterion): prompt for prompt in EVALUATION_PROMPTS
+}
+_CONFIGURED_PLACEHOLDERS = {("filter", "compensation-minimum"): ("rates",)}
 
 
 class PromptReleaseError(RuntimeError):
@@ -116,15 +131,76 @@ class PromptRelease(PromptModel):
         raise PromptReleaseError(f"Prompt release {self.name} does not contain {name}")
 
 
-def build_prompt_release() -> PromptRelease:
-    versions = tuple(build_prompt_version(prompt) for prompt in PROMPTS)
+def build_prompt_release(configuration: SearchConfiguration | None = None) -> PromptRelease:
+    prompts = PROMPTS if configuration is None else _configured_prompts(configuration)
+    versions = tuple(build_prompt_version(prompt) for prompt in prompts)
     digest = _digest([[version.definition.name, version.id] for version in versions])
     return PromptRelease(
         id=PromptReleaseId(digest),
-        name=RELEASE_NAME,
+        name=RELEASE_NAME if prompts == PROMPTS else f"release-{digest}",
         content_digest=digest,
         versions=versions,
     )
+
+
+def _configured_prompts(configuration: SearchConfiguration) -> tuple[PromptDefinition, ...]:
+    filters = tuple(
+        _configured_prompt("filter", criterion.key, criterion.instructions)
+        for criterion in configuration.personal_criteria
+    )
+    profiles = tuple(
+        _configured_prompt("profile", profile.key, profile.instructions)
+        for profile in configuration.target_profiles
+    )
+    return (*filters, *profiles, ENRICHMENT, TITLE_DEDUPLICATION)
+
+
+def _configured_prompt(
+    phase: PromptPhase, key: str, instructions: str
+) -> PromptDefinition:
+    existing = _CONFIGURED_PROMPTS.get((phase, key))
+    if existing is not None:
+        if existing.system_message == instructions:
+            return existing
+        return replace(
+            existing,
+            system_message=_escape_instructions(
+                instructions, _CONFIGURED_PLACEHOLDERS.get((phase, key), ())
+            ),
+        )
+    return PromptDefinition(
+        name=f"job-finder-configured-{phase}-{key}",
+        criterion=key,
+        phase=phase,
+        system_message=_escape_instructions(instructions, ()),
+    )
+
+
+def _escape_instructions(instructions: str, placeholders: tuple[str, ...]) -> str:
+    escaped: list[str] = []
+    position = 0
+    while position < len(instructions):
+        placeholder = next(
+            (
+                f"{{{name}}}"
+                for name in placeholders
+                if instructions.startswith(f"{{{name}}}", position)
+                and (position == 0 or instructions[position - 1] != "{")
+                and (
+                    position + len(name) + 2 == len(instructions)
+                    or instructions[position + len(name) + 2] != "}"
+                )
+            ),
+            None,
+        )
+        if placeholder is not None:
+            escaped.append(placeholder)
+            position += len(placeholder)
+        else:
+            character = instructions[position]
+            escaped.append(character * 2 if character in "{}" else character)
+            position += 1
+    return "".join(escaped)
 
 
 def bootstrap_prompt_release(
