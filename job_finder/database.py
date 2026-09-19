@@ -6,8 +6,13 @@ from typing import LiteralString, cast
 
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 MIGRATIONS_PATH = Path(__file__).with_name("migrations")
+SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"
+INITIAL_SEARCH_CONFIGURATION_REVISION_ID = (
+    "621346c249608e7d8766902c2cd9fbcfb83ac687f58de8a8fdb7f81980a14099"
+)
 
 
 class SchemaMigrationError(RuntimeError):
@@ -49,6 +54,8 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
             migration_names.append(path.name)
             continue
         _ = connection.execute(sql.SQL(cast(LiteralString, content.decode())), prepare=False)
+        if path.name == SEARCH_CONFIGURATION_MIGRATION:
+            _seed_initial_search_configuration(connection)
         _ = connection.execute(
             "INSERT INTO job_finder_schema_migrations (name, sha256) VALUES (%s, %s)",
             (path.name, digest),
@@ -58,3 +65,43 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
     if unknown:
         raise SchemaMigrationError(f"Database contains unknown migrations: {', '.join(unknown)}")
     return tuple(migration_names)
+
+
+def _seed_initial_search_configuration(
+    connection: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    from job_finder.search_configuration import (  # noqa: PLC0415
+        DEFAULT_SEARCH_CONFIGURATION,
+        search_configuration_revision_id,
+    )
+
+    # This default is migration data, not a live application fallback. Its fixed hash
+    # makes any future source edit fail tests and migration before changing fresh installs.
+    revision_id = search_configuration_revision_id(DEFAULT_SEARCH_CONFIGURATION)
+    if revision_id != INITIAL_SEARCH_CONFIGURATION_REVISION_ID:
+        raise SchemaMigrationError("Initial search configuration changed after migration 0016")
+    content = Jsonb(DEFAULT_SEARCH_CONFIGURATION.model_dump(mode="json"))
+    actor = f"migration:{SEARCH_CONFIGURATION_MIGRATION}"
+    _ = connection.execute(
+        """
+        INSERT INTO search_configuration_revisions (id, content, created_at, created_by)
+        VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
+        """,
+        (revision_id, content, actor),
+    )
+    _ = connection.execute(
+        """
+        INSERT INTO search_configuration_drafts (
+          singleton_id, base_revision_id, version, content, updated_at, updated_by
+        ) VALUES (1, %s, 0, %s, CURRENT_TIMESTAMP, %s)
+        """,
+        (revision_id, content, actor),
+    )
+    _ = connection.execute(
+        """
+        INSERT INTO active_search_configuration (
+          singleton_id, revision_id, generation, activated_at, activated_by
+        ) VALUES (1, %s, 0, CURRENT_TIMESTAMP, %s)
+        """,
+        (revision_id, actor),
+    )
