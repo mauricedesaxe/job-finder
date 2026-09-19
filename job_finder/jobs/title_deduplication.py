@@ -58,9 +58,7 @@ def deduplicate_title(
     )
 
 
-def title_deduplication_values(
-    new_title: str, existing_titles: tuple[str, ...]
-) -> dict[str, str]:
+def title_deduplication_values(new_title: str, existing_titles: tuple[str, ...]) -> dict[str, str]:
     return {
         "newTitle": new_title,
         "existingTitles": "\n".join(
