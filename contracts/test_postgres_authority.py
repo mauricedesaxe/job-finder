@@ -86,6 +86,11 @@ from job_finder.evaluation.openrouter import (
     prompt_input_digest,
 )
 from job_finder.evaluation.prompts import ENRICHMENT, PROMPTS
+from job_finder.evaluation.prompt_releases import (
+    PromptReleaseError,
+    build_prompt_release,
+    store_prompt_release,
+)
 
 
 @pytest.fixture
@@ -565,6 +570,110 @@ def test_bootstraps_the_complete_prompt_release_idempotently(
         assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (8,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (8,)
+
+
+def test_stores_a_custom_prompt_release_exactly_and_idempotently(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "personal_criteria": (
+                DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                    update={"instructions": "Only roles open to candidates in Europe."}
+                ),
+                *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+            )
+        }
+    )
+    release = build_prompt_release(configuration)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        first = store_prompt_release(
+            connection, release, created_at=now, created_by="contract"
+        )
+        second = store_prompt_release(
+            connection, release, created_at=now + timedelta(minutes=1), created_by="retry"
+        )
+
+        assert first == release
+        assert second == release
+        assert load_prompt_release(connection, release.id) == release
+        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (
+            len(release.versions),
+        )
+        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (
+            len(release.versions),
+        )
+
+
+def test_stores_a_prompt_release_inside_a_committed_outer_transaction(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "target_profiles": (
+                DEFAULT_SEARCH_CONFIGURATION.target_profiles[0].model_copy(
+                    update={"instructions": "A profile committed by publication."}
+                ),
+                *DEFAULT_SEARCH_CONFIGURATION.target_profiles[1:],
+            )
+        }
+    )
+    release = build_prompt_release(configuration)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        with connection.transaction():
+            stored = store_prompt_release(
+                connection,
+                release,
+                created_at=now,
+                created_by="contract",
+            )
+
+        assert stored == release
+        assert load_prompt_release(connection, release.id) == release
+
+
+def test_outer_transaction_rollback_removes_a_stored_prompt_release(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "target_profiles": (
+                DEFAULT_SEARCH_CONFIGURATION.target_profiles[0].model_copy(
+                    update={"instructions": "A deliberately rolled-back profile."}
+                ),
+                *DEFAULT_SEARCH_CONFIGURATION.target_profiles[1:],
+            )
+        }
+    )
+    release = build_prompt_release(configuration)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        with pytest.raises(RuntimeError, match="rollback publication"):
+            with connection.transaction():
+                assert (
+                    store_prompt_release(
+                        connection,
+                        release,
+                        created_at=now,
+                        created_by="contract",
+                    )
+                    == release
+                )
+                raise RuntimeError("rollback publication")
+
+        with pytest.raises(PromptReleaseError, match="Prompt release not found"):
+            load_prompt_release(connection, release.id)
+        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (0,)
 
 
 def test_bootstrap_fails_loudly_when_a_release_name_is_reused(
