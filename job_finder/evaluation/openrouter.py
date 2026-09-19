@@ -515,15 +515,10 @@ def _render_messages(
     return tuple(
         {
             "role": message["role"],
-            "content": _render_template(message["content"], values),
+            "content": message["content"].format_map(values),
         }
         for message in prompt.messages
     )
-
-
-def _render_template(template: str, values: Mapping[str, str]) -> str:
-    return template.format_map(values)
-
 
 def _request_body(prompt: PromptVersion, messages: tuple[dict[str, str], ...]) -> dict[str, object]:
     return {
@@ -561,11 +556,7 @@ def _interpret_response(
     retry_policy: RetryPolicy,
     sleep: Sleeper,
 ) -> tuple[PromptAccepted[_OutputT] | OperationalFailure, ModelCallAttempt, bool]:
-    try:
-        raw = _JSON.validate_json(response.body)
-    except ValidationError:
-        fallback: dict[str, JsonValue] = {"body": response.body}
-        raw = fallback
+    raw = _response_json(response.body)
     if response.status_code != 200:
         status: Literal["retryable_error", "terminal_error"] = (
             "retryable_error"

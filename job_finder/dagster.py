@@ -16,7 +16,7 @@ from dagster import (
     define_asset_job,  # pyright: ignore[reportUnknownVariableType]
 )
 
-from job_finder.config import LangfuseSettings, OrchestrationSettings
+from job_finder.config import DatabaseSettings, LangfuseSettings, OrchestrationSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exchange_rates
 from job_finder.evaluation.langfuse import (
@@ -49,7 +49,7 @@ HeartbeatSender = Callable[[str], None]
 class JobFinderResource(ConfigurableResource["JobFinderResource"]):
     @contextmanager
     def connection(self) -> Generator[Connection, None, None]:
-        settings = OrchestrationSettings.from_environment()
+        settings = DatabaseSettings.from_environment()
         with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
             _ = apply_migrations(connection)
             yield connection

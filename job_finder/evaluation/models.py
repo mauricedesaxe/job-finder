@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, ClassVar, Generic, Literal, NewType, TypeVar
+from typing import Annotated, ClassVar, Generic, Literal, NewType, TypeVar, assert_never
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -86,6 +86,19 @@ EvaluationResult = Annotated[
     Qualified | Rejected | RetryableOperationalError | TerminalOperationalError,
     Field(discriminator="kind"),
 ]
+EvaluationOutcome = Literal["qualified", "rejected"]
+
+
+def evaluation_outcome(result: EvaluationResult) -> EvaluationOutcome | None:
+    match result:
+        case Qualified():
+            return "qualified"
+        case Rejected():
+            return "rejected"
+        case RetryableOperationalError() | TerminalOperationalError():
+            return None
+        case _:
+            assert_never(result)
 
 
 @dataclass(frozen=True)

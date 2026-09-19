@@ -45,12 +45,7 @@ def deduplicate_title(
             prompt_name=prompt_name,
             output=TitleDuplicate(isDuplicate=True, matchedTitle=exact_title),
         )
-    values = {
-        "newTitle": new_title,
-        "existingTitles": "\n".join(
-            f'{index}. "{title}"' for index, title in enumerate(existing_titles, start=1)
-        ),
-    }
+    values = title_deduplication_values(new_title, existing_titles)
     return invoke_prompt(
         release.version(prompt_name),
         values,
@@ -61,3 +56,14 @@ def deduplicate_title(
         sender=sender,
         retry_policy=retry_policy,
     )
+
+
+def title_deduplication_values(
+    new_title: str, existing_titles: tuple[str, ...]
+) -> dict[str, str]:
+    return {
+        "newTitle": new_title,
+        "existingTitles": "\n".join(
+            f'{index}. "{title}"' for index, title in enumerate(existing_titles, start=1)
+        ),
+    }

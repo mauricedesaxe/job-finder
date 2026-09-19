@@ -84,10 +84,6 @@ class JinaRetryPolicy:
             raise ValueError("Jina retry delay cannot be negative")
 
 
-def build_search_query(keyword: str, domain: str) -> str:
-    return f"site:{domain} {keyword}"
-
-
 def search_jobs(
     keyword: str,
     domain: str,
@@ -99,7 +95,7 @@ def search_jobs(
 ) -> SearchResult:
     response = _request(
         SEARCH_URL,
-        {"q": build_search_query(keyword, domain)},
+        {"q": f"site:{domain} {keyword}"},
         api_key,
         sender or send_jina_request,
         retry_policy or JinaRetryPolicy(),
