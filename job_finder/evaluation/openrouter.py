@@ -520,6 +520,7 @@ def _render_messages(
         for message in prompt.messages
     )
 
+
 def _request_body(prompt: PromptVersion, messages: tuple[dict[str, str], ...]) -> dict[str, object]:
     return {
         "model": prompt.model,
