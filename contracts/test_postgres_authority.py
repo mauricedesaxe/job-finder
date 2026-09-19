@@ -7,6 +7,7 @@ from dataclasses import replace
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import psycopg
@@ -29,7 +30,10 @@ from job_finder.evaluation import (
     deliver_next_projection,
     exclude_review_event,
     include_review_event,
+    list_manifests,
+    load_projection_queue_status,
     load_prompt_release,
+    preview_manifest,
     run_manifest,
 )
 from job_finder.evaluation.models import (
@@ -57,6 +61,8 @@ from job_finder.review.postgres import (
     deterministic_rejected_sample,
     enqueue_qualified_review_item,
     enqueue_rejected_audit_sample,
+    list_review_feedback,
+    load_review_feedback,
     load_review_queue,
     record_review,
 )
@@ -104,11 +110,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0012_company_application_cooldown.sql",
             "0013_snapshot_compensation.sql",
             "0014_snapshot_corrections.sql",
+            "0015_manifest_idempotency.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (14,)
+        ).fetchone() == (15,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -982,6 +989,22 @@ def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
         assert first.review_event_id == repeat.review_event_id
         assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
 
+        middle = record_review(
+            connection,
+            submission.model_copy(
+                update={"decision": "reject", "created_at": now + timedelta(minutes=1)}
+            ),
+        )
+        restored = record_review(
+            connection,
+            submission.model_copy(update={"created_at": now + timedelta(minutes=2)}),
+        )
+        assert isinstance(middle, ReviewSaved)
+        assert isinstance(restored, ReviewSaved)
+        assert len({first.review_event_id, middle.review_event_id, restored.review_event_id}) == 3
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (3,)
+        assert load_review_queue(connection).reviewed_items[0].decision == "unsure"
+
 
 def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -1247,15 +1270,30 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
         )
         assert isinstance(rejected_feedback, ReviewSaved)
         assert isinstance(qualified_feedback, ReviewSaved)
-        include_review_event(
-            connection,
-            review_event_id=rejected_feedback.review_event_id,
-            critical=True,
-            reason="False positives are costly.",
-            actor="owner",
-            created_at=now,
-            idempotency_key="curate:negative",
-        )
+        uncurated = list_review_feedback(connection, curation="uncurated")
+        assert {item.review_event_id for item in uncurated.items} == {
+            rejected_feedback.review_event_id,
+            qualified_feedback.review_event_id,
+        }
+
+        curation_start = Barrier(2)
+
+        def include_negative(_attempt: int) -> UUID:
+            with _connection(authority_schema) as concurrent_connection:
+                _ = curation_start.wait()
+                return include_review_event(
+                    concurrent_connection,
+                    review_event_id=rejected_feedback.review_event_id,
+                    critical=True,
+                    reason="False positives are costly.",
+                    actor="owner",
+                    created_at=now,
+                    idempotency_key="curate:negative",
+                ).id
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            curation_ids = tuple(executor.map(include_negative, range(2)))
+        assert curation_ids[0] == curation_ids[1]
         include_review_event(
             connection,
             review_event_id=qualified_feedback.review_event_id,
@@ -1265,42 +1303,125 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
             created_at=now,
             idempotency_key="curate:positive",
         )
+        connection.execute(
+            """
+            INSERT INTO snapshot_corrections (
+              snapshot_id, description, reason, created_at
+            ) VALUES (%s, %s, %s, %s)
+            """,
+            (qualified.snapshot_id, "Corrected job description.", "ATS repair", now),
+        )
+
+        preview = preview_manifest(connection, ManifestPolicy())
+        assert preview.id == "0" * 64
+        assert preview.case_count == 2
+        assert preview.critical_count == 1
+        assert preview.trial_count == 4
 
         first = create_manifest(
             connection,
             policy=ManifestPolicy(),
             created_at=now,
             created_by="owner",
+            idempotency_key="manifest:first",
         )
+        assert (
+            next(
+                case
+                for case in first.cases
+                if case.review_event_id == rejected_feedback.review_event_id
+            ).input.description
+            == "Corrected job description."
+        )
+        revised_feedback = record_review(
+            connection,
+            ReviewSubmission(
+                review_item_id=qualified.id,
+                evaluation_id=qualified.evaluation_id,
+                snapshot_id=qualified.snapshot_id,
+                decision="pursue",
+                target_profile="applied-ai-product-engineer",
+                primary_reason="technology-fit",
+                actor="owner",
+                created_at=now + timedelta(seconds=1),
+            ),
+        )
+        assert isinstance(revised_feedback, ReviewSaved)
+        include_review_event(
+            connection,
+            review_event_id=revised_feedback.review_event_id,
+            critical=False,
+            reason="Revised positive control.",
+            actor="owner",
+            created_at=now + timedelta(seconds=1),
+            idempotency_key="curate:revised",
+        )
+        retried_first = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now + timedelta(seconds=1),
+            created_by="owner",
+            idempotency_key="manifest:first",
+        )
+        assert retried_first == first
+        revised_manifest = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=now + timedelta(seconds=1),
+            created_by="owner",
+            idempotency_key="manifest:revised",
+        )
+        assert rejected_feedback.review_event_id not in {
+            case.review_event_id for case in revised_manifest.cases
+        }
         exclude_review_event(
             connection,
             review_event_id=qualified_feedback.review_event_id,
             reason="Temporarily disputed.",
             actor="owner",
-            created_at=now + timedelta(seconds=1),
+            created_at=now + timedelta(seconds=2),
             idempotency_key="exclude:positive",
         )
         second = create_manifest(
             connection,
             policy=ManifestPolicy(),
-            created_at=now + timedelta(seconds=1),
+            created_at=now + timedelta(seconds=2),
             created_by="owner",
+            idempotency_key="manifest:second",
         )
 
         assert len(first.cases) == 2
         assert sorted(case.trial_count for case in first.cases) == [1, 3]
         assert len(second.cases) == 1
-        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (2,)
+        manifests = list_manifests(connection)
+        assert tuple(item.id for item in manifests.items) == (
+            second.id,
+            revised_manifest.id,
+            first.id,
+        )
+        assert manifests.items[0].case_count == 1
+        excluded = list_review_feedback(connection, curation="excluded")
+        assert tuple(item.review_event_id for item in excluded.items) == (
+            qualified_feedback.review_event_id,
+        )
+        frozen_feedback = load_review_feedback(connection, qualified_feedback.review_event_id)
+        assert frozen_feedback.frozen_manifest_count == 2
+        assert frozen_feedback.curation is not None
+        assert frozen_feedback.curation.action == "exclude"
+        projection_status = load_projection_queue_status(connection)
+        assert projection_status.pending_count >= 3
+        assert projection_status.failed_count == 0
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (3,)
         assert connection.execute(
             "SELECT count(*) FROM langfuse_projection_items WHERE kind = 'evaluation_manifest'"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
         include_review_event(
             connection,
             review_event_id=qualified_feedback.review_event_id,
             critical=False,
             reason="Dispute resolved.",
             actor="owner",
-            created_at=now + timedelta(seconds=2),
+            created_at=now + timedelta(seconds=3),
             idempotency_key="reinclude:positive",
         )
         connection.execute(
@@ -1321,12 +1442,13 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
             create_manifest(
                 connection,
                 policy=ManifestPolicy(),
-                created_at=now + timedelta(seconds=2),
+                created_at=now + timedelta(seconds=3),
                 created_by="owner",
+                idempotency_key="manifest:third",
             )
-        assert connection.execute("SELECT count(*) FROM evaluation_manifests").fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM evaluation_manifests").fetchone() == (3,)
         assert connection.execute("SELECT count(*) FROM evaluation_manifest_cases").fetchone() == (
-            3,
+            5,
         )
         with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
             connection.execute(
@@ -1403,6 +1525,7 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
             policy=ManifestPolicy(),
             created_at=now,
             created_by="owner",
+            idempotency_key="manifest:run",
         )
         baseline_calls = 0
 

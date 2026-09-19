@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
-from typing import ClassVar, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ReviewLane = Literal["qualified", "rejected_audit"]
 ReviewDecision = Literal["pursue", "reject", "unsure"]
 ReviewOutcome = Literal["qualified", "rejected"]
+FeedbackCurationFilter = Literal["all", "uncurated", "included", "excluded"]
 TargetProfile = Literal[
     "early-stage-product-engineer",
     "applied-ai-product-engineer",
@@ -76,6 +77,61 @@ class ReviewItem(ReviewModel):
         if self.reviewed != (self.decision is not None):
             raise ValueError("A reviewed item must carry its recorded decision")
         return self
+
+
+class FeedbackCuration(ReviewModel):
+    id: UUID
+    action: Literal["include", "exclude"]
+    expected_outcome: ReviewOutcome | None
+    critical: bool
+    reason: str
+    actor: str
+    created_at: datetime
+
+
+class FeedbackCurationSummary(ReviewModel):
+    id: UUID
+    action: Literal["include", "exclude"]
+    expected_outcome: ReviewOutcome | None
+    critical: bool
+
+
+class ReviewFeedbackSummary(ReviewModel):
+    review_event_id: UUID
+    decision: ReviewDecision
+    target_profile: str | None
+    primary_reason: str | None
+    created_at: datetime
+    original_outcome: ReviewOutcome
+    title: str
+    company: str
+    curation: FeedbackCurationSummary | None = None
+    frozen_manifest_count: int = Field(ge=0)
+
+
+class ReviewFeedback(ReviewModel):
+    review_event_id: UUID
+    review_item_id: UUID
+    evaluation_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: ReviewDecision
+    target_profile: str | None
+    primary_reason: str | None
+    note: str | None
+    block_company: bool
+    actor: str
+    created_at: datetime
+    original_outcome: ReviewOutcome
+    matched_profile: str | None
+    evaluation_reason: str
+    job: ReviewJob
+    curation: FeedbackCuration | None = None
+    frozen_manifest_count: int = Field(ge=0)
+
+
+class ReviewFeedbackPage(ReviewModel):
+    items: Annotated[tuple[ReviewFeedbackSummary, ...], Field(max_length=100)]
+    next_offset: int | None = Field(default=None, ge=0)
 
 
 class ReviewQueue(ReviewModel):

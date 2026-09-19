@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import Thread
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
@@ -26,6 +26,7 @@ ProjectionKind = Literal["evaluation_manifest", "evaluation_run", "prompt_promot
 _MODEL_CALL = TypeAdapter(ModelCallAttempt)
 _METADATA = TypeAdapter(dict[str, JsonValue])
 _JSON_VALUES = TypeAdapter(list[JsonValue])
+_PROJECTION_KIND: TypeAdapter[ProjectionKind] = TypeAdapter(ProjectionKind)
 _READ_BACK_TIMEOUT_SECONDS = 30.0
 _READ_BACK_POLL_SECONDS = 1.0
 _SEND_TIMEOUT_SECONDS = 120.0
@@ -70,6 +71,23 @@ class ProjectionLeaseLost(ProjectionModel):
 
 class ProjectionIdle(ProjectionModel):
     kind: Literal["idle"] = "idle"
+
+
+class ProjectionFailureSummary(ProjectionModel):
+    id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    kind: ProjectionKind
+    source_id: str
+    attempt_count: int = Field(ge=0)
+    retry_at: datetime | None
+    error_code: str
+
+
+class ProjectionQueueStatus(ProjectionModel):
+    pending_count: int = Field(ge=0)
+    leased_count: int = Field(ge=0)
+    completed_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    failures: Annotated[tuple[ProjectionFailureSummary, ...], Field(max_length=100)]
 
 
 class ObservationUsage(ProjectionModel):
@@ -201,6 +219,50 @@ def deliver_next_projection(
     return ProjectionDelivered(
         projection_id=projection.id,
         remote_id=response.remote_id,
+    )
+
+
+def load_projection_queue_status(
+    connection: Connection,
+    *,
+    failure_limit: int = 20,
+) -> ProjectionQueueStatus:
+    _require_autocommit(connection)
+    if failure_limit < 0 or failure_limit > 100:
+        raise ValueError("Projection failure limit must be between 0 and 100")
+    counts = {"pending": 0, "leased": 0, "completed": 0, "failed": 0}
+    for row in connection.execute(
+        "SELECT state, count(*) FROM langfuse_projection_items GROUP BY state"
+    ).fetchall():
+        counts[str(row[0])] = int(str(row[1]))
+    rows = connection.execute(
+        """
+        SELECT id, kind, source_id, attempt_count, retry_at, last_error
+        FROM langfuse_projection_items
+        WHERE state = 'failed'
+        ORDER BY COALESCE(retry_at, created_at), id
+        LIMIT %s
+        """,
+        (failure_limit,),
+    ).fetchall()
+    return ProjectionQueueStatus(
+        pending_count=counts["pending"],
+        leased_count=counts["leased"],
+        completed_count=counts["completed"],
+        failed_count=counts["failed"],
+        failures=tuple(_parse_projection_failure(row) for row in rows),
+    )
+
+
+def _parse_projection_failure(row: tuple[object, ...]) -> ProjectionFailureSummary:
+    last_error = _METADATA.validate_python(row[5])
+    return ProjectionFailureSummary(
+        id=str(row[0]),
+        kind=_PROJECTION_KIND.validate_python(row[1]),
+        source_id=str(row[2]),
+        attempt_count=int(str(row[3])),
+        retry_at=(datetime.fromisoformat(str(row[4])) if row[4] is not None else None),
+        error_code=str(last_error.get("code", "unknown")),
     )
 
 
