@@ -37,7 +37,7 @@ def enrich_job(
     sender: ChatCompletionSender | None = None,
     retry_policy: RetryPolicy | None = None,
 ) -> PromptAccepted[EnrichedJob] | OperationalFailure:
-    values = {"job": enrichment_message(job)}
+    values = enrichment_values(job)
     return invoke_prompt(
         release.version("job-finder-enrichment"),
         values,
@@ -50,7 +50,7 @@ def enrich_job(
     )
 
 
-def enrichment_message(job: JobListing) -> str:
+def enrichment_values(job: JobListing) -> dict[str, str]:
     fields: Mapping[str, str] = {
         "Job Title": job.title,
         "Company": job.company,
@@ -58,4 +58,4 @@ def enrichment_message(job: JobListing) -> str:
         "URL": job.url,
     }
     header = "\n".join(f"{name}: {value}" for name, value in fields.items())
-    return f"{header}\n\nRaw Description:\n{job.description}"
+    return {"job": f"{header}\n\nRaw Description:\n{job.description}"}

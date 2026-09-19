@@ -52,11 +52,15 @@ from job_finder.jobs.decision_pipeline import (
     postgres_decision_store,
     process_qualified_job,
 )
-from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_message
+from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
 from job_finder.jobs.models import JobListing, StructuralRejection
 from job_finder.jobs.scraping import parse_job_details
 from job_finder.jobs.structural_filter import structural_filter
-from job_finder.jobs.title_deduplication import TitleDuplicate, deduplicate_title
+from job_finder.jobs.title_deduplication import (
+    TitleDuplicate,
+    deduplicate_title,
+    title_deduplication_values,
+)
 from job_finder.pipeline.state import (
     Connection,
     JobWorkClaim,
@@ -464,7 +468,7 @@ def _enrich(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[EnrichedJob] | OperationalFailure:
-    values = {"job": enrichment_message(job)}
+    values = enrichment_values(job)
     context = ensure_model_call_context(
         connection,
         run_id=run.id,
@@ -501,12 +505,7 @@ def _deduplicate(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[TitleDuplicate] | OperationalFailure:
-    values = {
-        "newTitle": new_title,
-        "existingTitles": "\n".join(
-            f'{index}. "{title}"' for index, title in enumerate(existing_titles, start=1)
-        ),
-    }
+    values = title_deduplication_values(new_title, existing_titles)
     context = ensure_model_call_context(
         connection,
         run_id=run.id,

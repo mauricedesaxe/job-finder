@@ -13,14 +13,13 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from job_finder.evaluation.models import (
+    EvaluationOutcome,
     EvaluationResult,
-    OperationalError,
     PromptReleaseId,
-    Qualified,
+    evaluation_outcome,
 )
 
 Digest = str
-ExpectedOutcome = Literal["qualified", "rejected"]
 Connection = psycopg.Connection[tuple[object, ...]]
 
 
@@ -57,7 +56,7 @@ class EvaluationCaseInput(ManifestModel):
     keywords: tuple[str, ...]
     date_posted: date | None
     observed_at: datetime
-    original_outcome: ExpectedOutcome
+    original_outcome: EvaluationOutcome
     review_decision: Literal["pursue", "reject"]
     target_profile: str | None
 
@@ -66,7 +65,7 @@ class CuratedReviewEvent(ManifestModel):
     id: UUID
     review_event_id: UUID
     action: Literal["include", "exclude"]
-    expected_outcome: ExpectedOutcome | None
+    expected_outcome: EvaluationOutcome | None
     critical: bool
     reason: str
     actor: str
@@ -85,7 +84,7 @@ class EvaluationManifestCase(ManifestModel):
     position: int = Field(ge=0)
     curation_id: UUID
     review_event_id: UUID
-    expected_outcome: ExpectedOutcome
+    expected_outcome: EvaluationOutcome
     critical: bool
     trial_count: int = Field(gt=0)
     input: EvaluationCaseInput
@@ -134,8 +133,8 @@ class EvaluationTrialResult(ManifestModel):
     id: str = Field(pattern=r"^[0-9a-f]{64}$")
     case_position: int = Field(ge=0)
     trial_index: int = Field(ge=0)
-    expected_outcome: ExpectedOutcome
-    actual_outcome: ExpectedOutcome | None
+    expected_outcome: EvaluationOutcome
+    actual_outcome: EvaluationOutcome | None
     failure_kind: Literal["false_positive", "false_negative", "operational"] | None
     reason: str
 
@@ -218,7 +217,7 @@ def include_review_event(
         decision = str(row[0])
         if decision == "unsure":
             raise ManifestOperationError("Unsure feedback cannot define an evaluation expectation")
-        expected: ExpectedOutcome = "qualified" if decision == "pursue" else "rejected"
+        expected: EvaluationOutcome = "qualified" if decision == "pursue" else "rejected"
         curation = CuratedReviewEvent(
             id=uuid5(NAMESPACE_URL, f"evaluation-curation:{idempotency_key}"),
             review_event_id=review_event_id,
@@ -742,10 +741,7 @@ def _trial_result(
     trial_index: int,
     result: EvaluationResult,
 ) -> EvaluationTrialResult:
-    if isinstance(result, OperationalError):
-        actual: ExpectedOutcome | None = None
-    else:
-        actual = "qualified" if isinstance(result, Qualified) else "rejected"
+    actual = evaluation_outcome(result)
     failure = _failure_kind(case.expected_outcome, actual)
     result_id = _digest(
         {"run_id": run_id, "case_position": case.position, "trial_index": trial_index}
@@ -762,7 +758,7 @@ def _trial_result(
 
 
 def _failure_kind(
-    expected: ExpectedOutcome, actual: ExpectedOutcome | None
+    expected: EvaluationOutcome, actual: EvaluationOutcome | None
 ) -> Literal["false_positive", "false_negative", "operational"] | None:
     if actual is None:
         return "operational"

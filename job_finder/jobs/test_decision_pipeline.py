@@ -28,7 +28,7 @@ from job_finder.jobs.decision_pipeline import (
     persist_suppressed_job,
     process_qualified_job,
 )
-from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_message
+from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate, deduplicate_title
 
@@ -36,7 +36,7 @@ from job_finder.jobs.title_deduplication import TitleDuplicate, deduplicate_titl
 def test_calls_the_enrichment_prompt_with_the_legacy_input_shape() -> None:
     listing = _listing()
     release = build_prompt_release()
-    values = {"job": enrichment_message(listing)}
+    values = enrichment_values(listing)
     sent_body: dict[str, object] = {}
 
     def send(
@@ -80,13 +80,15 @@ def test_calls_the_enrichment_prompt_with_the_legacy_input_shape() -> None:
         "type": "function",
         "function": {"name": "enrich_job"},
     }
-    assert enrichment_message(listing) == (
-        "Job Title: Sr Eng - Acme\n"
-        "Company: acme.io\n"
-        "Source: other\n"
-        "URL: https://example.com/jobs/1\n\n"
-        "Raw Description:\nRaw description"
-    )
+    assert enrichment_values(listing) == {
+        "job": (
+            "Job Title: Sr Eng - Acme\n"
+            "Company: acme.io\n"
+            "Source: other\n"
+            "URL: https://example.com/jobs/1\n\n"
+            "Raw Description:\nRaw description"
+        )
+    }
 
 
 def test_avoids_a_model_call_for_empty_and_exact_title_sets() -> None:
