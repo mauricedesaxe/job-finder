@@ -17,8 +17,15 @@ import pytest
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+import job_finder.configuration_service as configuration_service_module
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
+from job_finder.configuration_service import (
+    DraftChanged,
+    DraftSaved,
+    SaveDraftCommand,
+    save_search_configuration_draft,
+)
 from job_finder.database import MIGRATIONS_PATH, apply_migrations
 from job_finder.evaluation import (
     EvaluationManifestCase,
@@ -71,6 +78,7 @@ from job_finder.review.postgres import (
 )
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
+    SearchConfigurationDraft,
     SearchConfigurationRevision,
     build_search_configuration_revision,
     compare_and_swap_active_search_configuration,
@@ -229,6 +237,132 @@ def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
         assert publication.revision_id == active.revision.id
         assert publication.published_by == "migration:0017_search_configuration_publications.sql"
         assert release == build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
+
+
+def test_configuration_service_saves_a_draft_and_preserves_its_base(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    changed = DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("changed",)})
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        initial = load_search_configuration_draft(connection)
+
+        result = save_search_configuration_draft(
+            connection,
+            SaveDraftCommand(
+                expected_version=initial.version,
+                configuration=changed,
+                actor="owner",
+                timestamp=now,
+            ),
+        )
+
+        assert isinstance(result, DraftSaved)
+        assert result.draft.version == initial.version + 1
+        assert result.draft.base_revision_id == initial.base_revision_id
+        assert result.draft.configuration == changed
+        assert result.draft.updated_by == "owner"
+        assert result.draft.updated_at == now
+
+
+def test_configuration_service_returns_current_draft_for_a_stale_save(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    first_change = DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("first",)})
+    stale_change = DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("stale",)})
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        saved = save_search_configuration_draft(
+            connection,
+            SaveDraftCommand(
+                expected_version=0,
+                configuration=first_change,
+                actor="first-owner",
+                timestamp=now,
+            ),
+        )
+        assert isinstance(saved, DraftSaved)
+
+        result = save_search_configuration_draft(
+            connection,
+            SaveDraftCommand(
+                expected_version=0,
+                configuration=stale_change,
+                actor="stale-owner",
+                timestamp=now + timedelta(seconds=1),
+            ),
+        )
+
+        assert isinstance(result, DraftChanged)
+        assert result.current_draft == saved.draft
+
+
+def test_configuration_service_loses_to_a_publication_style_draft_rebase(
+    authority_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    published_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={"search_keywords": ("published",)}
+    )
+    requested_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={"search_keywords": ("requested",)}
+    )
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        published_revision = build_search_configuration_revision(
+            published_configuration,
+            created_at=now,
+            created_by="publisher",
+        )
+        _ = store_search_configuration_revision(connection, published_revision)
+        _publish_configuration_revision(connection, published_revision, now)
+        load_count = 0
+
+        def load_then_rebase(
+            service_connection: psycopg.Connection[tuple[object, ...]],
+        ) -> SearchConfigurationDraft:
+            nonlocal load_count
+            draft = load_search_configuration_draft(service_connection)
+            load_count += 1
+            if load_count == 1:
+                service_connection.execute(
+                    """
+                    UPDATE search_configuration_drafts
+                    SET base_revision_id = %s, content = %s, version = version + 1,
+                        updated_at = %s, updated_by = 'publisher'
+                    WHERE singleton_id = 1
+                    """,
+                    (
+                        published_revision.id,
+                        Jsonb(published_configuration.model_dump(mode="json")),
+                        now,
+                    ),
+                )
+            return draft
+
+        monkeypatch.setattr(
+            configuration_service_module,
+            "load_search_configuration_draft",
+            load_then_rebase,
+        )
+
+        result = save_search_configuration_draft(
+            connection,
+            SaveDraftCommand(
+                expected_version=0,
+                configuration=requested_configuration,
+                actor="owner",
+                timestamp=now + timedelta(seconds=1),
+            ),
+        )
+
+        assert isinstance(result, DraftChanged)
+        assert result.current_draft.version == 1
+        assert result.current_draft.base_revision_id == published_revision.id
+        assert result.current_draft.configuration == published_configuration
 
 
 def test_publication_migration_backfills_custom_active_and_draft_revisions(
@@ -699,9 +833,7 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
 
-        first = store_prompt_release(
-            connection, release, created_at=now, created_by="contract"
-        )
+        first = store_prompt_release(connection, release, created_at=now, created_by="contract")
         second = store_prompt_release(
             connection, release, created_at=now + timedelta(minutes=1), created_by="retry"
         )
