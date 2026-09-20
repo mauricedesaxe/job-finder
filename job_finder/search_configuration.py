@@ -4,11 +4,11 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar, Literal, NewType, Self
+from typing import Annotated, ClassVar, Literal, NewType
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
 from job_finder.evaluation.models import PromptReleaseId
@@ -113,17 +113,32 @@ class SearchConfiguration(SearchConfigurationModel):
             raise ValueError("Search keywords must be unique")
         return values
 
-    @model_validator(mode="after")
-    def members_are_unique(self) -> Self:
-        if len(set(self.enabled_sources)) != len(self.enabled_sources):
+    @field_validator("enabled_sources")
+    @classmethod
+    def sources_are_unique(
+        cls, values: tuple[SupportedSearchSource, ...]
+    ) -> tuple[SupportedSearchSource, ...]:
+        if len(set(values)) != len(values):
             raise ValueError("Enabled sources must be unique")
-        if len({criterion.key for criterion in self.personal_criteria}) != len(
-            self.personal_criteria
-        ):
+        return values
+
+    @field_validator("personal_criteria")
+    @classmethod
+    def criterion_keys_are_unique(
+        cls, values: tuple[PersonalCriterion, ...]
+    ) -> tuple[PersonalCriterion, ...]:
+        if len({criterion.key for criterion in values}) != len(values):
             raise ValueError("Personal criterion keys must be unique")
-        if len({profile.key for profile in self.target_profiles}) != len(self.target_profiles):
+        return values
+
+    @field_validator("target_profiles")
+    @classmethod
+    def profile_keys_are_unique(
+        cls, values: tuple[TargetProfile, ...]
+    ) -> tuple[TargetProfile, ...]:
+        if len({profile.key for profile in values}) != len(values):
             raise ValueError("Target profile keys must be unique")
-        return self
+        return values
 
 
 class SearchConfigurationRevision(SearchConfigurationModel):

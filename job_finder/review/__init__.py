@@ -1,4 +1,8 @@
 from job_finder.review.app import create_review_app
+from job_finder.review.configuration_editor import (
+    ConfigurationEditorService,
+    postgres_configuration_editor_service,
+)
 from job_finder.review.models import (
     FeedbackCuration,
     FeedbackCurationSummary,
@@ -38,6 +42,7 @@ __all__ = [
     "FeedbackCurationFilter",
     "PrimaryReason",
     "ReviewConflict",
+    "ConfigurationEditorService",
     "ReviewFeedback",
     "ReviewFeedbackPage",
     "ReviewFeedbackSummary",
@@ -59,5 +64,6 @@ __all__ = [
     "list_review_feedback",
     "load_review_feedback",
     "postgres_review_service",
+    "postgres_configuration_editor_service",
     "record_review",
 ]

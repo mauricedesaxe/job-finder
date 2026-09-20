@@ -15,7 +15,11 @@ from pydantic import (
 from psycopg.types.json import Jsonb
 
 from job_finder.evaluation.models import PromptReleaseId, PromptVersionId
-from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.prompt_releases import (
+    PromptRelease,
+    build_prompt_release,
+    store_prompt_release,
+)
 from job_finder.evaluation.prompts import PromptPhase
 from job_finder.search_configuration import (
     SEARCH_SOURCE_DOMAINS,
@@ -118,6 +122,11 @@ class ConfigurationPreview(ConfigurationServiceModel):
     search_samples: Annotated[tuple[str, ...], Field(max_length=100)]
     total_compiled_prompt_count: int = Field(ge=1)
     prompt_summaries: Annotated[tuple[PromptSummary, ...], Field(max_length=100)]
+
+
+class DetailedConfigurationPreview(ConfigurationServiceModel):
+    summary: ConfigurationPreview
+    prompt_release: PromptRelease
 
 
 class ConfigurationRevisionNotFound(ValueError):
@@ -310,12 +319,47 @@ def preview_search_configuration(
 ) -> ConfigurationPreview:
     _require_result_limit(search_sample_limit)
     _require_result_limit(prompt_summary_limit)
+    release = build_prompt_release(configuration)
+    return _configuration_preview(
+        configuration,
+        release,
+        search_sample_limit=search_sample_limit,
+        prompt_summary_limit=prompt_summary_limit,
+    )
+
+
+def preview_search_configuration_detailed(
+    configuration: SearchConfiguration,
+    *,
+    search_sample_limit: int = DEFAULT_RESULT_LIMIT,
+    prompt_summary_limit: int = DEFAULT_RESULT_LIMIT,
+) -> DetailedConfigurationPreview:
+    _require_result_limit(search_sample_limit)
+    _require_result_limit(prompt_summary_limit)
+    release = build_prompt_release(configuration)
+    return DetailedConfigurationPreview(
+        summary=_configuration_preview(
+            configuration,
+            release,
+            search_sample_limit=search_sample_limit,
+            prompt_summary_limit=prompt_summary_limit,
+        ),
+        prompt_release=release,
+    )
+
+
+def _configuration_preview(
+    configuration: SearchConfiguration,
+    release: PromptRelease,
+    *,
+    search_sample_limit: int,
+    prompt_summary_limit: int,
+) -> ConfigurationPreview:
     searches = tuple(
         f"site:{SEARCH_SOURCE_DOMAINS[source]} {keyword}"
         for keyword in configuration.search_keywords
         for source in configuration.enabled_sources
     )
-    release = build_prompt_release(configuration)
     return ConfigurationPreview(
         configuration_revision_id=search_configuration_revision_id(configuration),
         prompt_release_id=release.id,
