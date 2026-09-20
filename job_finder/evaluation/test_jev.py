@@ -10,6 +10,7 @@ import requests
 from pydantic import ValidationError
 
 from job_finder.evaluation.jev import (
+    ATOMIC_QUESTIONS,
     JEV_MODEL,
     JEV_QUESTIONS,
     JevCriterionObservation,
@@ -65,6 +66,12 @@ def test_registry_covers_exactly_the_six_evaluation_criteria_and_is_immutable() 
         cast(dict[str, object], JEV_QUESTIONS)["other"] = object()
 
 
+def test_atomic_registry_covers_the_same_criteria_with_independent_questions() -> None:
+    assert set(ATOMIC_QUESTIONS) == set(JEV_QUESTIONS)
+    assert len(ATOMIC_QUESTIONS["role-quality"]) == 8
+    assert len(ATOMIC_QUESTIONS["cheap-shop-placement"]) == 8
+
+
 def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result() -> None:
     prompt = build_prompt_release().versions[1]
     clock_values = iter((4.0, 4.125))
@@ -104,6 +111,41 @@ def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result()
         latency_ms=125,
         estimated_cost_usd=Decimal("0.0000042"),
     )
+
+
+def test_atomic_policy_counts_staffing_signals_in_code() -> None:
+    prompt = next(
+        version
+        for version in build_prompt_release().versions
+        if version.definition.criterion == "cheap-shop-placement"
+    )
+
+    def send(
+        _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+    ) -> JevHttpResponse:
+        questions = cast(dict[str, object], body["questions"])
+        assert set(questions) == set(ATOMIC_QUESTIONS["cheap-shop-placement"])
+        probabilities = dict.fromkeys(questions, 0.1)
+        probabilities["recruiter_for_client"] = 0.9
+        probabilities["placement_business"] = 0.8
+        return JevHttpResponse(
+            status_code=200,
+            body=_multi_response_body(probabilities),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Our staffing service is hiring for a client."},
+        api_key="secret",
+        sender=send,
+        policy="atomic",
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(result, JevCriterionObservation)
+    assert not result.result.passed
+    assert abs(result.pass_probability - 0.2) < 1e-9
+    assert "recruiter_for_client=0.900" in result.result.reason
 
 
 @pytest.mark.parametrize("status", (408, 429, 500, 529, 599))
@@ -242,6 +284,19 @@ def _response_body(probability: float, criterion: str = "remote-europe-eligible"
             "model": JEV_MODEL,
             "answers": {criterion: {"type": "noul", "noul": probability}},
             "usage": {"input_tokens": 100, "output_tokens": 4},
+        }
+    )
+
+
+def _multi_response_body(probabilities: Mapping[str, float]) -> str:
+    return json.dumps(
+        {
+            "model": JEV_MODEL,
+            "answers": {
+                name: {"type": "noul", "noul": probability}
+                for name, probability in probabilities.items()
+            },
+            "usage": {"input_tokens": 100, "output_tokens": len(probabilities)},
         }
     )
 
