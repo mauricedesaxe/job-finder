@@ -17,6 +17,7 @@ from job_finder.configuration_service import (
     ConfigurationPublished,
     ConfigurationInvalid,
     ConfigurationPreview,
+    DetailedConfigurationPreview,
     ConfigurationRevisionCursor,
     ConfigurationRevisionDetails,
     ConfigurationRevisionNotFound,
@@ -36,6 +37,7 @@ from job_finder.configuration_service import (
     get_search_configuration_revision,
     list_search_configuration_revisions,
     preview_search_configuration,
+    preview_search_configuration_detailed,
     save_search_configuration_draft,
     validate_search_configuration,
 )
@@ -149,6 +151,38 @@ def test_preview_returns_a_frozen_stable_summary() -> None:
     assert ConfigurationPreview.model_validate(preview.model_dump()) == preview
     with pytest.raises(ValidationError, match="frozen"):
         setattr(preview, "prompt_release_name", "changed")
+
+
+def test_detailed_preview_builds_once_and_returns_the_full_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
+    calls = 0
+
+    def build(_configuration: SearchConfiguration) -> object:
+        nonlocal calls
+        calls += 1
+        return release
+
+    monkeypatch.setattr(service_module, "build_prompt_release", build)
+
+    preview = preview_search_configuration_detailed(DEFAULT_SEARCH_CONFIGURATION)
+
+    assert calls == 1
+    assert preview == DetailedConfigurationPreview(
+        summary=ConfigurationPreview(
+            configuration_revision_id=search_configuration_revision_id(
+                DEFAULT_SEARCH_CONFIGURATION
+            ),
+            prompt_release_id=release.id,
+            prompt_release_name=release.name,
+            total_generated_search_count=128,
+            search_samples=preview.summary.search_samples,
+            total_compiled_prompt_count=len(release.versions),
+            prompt_summaries=preview.summary.prompt_summaries,
+        ),
+        prompt_release=release,
+    )
 
 
 @pytest.mark.parametrize(
