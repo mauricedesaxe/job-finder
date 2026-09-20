@@ -180,7 +180,7 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (20,)
+        ).fetchone() == (21,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
