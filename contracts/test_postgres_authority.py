@@ -590,9 +590,7 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
 
-        first = store_prompt_release(
-            connection, release, created_at=now, created_by="contract"
-        )
+        first = store_prompt_release(connection, release, created_at=now, created_by="contract")
         second = store_prompt_release(
             connection, release, created_at=now + timedelta(minutes=1), created_by="retry"
         )
