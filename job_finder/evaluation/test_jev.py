@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
+from uuid import UUID
 
 import pytest
 import requests
@@ -19,14 +21,19 @@ from job_finder.evaluation.jev import (
     JevRetryPolicy,
     JevSystemOneResponse,
     evaluate_prompt,
+    evaluate_persisted_prompt,
     jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.models import (
+    CompletedModelCall,
     CriterionAccepted,
+    ModelCallAttempt,
+    ModelCallContext,
     RetryableOperationalError,
     TerminalOperationalError,
 )
+from job_finder.evaluation.openrouter import ModelCallPersistence, prompt_input_digest
 from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 
@@ -236,6 +243,88 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
     assert invalid.error_code == "invalid_response"
 
 
+def test_persists_each_retry_and_the_accepted_jev_result() -> None:
+    prompt = build_prompt_release().versions[0]
+    values = {"job": "Remote in Europe"}
+    attempts: list[ModelCallAttempt] = []
+    responses = iter((JevHttpResponse(status_code=503, body="{}"),))
+    observed_at = datetime(2026, 9, 20, tzinfo=UTC)
+
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        body: dict[str, object],
+        _timeout: float,
+    ) -> JevHttpResponse:
+        response = next(responses, None)
+        if response is not None:
+            return response
+        questions = cast(dict[str, object], body["questions"])
+        return JevHttpResponse(
+            status_code=200,
+            body=_multi_response_body(dict.fromkeys(questions, 0.75)),
+            provider_request_id="typesafe-request-1",
+        )
+
+    result = evaluate_persisted_prompt(
+        prompt,
+        values,
+        _context(values),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 3,
+            record=attempts.append,
+        ),
+        api_key="secret",
+        sender=send,
+        retry_policy=JevRetryPolicy(max_attempts=2, base_delay_seconds=0),
+        sleep=lambda _delay: None,
+        clock=iter((0.0, 0.1, 1.0, 1.2)).__next__,
+        now=lambda: observed_at,
+    )
+
+    assert isinstance(result, CriterionAccepted)
+    assert [attempt.attempt_number for attempt in attempts] == [3, 4]
+    assert [attempt.status for attempt in attempts] == ["retryable_error", "accepted"]
+    assert attempts[0].error == {"code": "http_503", "message": "Jev returned HTTP 503"}
+    assert attempts[0].latency_ms == 100
+    assert attempts[1].requested_model == JEV_MODEL
+    assert attempts[1].response_model == JEV_MODEL
+    assert attempts[1].provider_response_id == "typesafe-request-1"
+    assert attempts[1].input_tokens == 100
+    assert attempts[1].output_tokens == 4
+    assert attempts[1].observed_at == observed_at
+
+
+def test_reuses_a_persisted_jev_result_without_calling_the_provider() -> None:
+    prompt = build_prompt_release().versions[0]
+    values = {"job": "Remote in Europe"}
+
+    result = evaluate_persisted_prompt(
+        prompt,
+        values,
+        _context(values),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: CompletedModelCall(
+                prompt_name=prompt.definition.name,
+                parsed_output={
+                    "prompt_name": prompt.definition.name,
+                    "passed": True,
+                    "reason": "stored",
+                },
+            ),
+            next_attempt_number=lambda _request_id: pytest.fail("attempt number was read"),
+            record=lambda _attempt: pytest.fail("cached result was recorded again"),
+        ),
+        api_key="secret",
+        sender=_unexpected_send,
+    )
+
+    assert result == CriterionAccepted(
+        prompt_name=prompt.definition.name, passed=True, reason="stored"
+    )
+
+
 def test_summarizes_tokens_cost_and_interpolated_latency_percentiles() -> None:
     observations = (
         _observation(input_tokens=100, output_tokens=4, latency_ms=100),
@@ -313,3 +402,23 @@ def _observation(
         latency_ms=latency_ms,
         estimated_cost_usd=(Decimal(input_tokens) * Decimal("0.042") / Decimal(1_000_000)),
     )
+
+
+def _context(values: Mapping[str, str]) -> ModelCallContext:
+    release = build_prompt_release()
+    return ModelCallContext(
+        processing_attempt_id=UUID("00000000-0000-0000-0000-000000000001"),
+        pipeline_run_id=UUID("00000000-0000-0000-0000-000000000002"),
+        prompt_release_id=release.id,
+        operation_key="evaluate_job",
+        input_digest=prompt_input_digest(values),
+    )
+
+
+def _unexpected_send(
+    _url: str,
+    _headers: Mapping[str, str],
+    _body: dict[str, object],
+    _timeout: float,
+) -> JevHttpResponse:
+    pytest.fail("cached result reached Jev")

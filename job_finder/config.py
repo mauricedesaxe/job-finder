@@ -126,6 +126,7 @@ class OrchestrationSettings(BaseModel):
 
     postgres_dsn: str = Field(min_length=1)
     openrouter_api_key: str = Field(min_length=1)
+    typesafe_api_key: str = Field(min_length=1)
     jina_api_key: str = Field(min_length=1)
     implementation_ref: str = Field(min_length=1)
     enable_ats_enrichment: bool = True
@@ -142,6 +143,7 @@ class OrchestrationSettings(BaseModel):
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),
                 "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY"),
+                "typesafe_api_key": os.environ.get("TYPESAFE_API_KEY"),
                 "jina_api_key": os.environ.get("JINA_API_KEY"),
                 "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF"),
                 "enable_ats_enrichment": os.environ.get("ENABLE_ATS_ENRICHMENT", "true") == "true",

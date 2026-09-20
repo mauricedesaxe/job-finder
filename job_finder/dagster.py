@@ -194,6 +194,7 @@ def _process_batch(
         run,
         boundaries,
         openrouter_api_key=settings.openrouter_api_key,
+        typesafe_api_key=settings.typesafe_api_key,
         owner_token=uuid4(),
         observed_at=observed_at,
         max_items=settings.work_batch_size,

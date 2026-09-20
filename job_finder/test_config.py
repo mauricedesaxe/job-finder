@@ -8,6 +8,7 @@ from job_finder.config import (
     DatabaseSettings,
     JevCorpusEvaluationSettings,
     LangfuseSettings,
+    OrchestrationSettings,
     PostgresContractSettings,
     ReviewAppSettings,
 )
@@ -82,6 +83,20 @@ def test_jev_corpus_settings_only_require_the_typesafe_key(
 
     assert settings.api_key == "typesafe-secret"
     assert settings.worker_count == 4
+
+
+def test_orchestration_settings_require_the_typesafe_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://example/production")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "typesafe-secret")
+    monkeypatch.setenv("JINA_API_KEY", "jina-secret")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "test-ref")
+
+    settings = OrchestrationSettings.from_environment()
+
+    assert settings.typesafe_api_key == "typesafe-secret"
 
 
 def test_langfuse_settings_require_valid_credentials(
