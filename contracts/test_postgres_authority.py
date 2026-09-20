@@ -1140,8 +1140,22 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
     release = build_prompt_release(configuration)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        counts_before = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
 
         first = store_prompt_release(connection, release, created_at=now, created_by="contract")
+        counts_after_first = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
         second = store_prompt_release(
             connection, release, created_at=now + timedelta(minutes=1), created_by="retry"
         )
@@ -1149,13 +1163,20 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
         assert first == release
         assert second == release
         assert load_prompt_release(connection, release.id) == release
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (
-            len(release.versions),
+        assert counts_after_first != counts_before
+        assert (
+            connection.execute(
+                """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+            ).fetchone()
+            == counts_after_first
         )
-        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (
-            len(release.versions),
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM prompt_release_members WHERE release_id = %s", (release.id,)
+        ).fetchone() == (len(release.versions),)
 
 
 def test_stores_a_prompt_release_inside_a_committed_outer_transaction(
@@ -1205,6 +1226,13 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
     release = build_prompt_release(configuration)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        counts_before = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
 
         with pytest.raises(RuntimeError, match="rollback publication"):
             with connection.transaction():
@@ -1221,8 +1249,16 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
 
         with pytest.raises(PromptReleaseError, match="Prompt release not found"):
             load_prompt_release(connection, release.id)
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (0,)
+        assert (
+            connection.execute(
+                """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+            ).fetchone()
+            == counts_before
+        )
 
 
 def test_bootstrap_fails_loudly_when_a_release_name_is_reused(

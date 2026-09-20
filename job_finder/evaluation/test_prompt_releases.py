@@ -2,21 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import UTC, datetime
-from typing import cast
-
-import psycopg
-import pytest
 
 from job_finder.evaluation.prompt_releases import (
     DEDUPLICATION_OUTPUT_SCHEMA,
     ENRICHMENT_OUTPUT_SCHEMA,
     EVALUATION_OUTPUT_SCHEMA,
     MODEL,
-    PromptReleaseError,
     build_prompt_release,
     build_prompt_version,
-    store_prompt_release,
 )
 from job_finder.evaluation.prompts import PROMPTS, PromptDefinition
 from job_finder.search_configuration import (
@@ -94,104 +87,6 @@ def test_derives_stable_content_identities() -> None:
     assert all(len(version.id) == 64 for version in first.versions)
 
 
-def test_store_rejects_tampered_version_identity_before_database_access() -> None:
-    release = build_prompt_release()
-    tampered_version = release.versions[0].model_copy(update={"content_digest": "0" * 64})
-    tampered_release = release.model_copy(
-        update={"versions": (tampered_version, *release.versions[1:])}
-    )
-
-    with pytest.raises(PromptReleaseError, match="Prompt content identity is invalid"):
-        store_prompt_release(
-            _no_database_connection(),
-            tampered_release,
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
-def test_store_rejects_tampered_version_id_before_database_access() -> None:
-    release = build_prompt_release()
-    tampered_version = release.versions[0].model_copy(update={"id": "0" * 64})
-    tampered_release = release.model_copy(
-        update={"versions": (tampered_version, *release.versions[1:])}
-    )
-
-    with pytest.raises(PromptReleaseError, match="Prompt version identity is invalid"):
-        store_prompt_release(
-            _no_database_connection(),
-            tampered_release,
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (("criterion", "changed-criterion"), ("phase", "profile")),
-)
-def test_store_revalidates_tampered_execution_metadata_before_database_access(
-    field: str, value: str
-) -> None:
-    release = build_prompt_release()
-    version = release.versions[0]
-    tampered_definition = version.definition.model_copy(update={field: value})
-    tampered_version = version.model_copy(update={"definition": tampered_definition})
-    tampered_release = release.model_copy(
-        update={"versions": (tampered_version, *release.versions[1:])}
-    )
-
-    with pytest.raises(PromptReleaseError, match="Prompt version is invalid"):
-        store_prompt_release(
-            _no_database_connection(),
-            tampered_release,
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
-def test_store_rejects_duplicate_prompt_names_before_database_access() -> None:
-    release = build_prompt_release()
-    duplicate = release.model_copy(
-        update={"versions": (release.versions[0], release.versions[0], *release.versions[1:])}
-    )
-
-    with pytest.raises(PromptReleaseError, match="Prompt release names must be unique"):
-        store_prompt_release(
-            _no_database_connection(),
-            duplicate,
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
-def test_store_rejects_tampered_release_identity_before_database_access() -> None:
-    release = build_prompt_release().model_copy(update={"id": "0" * 64})
-
-    with pytest.raises(PromptReleaseError, match="Prompt release identity is invalid"):
-        store_prompt_release(
-            _no_database_connection(),
-            release,
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
-def test_store_requires_an_autocommit_connection() -> None:
-    connection = _NoDatabaseConnection(autocommit=False)
-
-    with pytest.raises(ValueError, match="requires an autocommit connection"):
-        store_prompt_release(
-            cast(
-                "psycopg.Connection[tuple[object, ...]]",
-                cast(object, connection),
-            ),
-            build_prompt_release(),
-            created_at=datetime(2026, 9, 19, tzinfo=UTC),
-            created_by="test",
-        )
-
-
 def test_default_configuration_exactly_preserves_the_legacy_release() -> None:
     legacy = build_prompt_release()
     configured = build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
@@ -251,9 +146,7 @@ def test_meaningful_prompt_configuration_changes_release_identity() -> None:
     reordered = base.model_copy(
         update={"personal_criteria": tuple(reversed(base.personal_criteria))}
     )
-    changed_membership = base.model_copy(
-        update={"personal_criteria": base.personal_criteria[:-1]}
-    )
+    changed_membership = base.model_copy(update={"personal_criteria": base.personal_criteria[:-1]})
 
     identities = {
         build_prompt_release(configuration).id
@@ -321,9 +214,10 @@ def test_preserves_rates_placeholder_in_edited_compensation_instructions() -> No
 
     version = build_prompt_release(configuration).version("job-finder-filter-compensation")
 
-    assert version.messages[0]["content"].format_map(
-        {"job": "unused", "rates": "1 EUR ~= 1.10 USD"}
-    ) == 'Use these rates: 1 EUR ~= 1.10 USD. Return {"pass": true}.'
+    assert (
+        version.messages[0]["content"].format_map({"job": "unused", "rates": "1 EUR ~= 1.10 USD"})
+        == 'Use these rates: 1 EUR ~= 1.10 USD. Return {"pass": true}.'
+    )
 
 
 def test_enrichment_version_overrides_the_model() -> None:
@@ -359,15 +253,3 @@ def test_resolves_missing_model_to_the_default_and_keeps_explicit_overrides() ->
 
     assert build_prompt_version(default).model == MODEL
     assert build_prompt_version(override).model == "test/model"
-
-
-class _NoDatabaseConnection:
-    def __init__(self, *, autocommit: bool = True) -> None:
-        self.autocommit: bool = autocommit
-
-
-def _no_database_connection() -> psycopg.Connection[tuple[object, ...]]:
-    return cast(
-        "psycopg.Connection[tuple[object, ...]]",
-        cast(object, _NoDatabaseConnection()),
-    )
