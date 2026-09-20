@@ -283,10 +283,11 @@ def test_configuration_revision_migration_backfills_only_orchestration_runs(
         }
 
 
-def test_configuration_revision_migration_rejects_unexpected_historical_release(
+def test_configuration_revision_migration_preserves_unmapped_historical_release(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    historical_run_id = uuid4()
     with _connection(authority_schema) as connection:
         _apply_migrations_through(connection, "0019_configuration_publication_receipts.sql")
         _seed_initial_configuration_publication(connection, now)
@@ -306,26 +307,16 @@ def test_configuration_revision_migration_rejects_unexpected_historical_release(
             created_at=now,
             created_by="test",
         )
-        _insert_legacy_orchestration_run(connection, uuid4(), unexpected_release.id, now)
+        _insert_legacy_orchestration_run(connection, historical_run_id, unexpected_release.id, now)
 
-        with pytest.raises(psycopg.Error, match="do not use the initial prompt release"):
-            apply_migrations(connection)
+        apply_migrations(connection)
 
         assert connection.execute(
-            """
-            SELECT count(*)
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = 'pipeline_runs'
-              AND column_name = 'configuration_revision_id'
-            """
-        ).fetchone() == (0,)
-        assert connection.execute(
-            """
-            SELECT count(*) FROM job_finder_schema_migrations
-            WHERE name = '0020_pipeline_run_configuration_revisions.sql'
-            """
-        ).fetchone() == (0,)
+            "SELECT configuration_revision_id FROM pipeline_runs WHERE id = %s",
+            (historical_run_id,),
+        ).fetchone() == (None,)
+        with pytest.raises(psycopg.Error, match="cannot infer configuration revision"):
+            _insert_legacy_orchestration_run(connection, uuid4(), unexpected_release.id, now)
 
 
 def test_configuration_revision_migration_repairs_missing_initial_publication(
