@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
@@ -70,10 +71,12 @@ from job_finder.review.postgres import (
 )
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
+    SearchConfigurationRevision,
     build_search_configuration_revision,
     compare_and_swap_active_search_configuration,
     load_active_search_configuration,
     load_search_configuration_draft,
+    load_search_configuration_publication,
     load_search_configuration_revision,
     replace_search_configuration_draft,
     store_search_configuration_revision,
@@ -129,11 +132,13 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0014_snapshot_corrections.sql",
             "0015_manifest_idempotency.sql",
             "0016_search_configuration_revisions.sql",
+            "0017_search_configuration_publications.sql",
+            "0018_published_search_configuration_pointers.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (16,)
+        ).fetchone() == (18,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -150,7 +155,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0016_search_configuration_revisions.sql"
+    assert results[0][-1] == "0018_published_search_configuration_pointers.sql"
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
@@ -199,7 +204,7 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         migrations = apply_migrations(connection)
 
-        assert migrations[-1] == "0016_search_configuration_revisions.sql"
+        assert migrations[-1] == "0018_published_search_configuration_pointers.sql"
         assert _table_contents(connection, legacy_tables) == before
 
 
@@ -212,6 +217,8 @@ def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
         active = load_active_search_configuration(connection)
         draft = load_search_configuration_draft(connection)
         stored = load_search_configuration_revision(connection, active.revision.id)
+        publication = load_search_configuration_publication(connection, active.revision.id)
+        release = load_prompt_release(connection, publication.prompt_release_id)
 
         assert active.generation == 0
         assert active.revision.configuration == DEFAULT_SEARCH_CONFIGURATION
@@ -219,6 +226,106 @@ def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
         assert draft.base_revision_id == active.revision.id
         assert draft.version == 0
         assert draft.configuration == DEFAULT_SEARCH_CONFIGURATION
+        assert publication.revision_id == active.revision.id
+        assert publication.published_by == "migration:0017_search_configuration_publications.sql"
+        assert release == build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
+
+
+def test_publication_migration_backfills_custom_active_and_draft_revisions(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    draft_revision = build_search_configuration_revision(
+        DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("draft-only",)}),
+        created_at=now,
+        created_by="owner",
+    )
+    active_revision = build_search_configuration_revision(
+        DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("active-only",)}),
+        created_at=now,
+        created_by="owner",
+    )
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0016_search_configuration_revisions.sql")
+        _ = store_search_configuration_revision(connection, draft_revision)
+        _ = store_search_configuration_revision(connection, active_revision)
+        connection.execute(
+            """
+            INSERT INTO search_configuration_drafts (
+              singleton_id, base_revision_id, version, content, updated_at, updated_by
+            ) VALUES (1, %s, 0, %s, %s, 'owner')
+            """,
+            (draft_revision.id, Jsonb(draft_revision.configuration.model_dump(mode="json")), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 0, %s, 'owner')
+            """,
+            (active_revision.id, now),
+        )
+
+        apply_migrations(connection)
+
+        draft_publication = load_search_configuration_publication(connection, draft_revision.id)
+        active_publication = load_search_configuration_publication(connection, active_revision.id)
+        assert draft_publication.prompt_release_id == active_publication.prompt_release_id
+        assert connection.execute(
+            "SELECT count(*) FROM search_configuration_publications"
+        ).fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
+        assert load_search_configuration_draft(connection).base_revision_id == draft_revision.id
+        assert load_active_search_configuration(connection).revision.id == active_revision.id
+
+
+def test_publications_are_immutable_and_pointers_require_publication(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        initial = load_active_search_configuration(connection)
+        unpublished = build_search_configuration_revision(
+            DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": ("unpublished",)}),
+            created_at=now,
+            created_by="owner",
+        )
+        _ = store_search_configuration_revision(connection, unpublished)
+
+        with pytest.raises(
+            psycopg.errors.ForeignKeyViolation,
+            match="search_configuration_drafts_base_revision_publication_fk",
+        ):
+            connection.execute(
+                """
+                UPDATE search_configuration_drafts
+                SET base_revision_id = %s, version = version + 1
+                WHERE singleton_id = 1
+                """,
+                (unpublished.id,),
+            )
+        with pytest.raises(
+            psycopg.errors.ForeignKeyViolation,
+            match="active_search_configuration_revision_publication_fk",
+        ):
+            connection.execute(
+                """
+                UPDATE active_search_configuration
+                SET revision_id = %s, generation = generation + 1
+                WHERE singleton_id = 1
+                """,
+                (unpublished.id,),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                """
+                UPDATE search_configuration_publications
+                SET published_by = 'other'
+                WHERE revision_id = %s
+                """,
+                (initial.revision.id,),
+            )
 
 
 def test_search_configuration_revision_and_pointer_invariants(authority_schema: str) -> None:
@@ -244,6 +351,7 @@ def test_search_configuration_revision_and_pointer_invariants(authority_schema: 
         )
         assert store_search_configuration_revision(connection, changed) == changed
         assert store_search_configuration_revision(connection, changed) == changed
+        _publish_configuration_revision(connection, changed, now)
 
         with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
             connection.execute(
@@ -364,6 +472,7 @@ def test_concurrent_search_configuration_activation_has_one_winner(
         )
         for revision in revisions:
             _ = store_search_configuration_revision(connection, revision)
+            _publish_configuration_revision(connection, revision, now)
 
     activation_start = Barrier(2)
 
@@ -589,8 +698,22 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
     release = build_prompt_release(configuration)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        counts_before = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
 
         first = store_prompt_release(connection, release, created_at=now, created_by="contract")
+        counts_after_first = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
         second = store_prompt_release(
             connection, release, created_at=now + timedelta(minutes=1), created_by="retry"
         )
@@ -598,13 +721,20 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
         assert first == release
         assert second == release
         assert load_prompt_release(connection, release.id) == release
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (
-            len(release.versions),
+        assert counts_after_first != counts_before
+        assert (
+            connection.execute(
+                """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+            ).fetchone()
+            == counts_after_first
         )
-        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (
-            len(release.versions),
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM prompt_release_members WHERE release_id = %s", (release.id,)
+        ).fetchone() == (len(release.versions),)
 
 
 def test_stores_a_prompt_release_inside_a_committed_outer_transaction(
@@ -654,6 +784,13 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
     release = build_prompt_release(configuration)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        counts_before = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+        ).fetchone()
 
         with pytest.raises(RuntimeError, match="rollback publication"):
             with connection.transaction():
@@ -670,8 +807,16 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
 
         with pytest.raises(PromptReleaseError, match="Prompt release not found"):
             load_prompt_release(connection, release.id)
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (0,)
+        assert (
+            connection.execute(
+                """
+            SELECT (SELECT count(*) FROM prompt_versions),
+                   (SELECT count(*) FROM prompt_releases),
+                   (SELECT count(*) FROM prompt_release_members)
+            """
+            ).fetchone()
+            == counts_before
+        )
 
 
 def test_bootstrap_fails_loudly_when_a_release_name_is_reused(
@@ -2136,6 +2281,27 @@ def _decision_enrichment() -> EnrichedJob:
         company="Acme",
         description="## Overview\nBuild things.",
         location="Remote",
+    )
+
+
+def _publish_configuration_revision(
+    connection: psycopg.Connection[tuple[object, ...]],
+    revision: SearchConfigurationRevision,
+    published_at: datetime,
+) -> None:
+    release = store_prompt_release(
+        connection,
+        build_prompt_release(revision.configuration),
+        created_at=published_at,
+        created_by="test",
+    )
+    connection.execute(
+        """
+        INSERT INTO search_configuration_publications (
+          revision_id, prompt_release_id, published_at, published_by
+        ) VALUES (%s, %s, %s, 'test')
+        """,
+        (revision.id, release.id, published_at),
     )
 
 

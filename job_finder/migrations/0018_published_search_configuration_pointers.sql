@@ -1,0 +1,9 @@
+ALTER TABLE search_configuration_drafts
+DROP CONSTRAINT search_configuration_drafts_base_revision_id_fkey,
+ADD CONSTRAINT search_configuration_drafts_base_revision_publication_fk
+  FOREIGN KEY (base_revision_id) REFERENCES search_configuration_publications(revision_id);
+
+ALTER TABLE active_search_configuration
+DROP CONSTRAINT active_search_configuration_revision_id_fkey,
+ADD CONSTRAINT active_search_configuration_revision_publication_fk
+  FOREIGN KEY (revision_id) REFERENCES search_configuration_publications(revision_id);
