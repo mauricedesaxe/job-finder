@@ -17,6 +17,7 @@ from dagster import (
 )
 
 from job_finder.config import DatabaseSettings, LangfuseSettings, OrchestrationSettings
+from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exchange_rates
 from job_finder.evaluation.langfuse import (
@@ -26,7 +27,6 @@ from job_finder.evaluation.langfuse import (
     create_langfuse_projection_sender,
     deliver_next_projection,
 )
-from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
     ProcessingSummary,
@@ -177,7 +177,7 @@ def _prepare_run(
         idempotency_key=f"dagster:{context.run.run_id}",
         implementation_ref=settings.implementation_ref,
         started_at=observed_at,
-        load_prompt_release=bootstrap_prompt_release,
+        load_active_configuration=load_published_active_search_configuration,
         fetch_rates=lambda: _fetch_rates(observed_at),
     )
 

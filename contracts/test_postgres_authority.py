@@ -37,7 +37,11 @@ from job_finder.configuration_service import (
     publish_search_configuration,
     save_search_configuration_draft,
 )
-from job_finder.database import MIGRATIONS_PATH, apply_migrations
+from job_finder.database import (
+    INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+    MIGRATIONS_PATH,
+    apply_migrations,
+)
 from job_finder.evaluation import (
     EvaluationManifestCase,
     LangfuseProjection,
@@ -156,11 +160,12 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0017_search_configuration_publications.sql",
             "0018_published_search_configuration_pointers.sql",
             "0019_configuration_publication_receipts.sql",
+            "0020_pipeline_run_configuration_revisions.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (19,)
+        ).fetchone() == (20,)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -177,7 +182,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0019_configuration_publication_receipts.sql"
+    assert results[0][-1] == "0020_pipeline_run_configuration_revisions.sql"
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
@@ -226,8 +231,229 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         migrations = apply_migrations(connection)
 
-        assert migrations[-1] == "0019_configuration_publication_receipts.sql"
-        assert _table_contents(connection, legacy_tables) == before
+        assert migrations[-1] == "0020_pipeline_run_configuration_revisions.sql"
+        expected = dict(before)
+        expected["pipeline_runs"] = [
+            {**row, "configuration_revision_id": None}
+            for row in cast(list[dict[str, object]], before["pipeline_runs"])
+        ]
+        assert _table_contents(connection, legacy_tables) == expected
+
+
+def test_configuration_revision_migration_backfills_only_orchestration_runs(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    orchestration_run_id = uuid4()
+    processing_run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0019_configuration_publication_receipts.sql")
+        release_id = _seed_initial_configuration_publication(connection, now)
+        _insert_legacy_orchestration_run(connection, orchestration_run_id, release_id, now)
+        _insert_prompt_run(connection, processing_run_id, release_id, now)
+
+        apply_migrations(connection)
+
+        rows = connection.execute(
+            """
+            SELECT id, configuration_revision_id
+            FROM pipeline_runs
+            ORDER BY id
+            """
+        ).fetchall()
+        revisions = {UUID(str(row[0])): row[1] for row in rows}
+        assert revisions == {
+            orchestration_run_id: INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+            processing_run_id: None,
+        }
+
+
+def test_configuration_revision_migration_rejects_unexpected_historical_release(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0019_configuration_publication_receipts.sql")
+        _seed_initial_configuration_publication(connection, now)
+        changed_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+            update={
+                "personal_criteria": (
+                    DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                        update={"instructions": "A deliberately different criterion."}
+                    ),
+                    *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+                )
+            }
+        )
+        unexpected_release = store_prompt_release(
+            connection,
+            build_prompt_release(changed_configuration),
+            created_at=now,
+            created_by="test",
+        )
+        _insert_legacy_orchestration_run(connection, uuid4(), unexpected_release.id, now)
+
+        with pytest.raises(psycopg.Error, match="do not use the initial prompt release"):
+            apply_migrations(connection)
+
+        assert connection.execute(
+            """
+            SELECT count(*)
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'pipeline_runs'
+              AND column_name = 'configuration_revision_id'
+            """
+        ).fetchone() == (0,)
+        assert connection.execute(
+            """
+            SELECT count(*) FROM job_finder_schema_migrations
+            WHERE name = '0020_pipeline_run_configuration_revisions.sql'
+            """
+        ).fetchone() == (0,)
+
+
+def test_configuration_revision_migration_repairs_missing_initial_publication(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    initial_revision = build_search_configuration_revision(
+        DEFAULT_SEARCH_CONFIGURATION,
+        created_at=now,
+        created_by="migration:0016_search_configuration_revisions.sql",
+    )
+    custom_revision = build_search_configuration_revision(
+        DEFAULT_SEARCH_CONFIGURATION.model_copy(
+            update={"search_keywords": ("custom active search",)}
+        ),
+        created_at=now,
+        created_by="owner",
+    )
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0019_configuration_publication_receipts.sql")
+        _ = store_search_configuration_revision(connection, initial_revision)
+        _ = store_search_configuration_revision(connection, custom_revision)
+        release = store_prompt_release(
+            connection,
+            build_prompt_release(custom_revision.configuration),
+            created_at=now,
+            created_by="owner",
+        )
+        connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, 'owner')
+            """,
+            (custom_revision.id, release.id, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO search_configuration_drafts (
+              singleton_id, base_revision_id, version, content, updated_at, updated_by
+            ) VALUES (1, %s, 0, %s, %s, 'owner')
+            """,
+            (
+                custom_revision.id,
+                Jsonb(custom_revision.configuration.model_dump(mode="json")),
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 0, %s, 'owner')
+            """,
+            (custom_revision.id, now),
+        )
+
+        apply_migrations(connection)
+
+        repaired = load_search_configuration_publication(connection, initial_revision.id)
+        assert repaired.prompt_release_id == release.id
+
+
+def test_pipeline_run_rejects_mismatched_configuration_publication_pair(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        publication = load_published_active_search_configuration(connection).publication
+        changed_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+            update={
+                "personal_criteria": (
+                    DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                        update={"instructions": "Another deliberately different criterion."}
+                    ),
+                    *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+                )
+            }
+        )
+        other_release = store_prompt_release(
+            connection,
+            build_prompt_release(changed_configuration),
+            created_at=now,
+            created_by="test",
+        )
+
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref,
+                  configuration_revision_id, prompt_release_id, parameters,
+                  status, started_at
+                ) VALUES (%s, %s, 'orchestration', 'test-ref', %s, %s,
+                  '{}'::jsonb, 'running', %s)
+                """,
+                (
+                    uuid4(),
+                    "mismatched-configuration-publication",
+                    publication.revision_id,
+                    other_release.id,
+                    now,
+                ),
+            )
+
+
+def test_pipeline_run_configuration_shape_supports_legacy_orchestration_writers(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 19, 12, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        publication = load_search_configuration_publication(
+            connection,
+            SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID),
+        )
+
+        _insert_legacy_orchestration_run(connection, run_id, publication.prompt_release_id, now)
+
+        assert connection.execute(
+            "SELECT configuration_revision_id FROM pipeline_runs WHERE id = %s",
+            (run_id,),
+        ).fetchone() == (INITIAL_SEARCH_CONFIGURATION_REVISION_ID,)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref,
+                  configuration_revision_id, prompt_release_id, parameters,
+                  status, started_at
+                ) VALUES (%s, %s, 'processing', 'test-ref', %s, %s,
+                  '{}'::jsonb, 'running', %s)
+                """,
+                (
+                    uuid4(),
+                    "processing-with-configuration",
+                    SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID),
+                    publication.prompt_release_id,
+                    now,
+                ),
+            )
 
 
 def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
@@ -395,6 +621,12 @@ def test_publication_migration_backfills_custom_active_and_draft_revisions(
     )
     with _connection(authority_schema) as connection:
         _apply_migrations_through(connection, "0016_search_configuration_revisions.sql")
+        initial_revision = build_search_configuration_revision(
+            DEFAULT_SEARCH_CONFIGURATION,
+            created_at=now,
+            created_by="migration:0016_search_configuration_revisions.sql",
+        )
+        _ = store_search_configuration_revision(connection, initial_revision)
         _ = store_search_configuration_revision(connection, draft_revision)
         _ = store_search_configuration_revision(connection, active_revision)
         connection.execute(
@@ -418,10 +650,15 @@ def test_publication_migration_backfills_custom_active_and_draft_revisions(
 
         draft_publication = load_search_configuration_publication(connection, draft_revision.id)
         active_publication = load_search_configuration_publication(connection, active_revision.id)
+        initial_publication = load_search_configuration_publication(
+            connection,
+            SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID),
+        )
         assert draft_publication.prompt_release_id == active_publication.prompt_release_id
+        assert initial_publication.prompt_release_id == active_publication.prompt_release_id
         assert connection.execute(
             "SELECT count(*) FROM search_configuration_publications"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
         assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
         assert load_search_configuration_draft(connection).base_revision_id == draft_revision.id
         assert load_active_search_configuration(connection).revision.id == active_revision.id
@@ -1149,13 +1386,13 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
         assert first == release
         assert second == release
         assert load_prompt_release(connection, release.id) == release
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (
-            len(release.versions),
-        )
-        assert connection.execute("SELECT count(*) FROM prompt_releases").fetchone() == (1,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (
-            len(release.versions),
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM prompt_release_members WHERE release_id = %s",
+            (release.id,),
+        ).fetchone() == (len(release.versions),)
+        assert connection.execute(
+            "SELECT count(*) FROM prompt_releases WHERE id = %s", (release.id,)
+        ).fetchone() == (1,)
 
 
 def test_stores_a_prompt_release_inside_a_committed_outer_transaction(
@@ -1205,6 +1442,7 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
     release = build_prompt_release(configuration)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        before_versions = connection.execute("SELECT count(*) FROM prompt_versions").fetchone()
 
         with pytest.raises(RuntimeError, match="rollback publication"):
             with connection.transaction():
@@ -1221,8 +1459,13 @@ def test_outer_transaction_rollback_removes_a_stored_prompt_release(
 
         with pytest.raises(PromptReleaseError, match="Prompt release not found"):
             load_prompt_release(connection, release.id)
-        assert connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM prompt_release_members").fetchone() == (0,)
+        assert (
+            connection.execute("SELECT count(*) FROM prompt_versions").fetchone() == before_versions
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM prompt_release_members WHERE release_id = %s",
+            (release.id,),
+        ).fetchone() == (0,)
 
 
 def test_bootstrap_fails_loudly_when_a_release_name_is_reused(
@@ -2709,6 +2952,60 @@ def _publish_configuration_revision(
         """,
         (revision.id, release.id, published_at),
     )
+
+
+def _seed_initial_configuration_publication(
+    connection: psycopg.Connection[tuple[object, ...]],
+    published_at: datetime,
+) -> PromptReleaseId:
+    revision = build_search_configuration_revision(
+        DEFAULT_SEARCH_CONFIGURATION,
+        created_at=published_at,
+        created_by="test",
+    )
+    assert revision.id == INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    _ = store_search_configuration_revision(connection, revision)
+    release = store_prompt_release(
+        connection,
+        build_prompt_release(revision.configuration),
+        created_at=published_at,
+        created_by="test",
+    )
+    connection.execute(
+        """
+        INSERT INTO search_configuration_publications (
+          revision_id, prompt_release_id, published_at, published_by
+        ) VALUES (%s, %s, %s, 'test')
+        """,
+        (revision.id, release.id, published_at),
+    )
+    return release.id
+
+
+def _insert_legacy_orchestration_run(
+    connection: psycopg.Connection[tuple[object, ...]],
+    run_id: UUID,
+    prompt_release_id: PromptReleaseId,
+    started_at: datetime,
+) -> None:
+    with connection.transaction():
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'orchestration', 'test-ref', %s, '{}'::jsonb, 'running', %s)
+            """,
+            (run_id, f"orchestration:{run_id}", prompt_release_id, started_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO run_exchange_rate_snapshots (
+              pipeline_run_id, content_digest, rates, source, observed_at
+            ) VALUES (%s, %s, '{"EUR": "1.1"}'::jsonb, 'frankfurter', %s)
+            """,
+            (run_id, "0" * 64, started_at),
+        )
 
 
 def _publication_command(
