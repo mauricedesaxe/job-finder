@@ -875,7 +875,6 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 ),
             )
         )
-        jev_probabilities = iter((0.0, 0.0, 0.0, 0.0, 1.0, 0.0))
 
         def accepted_sender(
             _url: str,
@@ -895,9 +894,7 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=accepted_sender,
                 model_retry_policy=one_attempt,
-                jev_sender=lambda _url, _headers, body, _timeout: _jev_response(
-                    body, next(jev_probabilities)
-                ),
+                jev_sender=_qualifying_jev_call,
             ),
             openrouter_api_key="test-key",
             typesafe_api_key="test-key",
@@ -1110,7 +1107,6 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
             ),
         )
     )
-    jev_probabilities = iter((0.0, 0.0, 0.0, 0.0, 1.0, 0.0))
 
     def model_sender(
         _url: str,
@@ -1140,9 +1136,7 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=model_sender,
-                jev_sender=lambda _url, _headers, body, _timeout: _jev_response(
-                    body, next(jev_probabilities)
-                ),
+                jev_sender=_qualifying_jev_call,
             ),
             openrouter_api_key="test-key",
             typesafe_api_key="test-key",
@@ -1263,6 +1257,31 @@ def _rejecting_jev_call(
     _timeout: float,
 ) -> JevHttpResponse:
     return _jev_response(body, 1.0)
+
+
+def _qualifying_jev_call(
+    _url: str,
+    _headers: Mapping[str, str],
+    body: dict[str, object],
+    _timeout: float,
+) -> JevHttpResponse:
+    questions = cast(dict[str, object], body["questions"])
+    probabilities = dict.fromkeys(questions, 0.0)
+    if "owns_product_delivery" in probabilities:
+        probabilities["owns_product_delivery"] = 1.0
+    return JevHttpResponse(
+        status_code=200,
+        body=json.dumps(
+            {
+                "model": JEV_MODEL,
+                "answers": {
+                    name: {"type": "noul", "noul": probability}
+                    for name, probability in probabilities.items()
+                },
+                "usage": {"input_tokens": 12, "output_tokens": len(questions)},
+            }
+        ),
+    )
 
 
 def _retryable_jev_call(
