@@ -12,7 +12,7 @@ from typing import ClassVar, Literal
 from uuid import uuid4
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from job_finder.evaluation.models import (
     CompletedModelCall,
@@ -96,6 +96,7 @@ class JevCriterionObservation(JevModel):
     output_tokens: int = Field(ge=0)
     latency_ms: int = Field(ge=0)
     estimated_cost_usd: Decimal = Field(ge=0)
+    raw_response: JsonValue | None = None
 
 
 class JevRunMetrics(JevModel):
@@ -393,6 +394,7 @@ def evaluate_prompt(
         estimated_cost_usd=(
             Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
         ),
+        raw_response=parsed.model_dump(mode="json"),
     )
 
 
@@ -538,7 +540,7 @@ def evaluate_persisted_prompt(
             provider_response_id=result.provider_request_id,
             status="accepted",
             parsed_output=accepted.model_dump(mode="json"),
-            raw_response=None,
+            raw_response=result.raw_response,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             cost_usd=result.estimated_cost_usd,
