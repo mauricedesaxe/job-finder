@@ -175,6 +175,7 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0018_published_search_configuration_pointers.sql",
             "0019_configuration_publication_receipts.sql",
             "0020_pipeline_run_configuration_revisions.sql",
+            "0021_typesafe_model_provider.sql",
         )
         assert second == first
         assert connection.execute(
@@ -196,7 +197,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0020_pipeline_run_configuration_revisions.sql"
+    assert results[0][-1] == "0021_typesafe_model_provider.sql"
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
@@ -245,7 +246,7 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         migrations = apply_migrations(connection)
 
-        assert migrations[-1] == "0020_pipeline_run_configuration_revisions.sql"
+        assert migrations[-1] == "0021_typesafe_model_provider.sql"
         expected = dict(before)
         expected["pipeline_runs"] = [
             {**row, "configuration_revision_id": None}
