@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 from uuid import uuid4
 
 import psycopg
@@ -25,6 +26,7 @@ from job_finder.ats.models import AtsAvailable
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
+from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse, JevRetryPolicy
 from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
@@ -354,6 +356,7 @@ def test_dagster_job_executes_the_domain_cycle(
     )
     monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", schema_dsn)
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "unused")
     monkeypatch.setenv("JINA_API_KEY", "unused")
     monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "commit-1")
 
@@ -770,9 +773,11 @@ def test_llm_rejection_persists_every_model_attempt_and_terminal_state(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
-                model_sender=_rejecting_model_call,
+                model_sender=_unexpected_model_call,
+                jev_sender=_rejecting_jev_call,
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=now,
             max_items=1,
@@ -824,10 +829,13 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
-                model_sender=_retryable_model_call,
+                model_sender=_unexpected_model_call,
                 model_retry_policy=one_attempt,
+                jev_sender=_retryable_jev_call,
+                jev_retry_policy=JevRetryPolicy(max_attempts=1, base_delay_seconds=0),
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=now,
             max_items=1,
@@ -856,9 +864,6 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
 
         model_outputs: Iterator[tuple[str, Mapping[str, object]]] = iter(
             (
-                *(("evaluate_job", {"pass": True, "reason": "filter passed"}) for _ in range(4)),
-                ("evaluate_job", {"pass": True, "reason": "profile matched"}),
-                ("evaluate_job", {"pass": False, "reason": "other profile"}),
                 (
                     "enrich_job",
                     {
@@ -870,6 +875,7 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 ),
             )
         )
+        jev_probabilities = iter((1.0, 1.0, 1.0, 1.0, 1.0, 0.0))
 
         def accepted_sender(
             _url: str,
@@ -889,8 +895,12 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=accepted_sender,
                 model_retry_policy=one_attempt,
+                jev_sender=lambda _url, _headers, body, _timeout: _jev_response(
+                    body, next(jev_probabilities)
+                ),
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=retry_at,
             max_items=1,
@@ -951,9 +961,11 @@ def test_crash_after_terminal_model_attempt_converges_from_the_cached_error(
                         search=lambda _keyword, _domain: SearchSucceeded(urls=()),
                         scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                         fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
-                        model_sender=_terminal_model_call,
+                        model_sender=_unexpected_model_call,
+                        jev_sender=_terminal_jev_call,
                     ),
                     openrouter_api_key="test-key",
+                    typesafe_api_key="test-key",
                     owner_token=uuid4(),
                     observed_at=now,
                     max_items=1,
@@ -975,8 +987,10 @@ def test_crash_after_terminal_model_attempt_converges_from_the_cached_error(
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=_unexpected_model_call,
+                jev_sender=_unexpected_jev_call,
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=retry_at,
             max_items=1,
@@ -999,7 +1013,7 @@ def test_crash_after_terminal_model_attempt_converges_from_the_cached_error(
     assert final_model_attempt_count == attempt_count_after_crash
 
 
-def test_terminal_openrouter_error_dead_letters_work_without_a_decision(
+def test_terminal_jev_error_dead_letters_work_without_a_decision(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -1022,9 +1036,11 @@ def test_terminal_openrouter_error_dead_letters_work_without_a_decision(
                 search=lambda _keyword, _domain: SearchSucceeded(urls=()),
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
-                model_sender=_terminal_model_call,
+                model_sender=_unexpected_model_call,
+                jev_sender=_terminal_jev_call,
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=now,
             max_items=1,
@@ -1083,9 +1099,6 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
     raw_url = "https://jobs.lever.co/acme/qualified"
     model_outputs: Iterator[tuple[str, Mapping[str, object]]] = iter(
         (
-            *(("evaluate_job", {"pass": True, "reason": "filter passed"}) for _ in range(4)),
-            ("evaluate_job", {"pass": True, "reason": "profile matched"}),
-            ("evaluate_job", {"pass": False, "reason": "other profile"}),
             (
                 "enrich_job",
                 {
@@ -1097,6 +1110,7 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
             ),
         )
     )
+    jev_probabilities = iter((1.0, 1.0, 1.0, 1.0, 1.0, 0.0))
 
     def model_sender(
         _url: str,
@@ -1126,8 +1140,12 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
                 scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
                 model_sender=model_sender,
+                jev_sender=lambda _url, _headers, body, _timeout: _jev_response(
+                    body, next(jev_probabilities)
+                ),
             ),
             openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
             owner_token=uuid4(),
             observed_at=now,
             max_items=1,
@@ -1192,30 +1210,6 @@ def _prepare_run(connection: psycopg.Connection[tuple[object, ...]], key: str, n
     )
 
 
-def _retryable_model_call(
-    _url: str,
-    _headers: Mapping[str, str],
-    _body: dict[str, object],
-    _timeout: float,
-) -> HttpResponse:
-    return HttpResponse(
-        status_code=503,
-        body=json.dumps({"error": {"message": "provider unavailable"}}),
-    )
-
-
-def _terminal_model_call(
-    _url: str,
-    _headers: Mapping[str, str],
-    _body: dict[str, object],
-    _timeout: float,
-) -> HttpResponse:
-    return HttpResponse(
-        status_code=400,
-        body=json.dumps({"error": {"message": "invalid request"}}),
-    )
-
-
 def _model_response(tool_name: str, output: Mapping[str, object]) -> HttpResponse:
     return HttpResponse(
         status_code=200,
@@ -1248,43 +1242,49 @@ def _model_response(tool_name: str, output: Mapping[str, object]) -> HttpRespons
     )
 
 
-def _rejecting_model_call(
+def _jev_response(body: dict[str, object], probability: float) -> JevHttpResponse:
+    questions = cast(dict[str, object], body["questions"])
+    return JevHttpResponse(
+        status_code=200,
+        body=json.dumps(
+            {
+                "model": JEV_MODEL,
+                "answers": {name: {"type": "noul", "noul": probability} for name in questions},
+                "usage": {"input_tokens": 12, "output_tokens": len(questions)},
+            }
+        ),
+    )
+
+
+def _rejecting_jev_call(
+    _url: str,
+    _headers: Mapping[str, str],
+    body: dict[str, object],
+    _timeout: float,
+) -> JevHttpResponse:
+    return _jev_response(body, 0.0)
+
+
+def _retryable_jev_call(
     _url: str,
     _headers: Mapping[str, str],
     _body: dict[str, object],
     _timeout: float,
-) -> HttpResponse:
-    return HttpResponse(
-        status_code=200,
-        body=json.dumps(
-            {
-                "id": "generation-rejected",
-                "model": "google/gemini-2.5-flash-001",
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [
-                                {
-                                    "type": "function",
-                                    "function": {
-                                        "name": "evaluate_job",
-                                        "arguments": json.dumps(
-                                            {"pass": False, "reason": "wrong role"}
-                                        ),
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 4,
-                    "cost": 0.00012,
-                },
-            }
-        ),
-    )
+) -> JevHttpResponse:
+    return JevHttpResponse(status_code=503, body="{}")
+
+
+def _terminal_jev_call(
+    _url: str,
+    _headers: Mapping[str, str],
+    _body: dict[str, object],
+    _timeout: float,
+) -> JevHttpResponse:
+    return JevHttpResponse(status_code=400, body="{}")
+
+
+def _unexpected_jev_call(*_args: object) -> JevHttpResponse:
+    raise AssertionError("rejected work reached Jev")
 
 
 def _unexpected_model_call(*_args: object) -> HttpResponse:
