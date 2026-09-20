@@ -50,6 +50,14 @@ class SearchConfigurationError(RuntimeError):
     pass
 
 
+class SearchConfigurationRevisionNotFound(SearchConfigurationError):
+    pass
+
+
+class SearchConfigurationPublicationNotFound(SearchConfigurationError):
+    pass
+
+
 class SearchConfigurationModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
@@ -218,7 +226,9 @@ def load_search_configuration_revision(
         (revision_id,),
     ).fetchone()
     if row is None:
-        raise SearchConfigurationError(f"Search configuration revision not found: {revision_id}")
+        raise SearchConfigurationRevisionNotFound(
+            f"Search configuration revision not found: {revision_id}"
+        )
     revision = SearchConfigurationRevision.model_validate(
         {
             "id": revision_id,
@@ -276,7 +286,9 @@ def load_search_configuration_publication(
         (revision_id,),
     ).fetchone()
     if row is None:
-        raise SearchConfigurationError(f"Search configuration publication not found: {revision_id}")
+        raise SearchConfigurationPublicationNotFound(
+            f"Search configuration publication not found: {revision_id}"
+        )
     return SearchConfigurationPublication.model_validate(
         {
             "revision_id": revision_id,

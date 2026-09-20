@@ -25,7 +25,10 @@ from job_finder.search_configuration import (
     SearchConfigurationDraft,
     SearchConfigurationError,
     SearchConfigurationPublication,
+    SearchConfigurationPublicationNotFound,
+    SearchConfigurationRevision,
     SearchConfigurationRevisionId,
+    SearchConfigurationRevisionNotFound,
     build_search_configuration_revision,
     compare_and_swap_active_search_configuration,
     load_active_search_configuration,
@@ -89,7 +92,7 @@ class ConfigurationValid(ConfigurationServiceModel):
 
 class ConfigurationInvalid(ConfigurationServiceModel):
     kind: Literal["invalid"] = "invalid"
-    issues: tuple[ConfigurationValidationIssue, ...]
+    issues: Annotated[tuple[ConfigurationValidationIssue, ...], Field(max_length=100)]
     total_issue_count: int = Field(ge=1)
     omitted_issue_count: int = Field(ge=0)
 
@@ -112,9 +115,35 @@ class ConfigurationPreview(ConfigurationServiceModel):
     prompt_release_id: PromptReleaseId
     prompt_release_name: str
     total_generated_search_count: int = Field(ge=1)
-    search_samples: tuple[str, ...]
+    search_samples: Annotated[tuple[str, ...], Field(max_length=100)]
     total_compiled_prompt_count: int = Field(ge=1)
-    prompt_summaries: tuple[PromptSummary, ...]
+    prompt_summaries: Annotated[tuple[PromptSummary, ...], Field(max_length=100)]
+
+
+class ConfigurationRevisionNotFound(ValueError):
+    pass
+
+
+class ConfigurationRevisionCursor(ConfigurationServiceModel):
+    created_at: datetime
+    revision_id: ConfigurationRevisionId
+
+
+class ConfigurationRevisionSummary(ConfigurationServiceModel):
+    revision_id: ConfigurationRevisionId
+    created_at: datetime
+    created_by: str = Field(min_length=1)
+    publication: SearchConfigurationPublication | None
+
+
+class ConfigurationRevisionPage(ConfigurationServiceModel):
+    items: Annotated[tuple[ConfigurationRevisionSummary, ...], Field(max_length=100)]
+    next_cursor: ConfigurationRevisionCursor | None = None
+
+
+class ConfigurationRevisionDetails(ConfigurationServiceModel):
+    revision: SearchConfigurationRevision
+    publication: SearchConfigurationPublication | None
 
 
 class SaveDraftCommand(ConfigurationServiceModel):
@@ -326,6 +355,71 @@ def save_search_configuration_draft(
     return DraftChanged(current_draft=load_search_configuration_draft(connection))
 
 
+def get_active_search_configuration(
+    connection: Connection,
+) -> PublishedActiveSearchConfiguration:
+    active = load_active_search_configuration(connection)
+    publication = load_search_configuration_publication(connection, active.revision.id)
+    return PublishedActiveSearchConfiguration(active=active, publication=publication)
+
+
+def get_search_configuration_draft(connection: Connection) -> SearchConfigurationDraft:
+    return load_search_configuration_draft(connection)
+
+
+def get_search_configuration_revision(
+    connection: Connection,
+    revision_id: SearchConfigurationRevisionId,
+) -> ConfigurationRevisionDetails:
+    try:
+        revision = load_search_configuration_revision(connection, revision_id)
+    except SearchConfigurationRevisionNotFound as error:
+        raise ConfigurationRevisionNotFound(
+            "Search configuration revision does not exist"
+        ) from error
+    try:
+        publication = load_search_configuration_publication(connection, revision_id)
+    except SearchConfigurationPublicationNotFound:
+        publication = None
+    return ConfigurationRevisionDetails(revision=revision, publication=publication)
+
+
+def list_search_configuration_revisions(
+    connection: Connection,
+    *,
+    limit: int = 25,
+    cursor: ConfigurationRevisionCursor | None = None,
+) -> ConfigurationRevisionPage:
+    _require_result_limit(limit)
+    row = None if cursor is None else (cursor.created_at, cursor.revision_id)
+    rows = connection.execute(
+        """
+        SELECT r.id, r.created_at, r.created_by,
+               p.prompt_release_id, p.published_at, p.published_by
+        FROM search_configuration_revisions r
+        LEFT JOIN search_configuration_publications p ON p.revision_id = r.id
+        WHERE (%s::timestamptz IS NULL OR (r.created_at, r.id) < (%s, %s))
+        ORDER BY r.created_at DESC, r.id DESC
+        LIMIT %s
+        """,
+        (
+            None if row is None else row[0],
+            None if row is None else row[0],
+            None if row is None else row[1],
+            limit + 1,
+        ),
+    ).fetchall()
+    summaries = tuple(_revision_summary(item) for item in rows[:limit])
+    next_cursor = None
+    if len(rows) > limit:
+        last = summaries[-1]
+        next_cursor = ConfigurationRevisionCursor(
+            created_at=last.created_at,
+            revision_id=last.revision_id,
+        )
+    return ConfigurationRevisionPage(items=summaries, next_cursor=next_cursor)
+
+
 def publish_search_configuration(
     connection: Connection,
     command: PublishConfigurationCommand,
@@ -428,9 +522,7 @@ def publish_search_configuration(
 def load_published_active_search_configuration(
     connection: Connection,
 ) -> PublishedActiveSearchConfiguration:
-    active = load_active_search_configuration(connection)
-    publication = load_search_configuration_publication(connection, active.revision.id)
-    return PublishedActiveSearchConfiguration(active=active, publication=publication)
+    return get_active_search_configuration(connection)
 
 
 def activate_search_configuration(
@@ -439,7 +531,7 @@ def activate_search_configuration(
 ) -> ActivateConfigurationResult:
     try:
         publication = load_search_configuration_publication(connection, command.target_revision_id)
-    except SearchConfigurationError:
+    except SearchConfigurationPublicationNotFound:
         return ActivationTargetUnpublished(target_revision_id=command.target_revision_id)
     active = compare_and_swap_active_search_configuration(
         connection,
@@ -627,6 +719,27 @@ def _rebase_locked_draft(
 def _require_result_limit(limit: int) -> None:
     if isinstance(limit, bool) or not MIN_RESULT_LIMIT <= limit <= MAX_RESULT_LIMIT:
         raise ValueError(f"Result limit must be between {MIN_RESULT_LIMIT} and {MAX_RESULT_LIMIT}")
+
+
+def _revision_summary(row: tuple[object, ...]) -> ConfigurationRevisionSummary:
+    publication = None
+    if row[3] is not None:
+        publication = SearchConfigurationPublication.model_validate(
+            {
+                "revision_id": row[0],
+                "prompt_release_id": row[3],
+                "published_at": row[4],
+                "published_by": row[5],
+            }
+        )
+    return ConfigurationRevisionSummary.model_validate(
+        {
+            "revision_id": row[0],
+            "created_at": row[1],
+            "created_by": row[2],
+            "publication": publication,
+        }
+    )
 
 
 def _validation_issue_location(error: Mapping[str, object]) -> tuple[str | int, ...]:

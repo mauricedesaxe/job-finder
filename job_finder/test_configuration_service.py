@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
+from collections.abc import Sequence
+from typing import cast, final
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -16,6 +17,11 @@ from job_finder.configuration_service import (
     ConfigurationPublished,
     ConfigurationInvalid,
     ConfigurationPreview,
+    ConfigurationRevisionCursor,
+    ConfigurationRevisionDetails,
+    ConfigurationRevisionNotFound,
+    ConfigurationRevisionPage,
+    ConfigurationRevisionSummary,
     ConfigurationValid,
     DraftChanged,
     DraftSaveResult,
@@ -26,6 +32,9 @@ from job_finder.configuration_service import (
     PublishDraftChanged,
     PublishedActiveSearchConfiguration,
     SaveDraftCommand,
+    activate_search_configuration,
+    get_search_configuration_revision,
+    list_search_configuration_revisions,
     preview_search_configuration,
     save_search_configuration_draft,
     validate_search_configuration,
@@ -37,9 +46,12 @@ from job_finder.search_configuration import (
     Connection,
     SearchConfiguration,
     SearchConfigurationDraft,
+    SearchConfigurationError,
     SearchConfigurationPublication,
+    SearchConfigurationPublicationNotFound,
     SearchConfigurationRevision,
     SearchConfigurationRevisionId,
+    SearchConfigurationRevisionNotFound,
     SupportedSearchSource,
     search_configuration_revision_id,
 )
@@ -165,6 +177,131 @@ def test_preview_has_no_sql_or_network_dependency(monkeypatch: pytest.MonkeyPatc
     preview = preview_search_configuration(DEFAULT_SEARCH_CONFIGURATION)
 
     assert preview.total_generated_search_count == 128
+
+
+def test_configuration_result_collections_have_schema_and_runtime_bounds() -> None:
+    invalid_schema = ConfigurationInvalid.model_json_schema()
+    preview_schema = ConfigurationPreview.model_json_schema()
+    page_schema = ConfigurationRevisionPage.model_json_schema()
+
+    assert invalid_schema["properties"]["issues"]["maxItems"] == 100
+    assert preview_schema["properties"]["search_samples"]["maxItems"] == 100
+    assert preview_schema["properties"]["prompt_summaries"]["maxItems"] == 100
+    assert page_schema["properties"]["items"]["maxItems"] == 100
+    with pytest.raises(ValidationError, match="at most 100"):
+        ConfigurationRevisionPage(items=tuple(_summary(index) for index in range(101)))
+
+
+def test_revision_get_returns_optional_publication_and_maps_only_missing_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _revision()
+    publication = _publication()
+
+    def load_revision(
+        _connection: Connection, _revision_id: SearchConfigurationRevisionId
+    ) -> SearchConfigurationRevision:
+        return revision
+
+    def load_publication(
+        _connection: Connection, _revision_id: SearchConfigurationRevisionId
+    ) -> SearchConfigurationPublication:
+        return publication
+
+    monkeypatch.setattr(service_module, "load_search_configuration_revision", load_revision)
+    monkeypatch.setattr(service_module, "load_search_configuration_publication", load_publication)
+
+    assert get_search_configuration_revision(cast(Connection, object()), revision.id) == (
+        ConfigurationRevisionDetails(revision=revision, publication=publication)
+    )
+
+    def missing_publication(*_args: object) -> None:
+        raise SearchConfigurationPublicationNotFound("missing")
+
+    monkeypatch.setattr(
+        service_module, "load_search_configuration_publication", missing_publication
+    )
+    assert (
+        get_search_configuration_revision(cast(Connection, object()), revision.id).publication
+        is None
+    )
+
+    def missing_revision(*_args: object) -> None:
+        raise SearchConfigurationRevisionNotFound("missing")
+
+    monkeypatch.setattr(service_module, "load_search_configuration_revision", missing_revision)
+    with pytest.raises(ConfigurationRevisionNotFound, match="does not exist"):
+        get_search_configuration_revision(cast(Connection, object()), revision.id)
+
+    def corrupt_revision(*_args: object) -> None:
+        raise SearchConfigurationError("corrupt")
+
+    monkeypatch.setattr(service_module, "load_search_configuration_revision", corrupt_revision)
+    with pytest.raises(SearchConfigurationError, match="corrupt"):
+        get_search_configuration_revision(cast(Connection, object()), revision.id)
+
+
+def test_revision_list_uses_bounded_compound_keyset_and_omits_bodies() -> None:
+    historical_actor = "a" * 201
+    rows: list[tuple[object, ...]] = [
+        (
+            str(index) * 64,
+            NOW,
+            historical_actor if index == 3 else f"owner-{index}",
+            ("f" * 64) if index != 2 else None,
+            NOW if index != 2 else None,
+            "publisher" if index != 2 else None,
+        )
+        for index in (3, 2, 1)
+    ]
+    connection = _ListConnection(rows)
+    cursor = ConfigurationRevisionCursor(
+        created_at=NOW, revision_id=SearchConfigurationRevisionId("4" * 64)
+    )
+
+    page = list_search_configuration_revisions(
+        cast(Connection, cast(object, connection)), limit=2, cursor=cursor
+    )
+
+    assert [item.revision_id for item in page.items] == ["3" * 64, "2" * 64]
+    assert page.items[0].created_by == historical_actor
+    assert page.items[0].publication is not None
+    assert page.items[1].publication is None
+    assert page.next_cursor == ConfigurationRevisionCursor(
+        created_at=NOW, revision_id=SearchConfigurationRevisionId("2" * 64)
+    )
+    assert connection.parameters == (NOW, NOW, "4" * 64, 3)
+    assert "r.content" not in connection.query
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_revision_list_rejects_invalid_limits(limit: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        list_search_configuration_revisions(
+            cast(Connection, cast(object, _ListConnection([]))), limit=limit
+        )
+
+
+def test_activation_maps_only_a_missing_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def corrupt_publication(*_args: object) -> None:
+        raise SearchConfigurationError("corrupt publication")
+
+    monkeypatch.setattr(
+        service_module, "load_search_configuration_publication", corrupt_publication
+    )
+    with pytest.raises(SearchConfigurationError, match="corrupt publication"):
+        activate_search_configuration(
+            cast(Connection, object()),
+            ActivateConfigurationCommand(
+                target_revision_id=BASE_REVISION_ID,
+                expected_active_revision_id=BASE_REVISION_ID,
+                expected_generation=0,
+                actor="owner",
+                timestamp=NOW,
+            ),
+        )
 
 
 def test_draft_save_preserves_loaded_base_and_returns_typed_success(
@@ -400,3 +537,45 @@ def _publication() -> SearchConfigurationPublication:
         published_at=NOW,
         published_by="owner",
     )
+
+
+def _revision() -> SearchConfigurationRevision:
+    return SearchConfigurationRevision(
+        id=search_configuration_revision_id(DEFAULT_SEARCH_CONFIGURATION),
+        configuration=DEFAULT_SEARCH_CONFIGURATION,
+        created_at=NOW,
+        created_by="owner",
+    )
+
+
+def _summary(index: int) -> ConfigurationRevisionSummary:
+    return ConfigurationRevisionSummary(
+        revision_id=SearchConfigurationRevisionId(f"{index % 10}" * 64),
+        created_at=NOW,
+        created_by="owner",
+        publication=None,
+    )
+
+
+@final
+class _ListResult:
+    def __init__(self, rows: Sequence[tuple[object, ...]]) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> Sequence[tuple[object, ...]]:
+        return self.rows
+
+
+@final
+class _ListConnection:
+    autocommit: bool = True
+
+    def __init__(self, rows: Sequence[tuple[object, ...]]) -> None:
+        self.rows = rows
+        self.query = ""
+        self.parameters: tuple[object, ...] = ()
+
+    def execute(self, query: str, parameters: tuple[object, ...]) -> _ListResult:
+        self.query = query
+        self.parameters = parameters
+        return _ListResult(self.rows)

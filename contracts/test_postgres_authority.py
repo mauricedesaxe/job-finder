@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from fastmcp import Client
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -25,14 +27,23 @@ from job_finder.configuration_service import (
     ActiveConfigurationChanged,
     ActivateConfigurationCommand,
     ConfigurationActivated,
+    ConfigurationPreview,
     ConfigurationPublished,
+    ConfigurationRevisionCursor,
+    ConfigurationRevisionDetails,
+    ConfigurationRevisionPage,
     DraftChanged,
     DraftSaved,
     PublicationIdempotencyKeyConflict,
     PublishConfigurationCommand,
     PublishDraftChanged,
+    PublishedActiveSearchConfiguration,
     SaveDraftCommand,
     activate_search_configuration,
+    get_active_search_configuration,
+    get_search_configuration_draft,
+    get_search_configuration_revision,
+    list_search_configuration_revisions,
     load_published_active_search_configuration,
     publish_search_configuration,
     save_search_configuration_draft,
@@ -119,6 +130,9 @@ from job_finder.evaluation.prompt_releases import (
     build_prompt_release,
     store_prompt_release,
 )
+from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
+from job_finder.mcp_server import McpDependencies, create_mcp_server
+from job_finder.pipeline.state import prepare_orchestration_run
 
 
 @pytest.fixture
@@ -477,6 +491,193 @@ def test_initial_search_configuration_is_seeded_as_draft_revision_and_active(
         assert publication.revision_id == active.revision.id
         assert publication.published_by == "migration:0017_search_configuration_publications.sql"
         assert release == build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
+
+
+def test_configuration_revision_reads_use_stable_compound_keyset_pagination(
+    authority_schema: str,
+) -> None:
+    base_time = datetime(2030, 1, 1, tzinfo=UTC)
+    configurations = tuple(
+        DEFAULT_SEARCH_CONFIGURATION.model_copy(update={"search_keywords": (f"revision-{index}",)})
+        for index in range(4)
+    )
+    revisions = (
+        build_search_configuration_revision(
+            configurations[0], created_at=base_time + timedelta(hours=2), created_by="owner-0"
+        ),
+        build_search_configuration_revision(
+            configurations[1], created_at=base_time + timedelta(hours=1), created_by="owner-1"
+        ),
+        build_search_configuration_revision(
+            configurations[2], created_at=base_time + timedelta(hours=1), created_by="owner-2"
+        ),
+        build_search_configuration_revision(
+            configurations[3], created_at=base_time, created_by="owner-3"
+        ),
+    )
+    expected = sorted(revisions, key=lambda item: (item.created_at, item.id), reverse=True)
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        for revision in revisions:
+            _ = store_search_configuration_revision(connection, revision)
+        _publish_configuration_revision(connection, expected[1], base_time + timedelta(hours=3))
+
+        first = list_search_configuration_revisions(connection, limit=2)
+        assert [item.revision_id for item in first.items] == [item.id for item in expected[:2]]
+        assert first.next_cursor == ConfigurationRevisionCursor(
+            created_at=expected[1].created_at,
+            revision_id=expected[1].id,
+        )
+        publications = {item.revision_id: item.publication for item in first.items}
+        assert publications[expected[1].id] is not None
+        unpublished = next(item for item in first.items if item.revision_id != expected[1].id)
+        assert unpublished.publication is None
+
+        inserted = build_search_configuration_revision(
+            DEFAULT_SEARCH_CONFIGURATION.model_copy(
+                update={"search_keywords": ("inserted-between-pages",)}
+            ),
+            created_at=base_time + timedelta(hours=4),
+            created_by="later-owner",
+        )
+        _ = store_search_configuration_revision(connection, inserted)
+
+        second = list_search_configuration_revisions(
+            connection,
+            limit=2,
+            cursor=first.next_cursor,
+        )
+        assert [item.revision_id for item in second.items] == [item.id for item in expected[2:]]
+        assert not (
+            {item.revision_id for item in first.items} & {item.revision_id for item in second.items}
+        )
+        assert inserted.id not in {item.revision_id for item in second.items}
+
+        published_details = get_search_configuration_revision(connection, expected[1].id)
+        assert published_details.revision == expected[1]
+        assert published_details.publication is not None
+        assert published_details.publication.revision_id == expected[1].id
+        unpublished_details = get_search_configuration_revision(connection, revisions[3].id)
+        assert unpublished_details.revision == revisions[3]
+        assert unpublished_details.publication is None
+        assert get_active_search_configuration(connection).active.revision.id == (
+            SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID)
+        )
+        assert get_search_configuration_draft(connection).base_revision_id == (
+            SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID)
+        )
+
+
+def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
+    authority_schema: str,
+) -> None:
+    configured_profile = DEFAULT_SEARCH_CONFIGURATION.target_profiles[0].model_copy(
+        update={"instructions": "Prefer roles with direct product ownership."}
+    )
+    configured = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "search_keywords": ("mcp-configured-search",),
+            "target_profiles": (
+                configured_profile,
+                *DEFAULT_SEARCH_CONFIGURATION.target_profiles[1:],
+            ),
+        }
+    )
+    expected_revision_id = search_configuration_revision_id(configured)
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+    server = create_mcp_server(
+        McpDependencies(
+            connect=lambda: _connection(authority_schema),
+            actor="mcp-contract-owner",
+            now=lambda: datetime(2030, 1, 2, tzinfo=UTC),
+        )
+    )
+
+    async def configure() -> None:
+        async with Client(server) as client:
+            active_result = await client.call_tool("configuration_active_get", {})
+            active = PublishedActiveSearchConfiguration.model_validate(
+                active_result.structured_content
+            )
+
+            draft_result = await client.call_tool("configuration_draft_get", {})
+            draft = SearchConfigurationDraft.model_validate(draft_result.structured_content)
+
+            preview_result = await client.call_tool(
+                "configuration_preview",
+                {"configuration": configured.model_dump(mode="json")},
+            )
+            preview = ConfigurationPreview.model_validate(preview_result.structured_content)
+            assert preview.configuration_revision_id == expected_revision_id
+
+            saved_result = await client.call_tool(
+                "configuration_draft_update",
+                {
+                    "expected_version": draft.version,
+                    "configuration": configured.model_dump(mode="json"),
+                },
+            )
+            assert saved_result.structured_content is not None
+            saved = DraftSaved.model_validate(saved_result.structured_content["result"])
+
+            published_result = await client.call_tool(
+                "configuration_publish",
+                {
+                    "idempotency_key": "mcp-contract-publish",
+                    "expected_draft_version": saved.draft.version,
+                    "expected_configuration_revision_id": expected_revision_id,
+                },
+            )
+            assert published_result.structured_content is not None
+            published = ConfigurationPublished.model_validate(
+                published_result.structured_content["result"]
+            )
+            assert published.publication.revision_id == expected_revision_id
+
+            listed_result = await client.call_tool("configuration_revision_list", {"limit": 100})
+            listed = ConfigurationRevisionPage.model_validate(listed_result.structured_content)
+            assert expected_revision_id in {item.revision_id for item in listed.items}
+
+            details_result = await client.call_tool(
+                "configuration_revision_get", {"revision_id": expected_revision_id}
+            )
+            details = ConfigurationRevisionDetails.model_validate(details_result.structured_content)
+            assert details.revision.configuration == configured
+
+            activated_result = await client.call_tool(
+                "configuration_activate",
+                {
+                    "target_revision_id": expected_revision_id,
+                    "expected_active_revision_id": active.active.revision.id,
+                    "expected_generation": active.active.generation,
+                },
+            )
+            assert activated_result.structured_content is not None
+            activated = ConfigurationActivated.model_validate(
+                activated_result.structured_content["result"]
+            )
+            assert activated.active_configuration.active.revision.id == expected_revision_id
+
+    asyncio.run(configure())
+
+    with _connection(authority_schema) as connection:
+        run = prepare_orchestration_run(
+            connection,
+            idempotency_key="mcp-configured-run",
+            implementation_ref="mcp-contract",
+            started_at=datetime(2030, 1, 3, tzinfo=UTC),
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: ExchangeRateSnapshot(
+                rates={"EUR": Decimal("1.11")},
+                source="frankfurter",
+                observed_at=datetime(2030, 1, 3, tzinfo=UTC),
+            ),
+        )
+        assert run.configuration_revision_id == expected_revision_id
 
 
 def test_configuration_service_saves_a_draft_and_preserves_its_base(
