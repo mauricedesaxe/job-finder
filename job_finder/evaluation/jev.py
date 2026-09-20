@@ -5,17 +5,29 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import MappingProxyType
 from typing import ClassVar, Literal
+from uuid import uuid4
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from job_finder.evaluation.models import (
+    CompletedModelCall,
     CriterionAccepted,
+    CriterionResult,
+    ModelCallAttempt,
+    ModelCallContext,
     RetryableOperationalError,
     TerminalOperationalError,
+)
+from job_finder.evaluation.openrouter import (
+    ModelCallPersistence,
+    PendingModelCallUsage,
+    model_request_id,
+    prompt_input_digest,
 )
 from job_finder.evaluation.prompt_releases import PromptVersion
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
@@ -130,6 +142,7 @@ JevCriterionResult = JevCriterionObservation | RetryableOperationalError | Termi
 Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 RequestObserver = Callable[[int], None]
+RetryObserver = Callable[[RetryableOperationalError, int], None]
 JevPolicy = Literal["faithful", "atomic"]
 
 
@@ -300,6 +313,7 @@ def evaluate_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     observe_request: RequestObserver | None = None,
+    observe_retry: RetryObserver | None = None,
     policy: JevPolicy = "faithful",
 ) -> JevCriterionResult:
     expected_inputs = set(prompt.definition.inputs)
@@ -367,6 +381,8 @@ def evaluate_prompt(
             or attempt + 1 >= retries.max_attempts
         ):
             return failure
+        if observe_retry is not None:
+            observe_retry(failure, latency_ms)
         sleep(
             retry_after_seconds
             if retry_after_seconds is not None
@@ -418,6 +434,121 @@ def evaluate_prompt(
             Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
         ),
     )
+
+
+def evaluate_persisted_prompt(
+    prompt: PromptVersion,
+    values: Mapping[str, str],
+    context: ModelCallContext,
+    persistence: ModelCallPersistence,
+    *,
+    api_key: str,
+    policy: JevPolicy = "atomic",
+    sender: JevSender | None = None,
+    retry_policy: JevRetryPolicy | None = None,
+    sleep: Sleeper = time.sleep,
+    clock: Clock = time.monotonic,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> CriterionResult:
+    if context.input_digest != prompt_input_digest(values):
+        raise ValueError("Model-call context does not match the prompt input")
+    request_id = model_request_id(context, prompt)
+    completed = persistence.find_completed(request_id)
+    if isinstance(completed, TerminalOperationalError):
+        return completed
+    if isinstance(completed, CompletedModelCall):
+        return CriterionAccepted.model_validate(completed.parsed_output)
+    if isinstance(completed, PendingModelCallUsage):
+        raise RuntimeError("Jev model calls cannot have pending usage")
+
+    attempt_number = persistence.next_attempt_number(request_id)
+
+    def record_retry(failure: RetryableOperationalError, latency_ms: int) -> None:
+        nonlocal attempt_number
+        persistence.record(
+            ModelCallAttempt(
+                id=uuid4(),
+                context=context,
+                request_id=request_id,
+                attempt_number=attempt_number,
+                prompt_name=prompt.definition.name,
+                prompt_version_id=prompt.id,
+                requested_model=JEV_MODEL,
+                response_model=None,
+                provider_response_id=None,
+                status="retryable_error",
+                parsed_output=None,
+                raw_response=None,
+                input_tokens=None,
+                output_tokens=None,
+                cost_usd=None,
+                latency_ms=latency_ms,
+                error={"code": failure.error_code, "message": failure.reason},
+                observed_at=now(),
+            )
+        )
+        attempt_number += 1
+
+    result = evaluate_prompt(
+        prompt,
+        values,
+        api_key=api_key,
+        policy=policy,
+        sender=sender,
+        retry_policy=retry_policy,
+        sleep=sleep,
+        clock=clock,
+        observe_retry=record_retry,
+    )
+    if isinstance(result, JevCriterionObservation):
+        accepted = result.result
+        attempt = ModelCallAttempt(
+            id=uuid4(),
+            context=context,
+            request_id=request_id,
+            attempt_number=attempt_number,
+            prompt_name=prompt.definition.name,
+            prompt_version_id=prompt.id,
+            requested_model=JEV_MODEL,
+            response_model=result.model,
+            provider_response_id=result.provider_request_id,
+            status="accepted",
+            parsed_output=accepted.model_dump(mode="json"),
+            raw_response=None,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=result.estimated_cost_usd,
+            latency_ms=result.latency_ms,
+            error=None,
+            observed_at=now(),
+        )
+        persistence.record(attempt)
+        return accepted
+
+    attempt = ModelCallAttempt(
+        id=uuid4(),
+        context=context,
+        request_id=request_id,
+        attempt_number=attempt_number,
+        prompt_name=prompt.definition.name,
+        prompt_version_id=prompt.id,
+        requested_model=JEV_MODEL,
+        response_model=None,
+        provider_response_id=None,
+        status="retryable_error"
+        if isinstance(result, RetryableOperationalError)
+        else "terminal_error",
+        parsed_output=None,
+        raw_response=None,
+        input_tokens=None,
+        output_tokens=None,
+        cost_usd=None,
+        latency_ms=0,
+        error={"code": result.error_code, "message": result.reason},
+        observed_at=now(),
+    )
+    persistence.record(attempt)
+    return result
 
 
 def _compose_atomic(criterion: str, probabilities: Mapping[str, float]) -> tuple[bool, float]:

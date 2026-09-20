@@ -76,6 +76,7 @@ Open `.env` and replace these values:
 
 - `JINA_API_KEY`
 - `OPENROUTER_API_KEY`
+- `TYPESAFE_API_KEY`
 - `JOB_FINDER_REVIEW_PASSWORD`, with at least 12 characters
 - `JOB_FINDER_REVIEW_SESSION_SECRET`, with at least 32 random characters
 
