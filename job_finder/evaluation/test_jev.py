@@ -117,6 +117,9 @@ def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result()
         output_tokens=4,
         latency_ms=125,
         estimated_cost_usd=Decimal("0.0000042"),
+        raw_response=JevSystemOneResponse.model_validate_json(
+            _response_body(0.5, "compensation-minimum")
+        ).model_dump(mode="json"),
     )
 
 
