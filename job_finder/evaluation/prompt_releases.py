@@ -113,6 +113,10 @@ class PromptVersion(PromptModel):
             raise ValueError("Prompt tool name does not match the stored parameters")
         if self.parameters.get("tool_description") != self.tool_description:
             raise ValueError("Prompt tool description does not match the stored parameters")
+        if self.parameters.get("criterion") != self.definition.criterion:
+            raise ValueError("Prompt criterion does not match the stored parameters")
+        if self.parameters.get("phase") != self.definition.phase:
+            raise ValueError("Prompt phase does not match the stored parameters")
         return self
 
 
@@ -121,6 +125,13 @@ class PromptRelease(PromptModel):
     name: str = Field(min_length=1)
     content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     versions: tuple[PromptVersion, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def prompt_names_are_unique(self) -> PromptRelease:
+        names = [version.definition.name for version in self.versions]
+        if len(names) != len(set(names)):
+            raise ValueError("Prompt release names must be unique")
+        return self
 
     def version(self, name: str) -> PromptVersion:
         for version in self.versions:
@@ -202,8 +213,24 @@ def _escape_instructions(instructions: str, placeholders: tuple[str, ...]) -> st
 def bootstrap_prompt_release(
     connection: psycopg.Connection[tuple[object, ...]],
 ) -> PromptRelease:
-    release = build_prompt_release()
-    now = datetime.now(UTC)
+    return store_prompt_release(
+        connection,
+        build_prompt_release(),
+        created_at=datetime.now(UTC),
+        created_by="bootstrap",
+    )
+
+
+def store_prompt_release(
+    connection: psycopg.Connection[tuple[object, ...]],
+    release: PromptRelease,
+    *,
+    created_at: datetime,
+    created_by: str,
+) -> PromptRelease:
+    if not connection.autocommit:
+        raise ValueError("Prompt release storage requires an autocommit connection")
+    _validate_release_identity(release)
     with connection.transaction():
         for version in release.versions:
             _ = connection.execute(
@@ -225,7 +252,7 @@ def bootstrap_prompt_release(
                     Jsonb(version.output_schema),
                     version.model,
                     Jsonb(version.parameters),
-                    now,
+                    created_at,
                 ),
             )
         _ = connection.execute(
@@ -240,8 +267,8 @@ def bootstrap_prompt_release(
                 release.name,
                 release.content_digest,
                 len(release.versions),
-                now,
-                "bootstrap",
+                created_at,
+                created_by,
             ),
         )
         for position, version in enumerate(release.versions):
@@ -254,10 +281,10 @@ def bootstrap_prompt_release(
                 """,
                 (release.id, version.definition.name, version.id, position),
             )
-    loaded = load_prompt_release(connection, release.id)
-    if loaded != release:
-        raise PromptReleaseError(f"Stored release {release.name} differs from the prompt catalog")
-    return loaded
+        loaded = load_prompt_release(connection, release.id)
+        if loaded != release:
+            raise PromptReleaseError(f"Stored release {release.name} differs from supplied release")
+        return loaded
 
 
 def load_prompt_release(
@@ -387,6 +414,34 @@ def _version_digest(version: PromptVersion) -> str:
             version.parameters,
         )
     )
+
+
+def _validate_release_identity(release: PromptRelease) -> None:
+    validated_versions: list[PromptVersion] = []
+    for version in release.versions:
+        try:
+            validated_versions.append(PromptVersion.model_validate(version.model_dump()))
+        except ValidationError as error:
+            raise PromptReleaseError(
+                f"Prompt version is invalid: {version.definition.name}"
+            ) from error
+    names = [version.definition.name for version in validated_versions]
+    if len(names) != len(set(names)):
+        raise PromptReleaseError("Prompt release names must be unique")
+    for version in validated_versions:
+        content_digest = _version_digest(version)
+        if version.content_digest != content_digest:
+            raise PromptReleaseError(
+                f"Prompt content identity is invalid: {version.definition.name}"
+            )
+        expected_id = PromptVersionId(_digest([version.definition.name, content_digest]))
+        if version.id != expected_id:
+            raise PromptReleaseError(
+                f"Prompt version identity is invalid: {version.definition.name}"
+            )
+    digest = _digest([[version.definition.name, version.id] for version in validated_versions])
+    if release.content_digest != digest or release.id != digest:
+        raise PromptReleaseError(f"Prompt release identity is invalid: {release.name}")
 
 
 def _version_content(
