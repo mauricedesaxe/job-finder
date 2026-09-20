@@ -875,7 +875,7 @@ def test_retryable_model_attempt_resumes_and_completes_after_acceptance(
                 ),
             )
         )
-        jev_probabilities = iter((1.0, 1.0, 1.0, 1.0, 1.0, 0.0))
+        jev_probabilities = iter((0.0, 0.0, 0.0, 0.0, 1.0, 0.0))
 
         def accepted_sender(
             _url: str,
@@ -1110,7 +1110,7 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
             ),
         )
     )
-    jev_probabilities = iter((1.0, 1.0, 1.0, 1.0, 1.0, 0.0))
+    jev_probabilities = iter((0.0, 0.0, 0.0, 0.0, 1.0, 0.0))
 
     def model_sender(
         _url: str,
@@ -1262,7 +1262,7 @@ def _rejecting_jev_call(
     body: dict[str, object],
     _timeout: float,
 ) -> JevHttpResponse:
-    return _jev_response(body, 0.0)
+    return _jev_response(body, 1.0)
 
 
 def _retryable_jev_call(
