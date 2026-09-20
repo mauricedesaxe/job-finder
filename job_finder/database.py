@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 MIGRATIONS_PATH = Path(__file__).with_name("migrations")
 SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"
 SEARCH_CONFIGURATION_PUBLICATION_MIGRATION = "0017_search_configuration_publications.sql"
+PIPELINE_RUN_CONFIGURATION_MIGRATION = "0020_pipeline_run_configuration_revisions.sql"
 INITIAL_SEARCH_CONFIGURATION_REVISION_ID = (
     "621346c249608e7d8766902c2cd9fbcfb83ac687f58de8a8fdb7f81980a14099"
 )
@@ -55,6 +56,8 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
                 raise SchemaMigrationError(f"Applied migration changed: {path.name}")
             migration_names.append(path.name)
             continue
+        if path.name == PIPELINE_RUN_CONFIGURATION_MIGRATION:
+            _backfill_search_configuration_publications(connection)
         _ = connection.execute(sql.SQL(cast(LiteralString, content.decode())), prepare=False)
         if path.name == SEARCH_CONFIGURATION_MIGRATION:
             _seed_initial_search_configuration(connection)
@@ -133,8 +136,11 @@ def _backfill_search_configuration_publications(
         SELECT base_revision_id FROM search_configuration_drafts
         UNION
         SELECT revision_id FROM active_search_configuration
+        UNION
+        SELECT %s::CHAR(64)
         ORDER BY 1
-        """
+        """,
+        (INITIAL_SEARCH_CONFIGURATION_REVISION_ID,),
     ).fetchall()
     for row in revision_ids:
         revision = load_search_configuration_revision(

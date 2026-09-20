@@ -13,16 +13,23 @@ import pytest
 from psycopg import sql
 
 from job_finder.config import PostgresContractSettings
+from job_finder.configuration_service import (
+    ActivateConfigurationCommand,
+    ConfigurationActivated,
+    activate_search_configuration,
+    load_published_active_search_configuration,
+)
 from job_finder.database import apply_migrations
 from job_finder.dagster import defs
 from job_finder.ats.models import AtsAvailable
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
-from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
+from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
     ProcessingSummary,
+    discover_jobs,
     process_claimed_jobs,
 )
 from job_finder.pipeline.state import (
@@ -31,6 +38,12 @@ from job_finder.pipeline.state import (
     fail_orchestration_run,
     prepare_orchestration_run,
     register_discoveries,
+)
+from job_finder.search_configuration import (
+    DEFAULT_SEARCH_CONFIGURATION,
+    SupportedSearchSource,
+    build_search_configuration_revision,
+    store_search_configuration_revision,
 )
 
 _LONG_MARKDOWN = (
@@ -52,7 +65,7 @@ def authority_schema() -> Iterator[str]:
             )
 
 
-def test_run_retry_reuses_frozen_prompt_release_and_exchange_rates(
+def test_run_retry_reuses_frozen_configuration_pair_and_exchange_rates(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -66,7 +79,7 @@ def test_run_retry_reuses_frozen_prompt_release_and_exchange_rates(
             idempotency_key="dagster:run-1",
             implementation_ref="commit-1",
             started_at=now,
-            load_prompt_release=bootstrap_prompt_release,
+            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         fail_orchestration_run(
@@ -81,13 +94,123 @@ def test_run_retry_reuses_frozen_prompt_release_and_exchange_rates(
             idempotency_key="dagster:run-1",
             implementation_ref="commit-1",
             started_at=now + timedelta(hours=1),
-            load_prompt_release=lambda _connection: pytest.fail("release was reloaded"),
+            load_active_configuration=lambda _connection: pytest.fail(
+                "active configuration was reloaded"
+            ),
             fetch_rates=lambda: pytest.fail("rates were refetched"),
         )
 
     assert second.id == first.id
     assert second.status == "running"
+    assert second.configuration_revision_id == first.configuration_revision_id
+    assert second.prompt_release_id == first.prompt_release_id
     assert second.exchange_rates == rates
+
+
+def test_later_activation_only_changes_new_orchestration_runs(authority_schema: str) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    searches: list[tuple[str, str]] = []
+
+    def search(keyword: str, domain: str) -> SearchSucceeded:
+        searches.append((keyword, domain))
+        return SearchSucceeded(urls=())
+
+    rates = ExchangeRateSnapshot(
+        rates={"EUR": Decimal("1.11")}, source="frankfurter", observed_at=now
+    )
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        initial = load_published_active_search_configuration(connection)
+        first = prepare_orchestration_run(
+            connection,
+            idempotency_key="dagster:configuration-pair-1",
+            implementation_ref="commit-1",
+            started_at=now,
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: rates,
+        )
+        changed_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+            update={
+                "search_keywords": ("configured search",),
+                "enabled_sources": (SupportedSearchSource.LEVER,),
+                "personal_criteria": (
+                    DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                        update={"instructions": "Use the newly activated criterion."}
+                    ),
+                    *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+                ),
+            }
+        )
+        revision = build_search_configuration_revision(
+            changed_configuration,
+            created_at=now + timedelta(minutes=1),
+            created_by="owner",
+        )
+        _ = store_search_configuration_revision(connection, revision)
+        release = store_prompt_release(
+            connection,
+            build_prompt_release(changed_configuration),
+            created_at=now + timedelta(minutes=1),
+            created_by="owner",
+        )
+        connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, 'owner')
+            """,
+            (revision.id, release.id, now + timedelta(minutes=1)),
+        )
+        activated = activate_search_configuration(
+            connection,
+            ActivateConfigurationCommand(
+                target_revision_id=revision.id,
+                expected_active_revision_id=initial.active.revision.id,
+                expected_generation=initial.active.generation,
+                actor="owner",
+                timestamp=now + timedelta(minutes=2),
+            ),
+        )
+        assert isinstance(activated, ConfigurationActivated)
+
+        resumed = prepare_orchestration_run(
+            connection,
+            idempotency_key="dagster:configuration-pair-1",
+            implementation_ref="commit-1",
+            started_at=now + timedelta(minutes=3),
+            load_active_configuration=lambda _connection: pytest.fail(
+                "active configuration was reloaded"
+            ),
+            fetch_rates=lambda: pytest.fail("rates were refetched"),
+        )
+        second = prepare_orchestration_run(
+            connection,
+            idempotency_key="dagster:configuration-pair-2",
+            implementation_ref="commit-1",
+            started_at=now + timedelta(minutes=3),
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: rates,
+        )
+        discovery = discover_jobs(
+            connection,
+            second,
+            PipelineBoundaries(
+                search=search,
+                scrape=lambda _url: pytest.fail("scrape was called"),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
+            ),
+            discovered_at=now + timedelta(minutes=3),
+            max_workers=1,
+        )
+
+    assert first.configuration_revision_id == initial.publication.revision_id
+    assert first.prompt_release_id == initial.publication.prompt_release_id
+    assert resumed.configuration_revision_id == first.configuration_revision_id
+    assert resumed.prompt_release_id == first.prompt_release_id
+    assert second.configuration_revision_id == revision.id
+    assert second.prompt_release_id == release.id
+    assert discovery.query_count == 1
+    assert searches == [("configured search", "jobs.lever.co")]
 
 
 def test_exact_url_registration_precedes_exclusive_leased_work(
@@ -102,7 +225,7 @@ def test_exact_url_registration_precedes_exclusive_leased_work(
             idempotency_key="dagster:run-2",
             implementation_ref="commit-1",
             started_at=now,
-            load_prompt_release=bootstrap_prompt_release,
+            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: ExchangeRateSnapshot(
                 rates={"EUR": Decimal("1.11")},
                 source="frankfurter",
@@ -170,7 +293,7 @@ def test_failed_work_becomes_claimable_after_retry_time(authority_schema: str) -
             idempotency_key="dagster:run-3",
             implementation_ref="commit-1",
             started_at=now,
-            load_prompt_release=bootstrap_prompt_release,
+            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: ExchangeRateSnapshot(
                 rates={"EUR": Decimal("1.11")},
                 source="frankfurter",
@@ -252,12 +375,18 @@ def test_dagster_job_executes_the_domain_cycle(
     with _connection(authority_schema) as connection:
         stored = connection.execute(
             """
-            SELECT status, implementation_ref, prompt_release_id IS NOT NULL
+            SELECT status, implementation_ref, configuration_revision_id, prompt_release_id
             FROM pipeline_runs
             WHERE kind = 'orchestration'
             """
         ).fetchone()
-    assert stored == ("completed", "commit-1", True)
+        publication = load_published_active_search_configuration(connection).publication
+    assert stored == (
+        "completed",
+        "commit-1",
+        publication.revision_id,
+        publication.prompt_release_id,
+    )
 
 
 def test_database_rejects_incomplete_work_and_attempt_failure_states(
@@ -1054,7 +1183,7 @@ def _prepare_run(connection: psycopg.Connection[tuple[object, ...]], key: str, n
         idempotency_key=key,
         implementation_ref="commit-1",
         started_at=now,
-        load_prompt_release=bootstrap_prompt_release,
+        load_active_configuration=load_published_active_search_configuration,
         fetch_rates=lambda: ExchangeRateSnapshot(
             rates={"EUR": Decimal("1.11")},
             source="frankfurter",
