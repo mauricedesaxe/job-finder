@@ -336,60 +336,20 @@ def evaluate_prompt(
         questions=questions,
     )
     headers = {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
-    retries = retry_policy or JevRetryPolicy()
-    send = sender or send_system_one
-    for attempt in range(retries.max_attempts):
-        retry_after_seconds: float | None = None
-        started_at = clock()
-        try:
-            response = send(
-                JEV_SYSTEM_ONE_URL,
-                headers,
-                request.model_dump(mode="json"),
-                30.0,
-            )
-        except requests.RequestException as error:
-            latency_ms = max(0, round((clock() - started_at) * 1000))
-            if observe_request is not None:
-                observe_request(latency_ms)
-            failure: RetryableOperationalError | TerminalOperationalError = (
-                RetryableOperationalError(
-                    prompt_name=prompt.definition.name,
-                    error_code="network_error",
-                    reason=str(error),
-                )
-            )
-        else:
-            latency_ms = max(0, round((clock() - started_at) * 1000))
-            if observe_request is not None:
-                observe_request(latency_ms)
-            if response.status_code == 200:
-                break
-            retry_after_seconds = response.retry_after_seconds
-            error_type = (
-                RetryableOperationalError
-                if response.status_code in _RETRYABLE_HTTP_STATUSES
-                else TerminalOperationalError
-            )
-            failure = error_type(
-                prompt_name=prompt.definition.name,
-                error_code=f"http_{response.status_code}",
-                reason=f"Jev returned HTTP {response.status_code}",
-            )
-        if (
-            not isinstance(failure, RetryableOperationalError)
-            or attempt + 1 >= retries.max_attempts
-        ):
-            return failure
-        if observe_retry is not None:
-            observe_retry(failure, latency_ms)
-        sleep(
-            retry_after_seconds
-            if retry_after_seconds is not None
-            else retries.base_delay_seconds * 2.0**attempt
-        )
-    else:
-        raise AssertionError("A valid Jev retry policy always returns or receives a response")
+    request_result = _send_with_retry(
+        prompt.definition.name,
+        request,
+        headers,
+        sender or send_system_one,
+        retry_policy or JevRetryPolicy(),
+        sleep,
+        clock,
+        observe_request,
+        observe_retry,
+    )
+    if isinstance(request_result, RetryableOperationalError | TerminalOperationalError):
+        return request_result
+    response, latency_ms = request_result
     try:
         parsed = JevSystemOneResponse.model_validate_json(response.body)
     except ValidationError as error:
@@ -434,6 +394,70 @@ def evaluate_prompt(
             Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
         ),
     )
+
+
+def _send_with_retry(
+    prompt_name: str,
+    request: JevSystemOneRequest,
+    headers: Mapping[str, str],
+    sender: JevSender,
+    retry_policy: JevRetryPolicy,
+    sleep: Sleeper,
+    clock: Clock,
+    observe_request: RequestObserver | None,
+    observe_retry: RetryObserver | None,
+) -> tuple[JevHttpResponse, int] | RetryableOperationalError | TerminalOperationalError:
+    for attempt in range(retry_policy.max_attempts):
+        retry_after_seconds: float | None = None
+        started_at = clock()
+        try:
+            response = sender(
+                JEV_SYSTEM_ONE_URL,
+                headers,
+                request.model_dump(mode="json"),
+                30.0,
+            )
+        except requests.RequestException as error:
+            latency_ms = max(0, round((clock() - started_at) * 1000))
+            failure: RetryableOperationalError | TerminalOperationalError = (
+                RetryableOperationalError(
+                    prompt_name=prompt_name,
+                    error_code="network_error",
+                    reason=str(error),
+                )
+            )
+        else:
+            latency_ms = max(0, round((clock() - started_at) * 1000))
+            if response.status_code == 200:
+                if observe_request is not None:
+                    observe_request(latency_ms)
+                return response, latency_ms
+            retry_after_seconds = response.retry_after_seconds
+            error_type = (
+                RetryableOperationalError
+                if response.status_code in _RETRYABLE_HTTP_STATUSES
+                else TerminalOperationalError
+            )
+            failure = error_type(
+                prompt_name=prompt_name,
+                error_code=f"http_{response.status_code}",
+                reason=f"Jev returned HTTP {response.status_code}",
+            )
+        if observe_request is not None:
+            observe_request(latency_ms)
+        if (
+            not isinstance(failure, RetryableOperationalError)
+            or attempt + 1 >= retry_policy.max_attempts
+        ):
+            return failure
+        if observe_retry is not None:
+            observe_retry(failure, latency_ms)
+        sleep(
+            retry_after_seconds
+            if retry_after_seconds is not None
+            else retry_policy.base_delay_seconds * 2.0**attempt
+        )
+    raise AssertionError("A valid Jev retry policy always returns or receives a response")
 
 
 def evaluate_persisted_prompt(
