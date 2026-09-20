@@ -6,7 +6,11 @@ from fasthtml.common import FastHTML
 
 from job_finder.config import DatabaseSettings, ReviewAppSettings
 from job_finder.database import apply_migrations
-from job_finder.review import create_review_app, postgres_review_service
+from job_finder.review import (
+    create_review_app,
+    postgres_configuration_editor_service,
+    postgres_review_service,
+)
 
 
 def create_app() -> FastHTML:
@@ -25,6 +29,7 @@ def create_app() -> FastHTML:
 
     return create_review_app(
         postgres_review_service(connect),
+        postgres_configuration_editor_service(connect),
         settings,
         readiness=readiness,
     )

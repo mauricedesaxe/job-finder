@@ -142,6 +142,21 @@ Open:
 
 Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
 
+### Connect an MCP client
+
+Run `scripts/serve_mcp.py` as a stdio MCP server. Start the command from the
+repository root with `JOB_FINDER_POSTGRES_DSN` in its environment:
+
+```sh
+uv run python scripts/serve_mcp.py
+```
+
+Configure your MCP client to start that command instead of starting it in a
+terminal. The server exposes bounded tools for feedback curation, evaluation
+manifests, search configuration validation, preview, publication, history and
+activation, and Langfuse projection status. It applies pending database
+migrations before accepting requests.
+
 ### 6. Run your first search
 
 Open Dagster, select **Jobs**, select **job_finder**, and launch a run. The run
@@ -219,6 +234,7 @@ for example `fix: preserve the review decision after refresh`.
 | `job_finder/evaluation/` | Prompts, OpenRouter calls, releases, and evaluation records |
 | `job_finder/pipeline/` | Discovery and work-queue orchestration |
 | `job_finder/review/` | FastHTML review app and PostgreSQL queries |
+| `job_finder/mcp_server.py` | FastMCP tools for feedback, evaluation, and search configuration workflows |
 | `job_finder/dagster.py` | Assets, jobs, schedules, and resources |
 | `job_finder/migrations/` | Ordered PostgreSQL schema migrations |
 | `contracts/` | PostgreSQL and Dagster integration tests |

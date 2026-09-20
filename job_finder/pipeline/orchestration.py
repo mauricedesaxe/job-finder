@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable
 from job_finder.ats.policy import ats_structural_filter, format_ats_block
-from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
 from job_finder.discovery.exchange_rates import format_compensation_rates
 from job_finder.discovery.jina import (
     JinaUnavailable,
@@ -52,11 +51,15 @@ from job_finder.jobs.decision_pipeline import (
     postgres_decision_store,
     process_qualified_job,
 )
-from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_message
+from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
 from job_finder.jobs.models import JobListing, StructuralRejection
 from job_finder.jobs.scraping import parse_job_details
 from job_finder.jobs.structural_filter import structural_filter
-from job_finder.jobs.title_deduplication import TitleDuplicate, deduplicate_title
+from job_finder.jobs.title_deduplication import (
+    TitleDuplicate,
+    deduplicate_title,
+    title_deduplication_values,
+)
 from job_finder.pipeline.state import (
     Connection,
     JobWorkClaim,
@@ -72,6 +75,10 @@ from job_finder.pipeline.state import (
     terminally_fail_job_claim,
 )
 from job_finder.review import enqueue_qualified_review_item
+from job_finder.search_configuration import (
+    SEARCH_SOURCE_DOMAINS,
+    load_search_configuration_revision,
+)
 
 POLICY_VERSION = "orchestration-v1"
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -147,7 +154,14 @@ def discover_jobs(
         raise ValueError("Discovery requires a running orchestration run")
     if max_workers < 1:
         raise ValueError("Discovery requires at least one search worker")
-    queries = tuple((keyword, domain) for keyword in SEARCH_KEYWORDS for domain in SEARCH_DOMAINS)
+    configuration = load_search_configuration_revision(
+        connection, run.configuration_revision_id
+    ).configuration
+    queries = tuple(
+        (keyword, SEARCH_SOURCE_DOMAINS[source])
+        for keyword in configuration.search_keywords
+        for source in configuration.enabled_sources
+    )
 
     def run_search(query: tuple[str, str]) -> SearchResult:
         return boundaries.search(*query)
@@ -464,7 +478,7 @@ def _enrich(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[EnrichedJob] | OperationalFailure:
-    values = {"job": enrichment_message(job)}
+    values = enrichment_values(job)
     context = ensure_model_call_context(
         connection,
         run_id=run.id,
@@ -501,12 +515,7 @@ def _deduplicate(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[TitleDuplicate] | OperationalFailure:
-    values = {
-        "newTitle": new_title,
-        "existingTitles": "\n".join(
-            f'{index}. "{title}"' for index, title in enumerate(existing_titles, start=1)
-        ),
-    }
+    values = title_deduplication_values(new_title, existing_titles)
     context = ensure_model_call_context(
         connection,
         run_id=run.id,

@@ -43,8 +43,8 @@ def evaluate_job(
     profiles = tuple(
         version for version in release.versions if version.definition.phase == "profile"
     )
-    if len(filters) != 4 or len(profiles) != 2:
-        raise ValueError("Evaluation requires four filters and two profiles")
+    if not filters or not profiles:
+        raise ValueError("Evaluation requires at least one filter and one profile")
 
     filter_decision = _evaluate_filters(job_input, rates, filters, evaluate)
     if filter_decision is not None:

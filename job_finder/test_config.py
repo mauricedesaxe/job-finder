@@ -8,7 +8,6 @@ from job_finder.config import (
     DatabaseSettings,
     JevCorpusEvaluationSettings,
     LangfuseSettings,
-    OpenRouterSettings,
     PostgresContractSettings,
     ReviewAppSettings,
 )
@@ -59,23 +58,6 @@ def test_database_settings_reads_the_test_dsn(monkeypatch: pytest.MonkeyPatch) -
     settings = PostgresContractSettings.from_environment()
 
     assert settings.postgres_dsn == "postgresql://example/test"
-
-
-def test_openrouter_settings_reads_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-
-    settings = OpenRouterSettings.from_environment()
-
-    assert settings.api_key == "secret"
-
-
-def test_openrouter_settings_rejects_a_missing_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-
-    with pytest.raises(ValidationError):
-        _ = OpenRouterSettings.from_environment()
 
 
 def test_corpus_settings_require_openrouter_storage(monkeypatch: pytest.MonkeyPatch) -> None:

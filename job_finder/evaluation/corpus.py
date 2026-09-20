@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import ats_structural_filter, format_ats_block
-from job_finder.evaluation.models import EvaluationResult, OperationalError, Qualified
+from job_finder.evaluation.models import EvaluationOutcome, EvaluationResult, evaluation_outcome
 from job_finder.jobs.models import JobListing, StructuralRejection
 from job_finder.jobs.scraping import detect_source, extract_company_from_url
 from job_finder.jobs.structural_filter import structural_filter
@@ -33,7 +33,6 @@ _COUNTRY = re.compile(
     r"^- (?:Country \(HQ\)|Country fallback when locations are non-geographic):\s*(.+)$",
     re.MULTILINE,
 )
-ExpectedOutcome = Literal["qualified", "rejected"]
 CorpusSuite = Literal["direct", "ats"]
 CorpusEvaluator = Callable[[JobListing], EvaluationResult]
 
@@ -46,7 +45,7 @@ class DirectEvaluationCorpusCase(CorpusModel):
     kind: Literal["direct"] = "direct"
     name: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
-    expected_outcome: ExpectedOutcome
+    expected_outcome: EvaluationOutcome
     job: JobListing
 
 
@@ -54,7 +53,7 @@ class AtsEvaluationCorpusCase(CorpusModel):
     kind: Literal["ats"] = "ats"
     name: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
-    expected_outcome: ExpectedOutcome
+    expected_outcome: EvaluationOutcome
     job: JobListing
     evidence: AtsAvailable
 
@@ -64,8 +63,8 @@ EvaluationCorpusCase = DirectEvaluationCorpusCase | AtsEvaluationCorpusCase
 
 class EvaluationCorpusResult(CorpusModel):
     name: str = Field(min_length=1)
-    expected_outcome: ExpectedOutcome
-    actual_outcome: ExpectedOutcome | None
+    expected_outcome: EvaluationOutcome
+    actual_outcome: EvaluationOutcome | None
     reason: str
 
 
@@ -143,11 +142,7 @@ def evaluate_corpus_case(
     evaluation = evaluate(job)
     return _case_result(
         case,
-        None
-        if isinstance(evaluation, OperationalError)
-        else "qualified"
-        if isinstance(evaluation, Qualified)
-        else "rejected",
+        evaluation_outcome(evaluation),
         evaluation.reason,
     )
 
@@ -184,7 +179,7 @@ def score_evaluation_corpus(
 def _load_direct_case(
     path: Path,
     root: Path,
-    expected_outcome: ExpectedOutcome,
+    expected_outcome: EvaluationOutcome,
 ) -> DirectEvaluationCorpusCase:
     content = path.read_text()
     return DirectEvaluationCorpusCase(
@@ -198,7 +193,7 @@ def _load_direct_case(
 def _load_ats_case(
     path: Path,
     root: Path,
-    expected_outcome: ExpectedOutcome,
+    expected_outcome: EvaluationOutcome,
 ) -> AtsEvaluationCorpusCase:
     content = path.read_text()
     evidence, description = _parse_ats_fixture(path, content)
@@ -259,7 +254,7 @@ def _field(pattern: re.Pattern[str], content: str) -> str | None:
 
 def _case_result(
     case: EvaluationCorpusCase,
-    actual_outcome: ExpectedOutcome | None,
+    actual_outcome: EvaluationOutcome | None,
     reason: str,
 ) -> EvaluationCorpusResult:
     return EvaluationCorpusResult(
@@ -270,7 +265,7 @@ def _case_result(
     )
 
 
-def _directory(expected_outcome: ExpectedOutcome) -> str:
+def _directory(expected_outcome: EvaluationOutcome) -> str:
     return "pass" if expected_outcome == "qualified" else "reject"
 
 

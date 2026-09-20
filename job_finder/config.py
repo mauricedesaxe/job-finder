@@ -36,16 +36,6 @@ class ReviewAppSettings(BaseModel):
         )
 
 
-class OpenRouterSettings(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
-
-    api_key: str = Field(min_length=1)
-
-    @classmethod
-    def from_environment(cls) -> OpenRouterSettings:
-        return cls.model_validate({"api_key": os.environ.get("OPENROUTER_API_KEY")})
-
-
 class LangfuseSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(
         frozen=True, extra="forbid", strict=True, validate_default=True
