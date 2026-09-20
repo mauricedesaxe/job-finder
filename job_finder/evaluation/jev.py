@@ -56,7 +56,7 @@ class JevNoulQuestionTemplate(JevModel):
 class JevSystemOneRequest(JevModel):
     state: str
     model: Literal["jev-1.13.0"] = JEV_MODEL
-    questions: dict[str, JevNoulQuestion] = Field(min_length=1, max_length=1)
+    questions: dict[str, JevNoulQuestion] = Field(min_length=1)
 
 
 class JevNoulAnswer(JevModel):
@@ -71,7 +71,7 @@ class JevUsage(JevModel):
 
 class JevSystemOneResponse(JevModel):
     model: Literal["jev-1.13.0"]
-    answers: dict[str, JevNoulAnswer] = Field(min_length=1, max_length=1)
+    answers: dict[str, JevNoulAnswer] = Field(min_length=1)
     usage: JevUsage
 
 
@@ -130,6 +130,7 @@ JevCriterionResult = JevCriterionObservation | RetryableOperationalError | Termi
 Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 RequestObserver = Callable[[int], None]
+JevPolicy = Literal["faithful", "atomic"]
 
 
 def _question_template(rubric: str) -> JevNoulQuestionTemplate:
@@ -151,14 +152,138 @@ JEV_QUESTIONS: Mapping[str, JevNoulQuestionTemplate] = MappingProxyType(
 )
 
 
-def jev_policy_digest(rates: str) -> str:
+def _atomic_question(instructions: str) -> JevNoulQuestionTemplate:
+    return JevNoulQuestionTemplate(
+        instructions=instructions,
+        criteria=JevNoulCriteria(
+            true="The listing clearly contains this signal.",
+            false="The signal is absent, ambiguous, or only a preference.",
+        ),
+    )
+
+
+ATOMIC_QUESTIONS: Mapping[str, Mapping[str, JevNoulQuestionTemplate]] = MappingProxyType(
+    {
+        "remote-europe-eligible": MappingProxyType(
+            {
+                "requires_office_attendance": _atomic_question(
+                    "Does this role require onsite or hybrid office attendance?"
+                ),
+                "remote_restricted_outside_europe": _atomic_question(
+                    "Is remote work explicitly limited to a region that excludes Europe?"
+                ),
+                "requires_non_europe_residence": _atomic_question(
+                    "Does the role require residence or work authorization in a country outside Europe?"
+                ),
+                "lower_compensation_market_skew": _atomic_question(
+                    "Are the allowed locations dominated by lower-compensation markets with only one or two token higher-compensation European locations?"
+                ),
+            }
+        ),
+        "compensation-minimum": MappingProxyType(
+            {
+                "explicit_below_minimum_cash_compensation": _atomic_question(
+                    "Does the listing state a concrete base-cash maximum below $130,000 per year, $65 per hour, or the equivalent after converting period and currency using these rates: {rates}? Ignore equity, bonus, and total compensation."
+                )
+            }
+        ),
+        "role-quality": MappingProxyType(
+            {
+                "enterprise_stack": _atomic_question(
+                    "Is the primary stack Java/Spring, .NET/C#, Scala, C++, or Angular/Kendo?"
+                ),
+                "non_product_role": _atomic_question(
+                    "Is this primarily architect-only, manager-only, sales, solutions, field, or customer-delivery work without substantial hands-on product engineering?"
+                ),
+                "data_plumbing": _atomic_question(
+                    "Is the primary work data-warehouse or data-pipeline plumbing rather than product features?"
+                ),
+                "extreme_seniority": _atomic_question(
+                    "Does a principal or distinguished role require at least ten years of experience?"
+                ),
+                "four_sync_interviews": _atomic_question(
+                    "Does the listing disclose at least four synchronous interview rounds, excluding take-homes, references, application review, and offer?"
+                ),
+                "non_english_team": _atomic_question(
+                    "Does the job body contain substantial non-English prose indicating a non-English-primary team?"
+                ),
+                "infrastructure_operations": _atomic_question(
+                    "Is the primary work infrastructure operations such as clusters, deployments, observability, cost optimization, reliability, or incidents?"
+                ),
+                "core_blockchain_protocol": _atomic_question(
+                    "Is the primary work blockchain consensus, cryptography, peer-to-peer networking, validator infrastructure, or core protocol development?"
+                ),
+            }
+        ),
+        "cheap-shop-placement": MappingProxyType(
+            {
+                "recruiter_for_client": _atomic_question(
+                    "Does the listing recruit on behalf of a separate client?"
+                ),
+                "placement_business": _atomic_question(
+                    "Does the listing entity describe itself as a placement, matching, staffing, or talent-connection service?"
+                ),
+                "recruiter_brand_title": _atomic_question(
+                    "Does a recruiter brand prefix the title while the body confirms work for another company?"
+                ),
+                "low_seniority_bar": _atomic_question(
+                    "Does a senior, lead, or founding role ask for only three total years, or five years with only one senior year?"
+                ),
+                "placement_without_compensation": _atomic_question(
+                    "Is placement or client-engagement language present without concrete cash compensation?"
+                ),
+                "low_compensation_region": _atomic_question(
+                    "Is the talent pool restricted to one lower-compensation region?"
+                ),
+                "low_code_tools": _atomic_question(
+                    "Are n8n, Zapier, Make, Bubble, or similar low-code automation tools required or a strong plus?"
+                ),
+                "foreign_client_hours": _atomic_question(
+                    "Does independent-contractor placement require overlap with a foreign client's business hours?"
+                ),
+            }
+        ),
+        "early-stage-product-engineer": MappingProxyType(
+            {
+                "owns_product_delivery": _atomic_question(
+                    "Does the individual contributor substantially own shipping an MVP, customer product feature, user experience, or product-serving backend from idea through production?"
+                ),
+                "excluded_primary_shape": _atomic_question(
+                    "Is the role primarily people management, infrastructure operations, internal platform work without product responsibility, pure architecture, sales, customer delivery, or narrow research?"
+                ),
+            }
+        ),
+        "applied-ai-product-engineer": MappingProxyType(
+            {
+                "ships_ai_product": _atomic_question(
+                    "Does the role substantially own shipping customer-facing LLM, agent, RAG, evaluation, retrieval, tool-use, or other applied-AI product capabilities?"
+                ),
+                "excluded_ai_shape": _atomic_question(
+                    "Is the primary work pure ML research or training, search engineering, data engineering, operational MLOps, model-serving operations, or internal AI tooling without a stated customer-product dependency?"
+                ),
+            }
+        ),
+    }
+)
+
+
+def jev_policy_digest(rates: str, policy: JevPolicy = "faithful") -> str:
+    questions: Mapping[str, object]
+    if policy == "faithful":
+        questions = JEV_QUESTIONS
+    else:
+        questions = ATOMIC_QUESTIONS
     payload = {
         "model": JEV_MODEL,
         "pass_threshold": JEV_PASS_THRESHOLD,
         "rates": rates,
         "questions": {
-            criterion: question.model_dump(mode="json")
-            for criterion, question in JEV_QUESTIONS.items()
+            criterion: (
+                question.model_dump(mode="json")
+                if isinstance(question, JevNoulQuestionTemplate)
+                else {name: template.model_dump(mode="json") for name, template in question.items()}
+            )
+            for criterion, question in questions.items()
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -175,24 +300,31 @@ def evaluate_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     observe_request: RequestObserver | None = None,
+    policy: JevPolicy = "faithful",
 ) -> JevCriterionResult:
     expected_inputs = set(prompt.definition.inputs)
     if set(values) != expected_inputs:
         raise ValueError(
             f"Prompt {prompt.definition.name} requires inputs {sorted(expected_inputs)}"
         )
-    template = JEV_QUESTIONS.get(prompt.definition.criterion)
-    if template is None:
+    criterion = prompt.definition.criterion
+    if criterion not in JEV_QUESTIONS:
         raise ValueError(f"No Jev question registered for {prompt.definition.criterion}")
-    question = template.render(values)
+    questions = (
+        {criterion: JEV_QUESTIONS[criterion].render(values)}
+        if policy == "faithful"
+        else {
+            name: template.render(values) for name, template in ATOMIC_QUESTIONS[criterion].items()
+        }
+    )
     request = JevSystemOneRequest(
         state=values["job"],
-        questions={prompt.definition.criterion: question},
+        questions=questions,
     )
     headers = {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
-    policy = retry_policy or JevRetryPolicy()
+    retries = retry_policy or JevRetryPolicy()
     send = sender or send_system_one
-    for attempt in range(policy.max_attempts):
+    for attempt in range(retries.max_attempts):
         retry_after_seconds: float | None = None
         started_at = clock()
         try:
@@ -230,12 +362,15 @@ def evaluate_prompt(
                 error_code=f"http_{response.status_code}",
                 reason=f"Jev returned HTTP {response.status_code}",
             )
-        if not isinstance(failure, RetryableOperationalError) or attempt + 1 >= policy.max_attempts:
+        if (
+            not isinstance(failure, RetryableOperationalError)
+            or attempt + 1 >= retries.max_attempts
+        ):
             return failure
         sleep(
             retry_after_seconds
             if retry_after_seconds is not None
-            else policy.base_delay_seconds * 2.0**attempt
+            else retries.base_delay_seconds * 2.0**attempt
         )
     else:
         raise AssertionError("A valid Jev retry policy always returns or receives a response")
@@ -247,23 +382,29 @@ def evaluate_prompt(
             error_code="invalid_response",
             reason=str(error),
         )
-    criterion = prompt.definition.criterion
-    if set(parsed.answers) != {criterion}:
+    if set(parsed.answers) != set(questions):
         return TerminalOperationalError(
             prompt_name=prompt.definition.name,
             error_code="invalid_response",
-            reason=f"Jev response did not contain exactly the {criterion} answer",
+            reason="Jev response did not contain exactly the requested answers",
         )
-    probability = parsed.answers[criterion].noul
-    passed = probability >= JEV_PASS_THRESHOLD
-    comparison = "met" if passed else "was below"
+    probabilities = {name: answer.noul for name, answer in parsed.answers.items()}
+    if policy == "faithful":
+        probability = probabilities[criterion]
+        passed = probability >= JEV_PASS_THRESHOLD
+        comparison = "met" if passed else "was below"
+        reason = (
+            f"Jev pass probability {probability:.3f} {comparison} "
+            f"threshold {JEV_PASS_THRESHOLD:.3f}."
+        )
+    else:
+        passed, probability = _compose_atomic(criterion, probabilities)
+        signals = ", ".join(f"{name}={value:.3f}" for name, value in probabilities.items())
+        reason = f"Jev atomic policy {'passed' if passed else 'failed'}: {signals}."
     accepted = CriterionAccepted(
         prompt_name=prompt.definition.name,
         passed=passed,
-        reason=(
-            f"Jev pass probability {probability:.3f} {comparison} "
-            f"threshold {JEV_PASS_THRESHOLD:.3f}."
-        ),
+        reason=reason,
     )
     return JevCriterionObservation(
         result=accepted,
@@ -277,6 +418,25 @@ def evaluate_prompt(
             Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
         ),
     )
+
+
+def _compose_atomic(criterion: str, probabilities: Mapping[str, float]) -> tuple[bool, float]:
+    active = {
+        name for name, probability in probabilities.items() if probability >= JEV_PASS_THRESHOLD
+    }
+    if criterion in ("remote-europe-eligible", "compensation-minimum", "role-quality"):
+        failure_probability = max(probabilities.values())
+        return not active, 1.0 - failure_probability
+    if criterion == "cheap-shop-placement":
+        ordered = sorted(probabilities.values(), reverse=True)
+        second_signal = ordered[1] if len(ordered) > 1 else 0.0
+        return len(active) < 2, 1.0 - second_signal
+    positive, exclusion = {
+        "early-stage-product-engineer": ("owns_product_delivery", "excluded_primary_shape"),
+        "applied-ai-product-engineer": ("ships_ai_product", "excluded_ai_shape"),
+    }[criterion]
+    pass_probability = min(probabilities[positive], 1.0 - probabilities[exclusion])
+    return positive in active and exclusion not in active, pass_probability
 
 
 def send_system_one(
