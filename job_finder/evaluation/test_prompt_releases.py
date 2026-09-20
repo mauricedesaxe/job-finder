@@ -146,9 +146,7 @@ def test_meaningful_prompt_configuration_changes_release_identity() -> None:
     reordered = base.model_copy(
         update={"personal_criteria": tuple(reversed(base.personal_criteria))}
     )
-    changed_membership = base.model_copy(
-        update={"personal_criteria": base.personal_criteria[:-1]}
-    )
+    changed_membership = base.model_copy(update={"personal_criteria": base.personal_criteria[:-1]})
 
     identities = {
         build_prompt_release(configuration).id
@@ -216,9 +214,10 @@ def test_preserves_rates_placeholder_in_edited_compensation_instructions() -> No
 
     version = build_prompt_release(configuration).version("job-finder-filter-compensation")
 
-    assert version.messages[0]["content"].format_map(
-        {"job": "unused", "rates": "1 EUR ~= 1.10 USD"}
-    ) == 'Use these rates: 1 EUR ~= 1.10 USD. Return {"pass": true}.'
+    assert (
+        version.messages[0]["content"].format_map({"job": "unused", "rates": "1 EUR ~= 1.10 USD"})
+        == 'Use these rates: 1 EUR ~= 1.10 USD. Return {"pass": true}.'
+    )
 
 
 def test_enrichment_version_overrides_the_model() -> None:

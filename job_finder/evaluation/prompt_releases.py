@@ -74,9 +74,7 @@ DEDUPLICATION_OUTPUT_SCHEMA: dict[str, JsonValue] = {
     "additionalProperties": False,
 }
 _STRINGS = TypeAdapter(tuple[str, ...])
-_CONFIGURED_PROMPTS = {
-    (prompt.phase, prompt.criterion): prompt for prompt in EVALUATION_PROMPTS
-}
+_CONFIGURED_PROMPTS = {(prompt.phase, prompt.criterion): prompt for prompt in EVALUATION_PROMPTS}
 _CONFIGURED_PLACEHOLDERS = {("filter", "compensation-minimum"): ("rates",)}
 
 
@@ -155,9 +153,7 @@ def _configured_prompts(configuration: SearchConfiguration) -> tuple[PromptDefin
     return (*filters, *profiles, ENRICHMENT, TITLE_DEDUPLICATION)
 
 
-def _configured_prompt(
-    phase: PromptPhase, key: str, instructions: str
-) -> PromptDefinition:
+def _configured_prompt(phase: PromptPhase, key: str, instructions: str) -> PromptDefinition:
     existing = _CONFIGURED_PROMPTS.get((phase, key))
     if existing is not None:
         if existing.system_message == instructions:

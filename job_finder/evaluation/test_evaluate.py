@@ -97,9 +97,7 @@ def test_rejects_a_release_with_an_empty_evaluation_phase(missing_phase: str) ->
     synthetic = release.model_copy(
         update={
             "versions": tuple(
-                version
-                for version in release.versions
-                if version.definition.phase != missing_phase
+                version for version in release.versions if version.definition.phase != missing_phase
             )
         }
     )
