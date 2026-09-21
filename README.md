@@ -20,8 +20,8 @@ This README has two setup paths:
 
 The steps below run the full application on your computer. The default search
 and evaluation criteria target senior product engineering and applied AI roles
-that can be worked remotely from Europe. Change those defaults before your
-first search if they do not fit you.
+that can be worked remotely from Europe. Use the **Search setup** page to change
+those defaults before your first search.
 
 ### 1. Install the requirements
 
@@ -99,27 +99,7 @@ source .env
 set +a
 ```
 
-### 4. Set your job criteria
-
-The repository includes the original author's criteria. Review these files
-before spending API credit:
-
-- `job_finder/discovery/catalog.py` defines search terms and job-board domains.
-- `job_finder/evaluation/prompts.py` defines location, compensation, role, and
-  target-profile criteria.
-- `job_finder/jobs/structural_filter.py` rejects titles that are outside the
-  search scope before model evaluation.
-
-Edit the plain-text lists and prompts in those files. Then initialize the
-database and save the current prompt release:
-
-```sh
-uv run python -m scripts.bootstrap_postgres_prompts
-```
-
-The command prints the prompt release name and ID when setup succeeds.
-
-### 5. Start Job Finder
+### 4. Start Job Finder
 
 Start Dagster in one terminal:
 
@@ -140,8 +120,27 @@ Open:
 
 - Dagster: <http://localhost:3000>
 - Review queue: <http://localhost:8080>
+- Search setup: <http://localhost:8080/configuration>
 
 Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
+
+### 5. Set your job criteria
+
+Open **Search setup** and review the search keywords, enabled job boards,
+personal criteria, and target profiles. Use the separate actions in order:
+
+1. Select **Preview unsaved values** to validate the form and inspect the
+   generated searches and prompts.
+2. Select **Save draft** to store the values without changing a running search.
+3. Select **Publish saved draft** to create an immutable configuration revision
+   and prompt release.
+4. Select **Activate published draft** to use the revision for new searches.
+
+Search configuration activation changes discovery for new runs. A criteria or
+profile change also creates a prompt-release candidate. Evaluate and approve
+that candidate through the MCP release-target workflow before activating it for
+production evaluation. Existing runs keep the configuration and release target
+that they captured when they started.
 
 ### Connect an MCP client
 
@@ -158,11 +157,51 @@ manifests, search configuration validation, preview, publication, history and
 activation, and Langfuse projection status. It applies pending database
 migrations before accepting requests.
 
+For configuration changes, call the tools in this order:
+
+1. Read `configuration_active_get` and `configuration_draft_get`.
+2. Check new values with `configuration_validate` and `configuration_preview`.
+3. Save with `configuration_draft_update` and the observed draft version.
+4. Publish with `configuration_publish`, a stable idempotency key, and the
+   expected draft version and configuration revision ID.
+5. Read active state again, then call `configuration_activate` with the observed
+   revision and generation.
+
+For criteria or profile changes, promote the published prompt release:
+
+1. Read the baseline target and generation with `release_target_active_get`.
+2. Build the candidate with `release_target_candidate_create`. Use the prompt
+   release ID from `configuration_preview` or the published revision.
+3. Select one frozen manifest with `manifest_list` or create one with
+   `manifest_create`.
+4. Call `evaluation_run` twice against that manifest: once for the active
+   baseline target and once for the candidate target.
+5. Pass both completed run IDs to `release_target_compare`.
+6. Record the result with `release_target_decide`.
+7. Call `release_target_activate` with the approval ID and the baseline target
+   and generation from step 1.
+
+Activation requires approval for the exact prompt and relevance release pair.
+
+#### Roll back a configuration
+
+Configuration revisions and publications are immutable. To roll back, use
+`configuration_revision_list` and `configuration_revision_get` to select an
+older published revision. Read `configuration_active_get`, then pass the current
+revision and generation to `configuration_activate`. The rollback applies only
+to new runs.
+
+Prompt and relevance releases have a separate active pointer. To restore an old
+release target, treat it as the candidate in the same workflow: read the current
+baseline, run both targets against one manifest, compare them, record a new
+approval, and activate the approved old target.
+
 ### 6. Run your first search
 
 Open Dagster, select **Jobs**, select **job_finder**, and launch a run. The run
 discovers listings, evaluates new work, and adds qualified jobs to the review
-queue. Refresh <http://localhost:8080> after the run completes.
+queue. It pins the active configuration and release target when it starts.
+Refresh <http://localhost:8080> after the run completes.
 
 Dagster starts these schedules automatically while `dagster dev` is running:
 
@@ -255,6 +294,7 @@ Langfuse             <- retryable projections (never a decision input)
 ```
 
 PostgreSQL owns every durable fact: jobs, immutable snapshots, pipeline runs,
+immutable configuration revisions, active configuration and release pointers,
 immutable prompt releases, model-call attempts, review queue items, and
 append-only feedback. Dagster owns schedules and run history. Langfuse receives
 retryable copies of evaluation traces. A Langfuse outage never changes a job
