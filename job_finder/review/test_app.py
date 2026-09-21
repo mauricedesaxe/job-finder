@@ -227,6 +227,7 @@ def test_a_job_page_renders_the_decision_form_for_a_queued_item() -> None:
     assert 'name="evaluation_id" value="0000' in response.text
     assert 'name="snapshot_id" value="0000' in response.text
     assert 'name="note"' in response.text
+    assert "maxlength" not in response.text
     assert "Pursue" in response.text
     assert "Unsure" in response.text
     assert "Reject" in response.text
@@ -386,6 +387,27 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
             created_at=NOW,
         )
     ]
+
+
+def test_submits_a_note_longer_than_the_old_limit_unchanged() -> None:
+    submissions: list[ReviewSubmission] = []
+    item = _item(TODAY, "qualified")
+    note = " " + "x" * 1999 + " "
+    client = _client(
+        _queue(item),
+        submit=lambda review: submissions.append(review)
+        or ReviewSaved(review_event_id=UUID(int=9)),
+    )
+
+    response = client.post(
+        f"/review/{item.id}",
+        data=_form(item, client) | {"note": note},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert len(note) == 2001
+    assert submissions[0].note == note
 
 
 def test_the_next_queued_job_opens_after_a_decision() -> None:

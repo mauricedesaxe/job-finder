@@ -187,11 +187,55 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
             "0020_pipeline_run_configuration_revisions.sql",
             "0021_typesafe_model_provider.sql",
             "0022_relevance_releases.sql",
+            "0023_unbounded_review_event_notes.sql",
         )
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (22,)
+        ).fetchone() == (23,)
+
+
+def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_notes(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    note = " " + "x" * 1999 + " "
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0022_relevance_releases.sql")
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        evaluation_id = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+        item = load_review_queue(connection).items[0]
+        ordinary = ReviewSubmission(
+            review_item_id=item.id,
+            evaluation_id=item.evaluation_id,
+            snapshot_id=item.snapshot_id,
+            decision="unsure",
+            note="Need more detail.",
+            actor="owner",
+            created_at=now,
+        )
+        saved_ordinary = record_review(connection, ordinary)
+        assert isinstance(saved_ordinary, ReviewSaved)
+
+        long_note = ordinary.model_copy(
+            update={"note": note, "created_at": now + timedelta(seconds=1)}
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
+            record_review(connection, long_note)
+
+        assert apply_migrations(connection)[-1] == "0023_unbounded_review_event_notes.sql"
+        saved_long = record_review(connection, long_note)
+        assert isinstance(saved_long, ReviewSaved)
+        assert len(note) == 2001
+        assert connection.execute(
+            "SELECT id, note FROM review_events ORDER BY created_at"
+        ).fetchall() == [
+            (saved_ordinary.review_event_id, ordinary.note),
+            (saved_long.review_event_id, note),
+        ]
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -208,7 +252,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
         results = tuple(executor.map(migrate_for_index, range(2)))
 
     assert results[0] == results[1]
-    assert results[0][-1] == "0022_relevance_releases.sql"
+    assert results[0][-1] == "0023_unbounded_review_event_notes.sql"
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
@@ -257,7 +301,7 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         migrations = apply_migrations(connection)
 
-        assert migrations[-1] == "0022_relevance_releases.sql"
+        assert migrations[-1] == "0023_unbounded_review_event_notes.sql"
         expected = dict(before)
         expected["pipeline_runs"] = [
             {**row, "configuration_revision_id": None}
