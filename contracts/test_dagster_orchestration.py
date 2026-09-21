@@ -28,6 +28,7 @@ from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
 from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse, JevRetryPolicy
 from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
     ProcessingSummary,
@@ -106,10 +107,13 @@ def test_run_retry_reuses_frozen_configuration_pair_and_exchange_rates(
     assert second.status == "running"
     assert second.configuration_revision_id == first.configuration_revision_id
     assert second.prompt_release_id == first.prompt_release_id
+    assert second.target == first.target
     assert second.exchange_rates == rates
 
 
-def test_later_activation_only_changes_new_orchestration_runs(authority_schema: str) -> None:
+def test_configuration_activation_only_changes_new_orchestration_run_configuration(
+    authority_schema: str,
+) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     searches: list[tuple[str, str]] = []
 
@@ -210,7 +214,8 @@ def test_later_activation_only_changes_new_orchestration_runs(authority_schema: 
     assert resumed.configuration_revision_id == first.configuration_revision_id
     assert resumed.prompt_release_id == first.prompt_release_id
     assert second.configuration_revision_id == revision.id
-    assert second.prompt_release_id == release.id
+    assert second.prompt_release_id == first.prompt_release_id
+    assert second.target == first.target
     assert discovery.query_count == 1
     assert searches == [("configured search", "jobs.lever.co")]
 
@@ -378,17 +383,20 @@ def test_dagster_job_executes_the_domain_cycle(
     with _connection(authority_schema) as connection:
         stored = connection.execute(
             """
-            SELECT status, implementation_ref, configuration_revision_id, prompt_release_id
+            SELECT status, implementation_ref, configuration_revision_id,
+                   prompt_release_id, relevance_release_id
             FROM pipeline_runs
             WHERE kind = 'orchestration'
             """
         ).fetchone()
         publication = load_published_active_search_configuration(connection).publication
+        active_target = get_active_release_target(connection)
     assert stored == (
         "completed",
         "commit-1",
         publication.revision_id,
         publication.prompt_release_id,
+        active_target.target.relevance_release_id,
     )
 
 

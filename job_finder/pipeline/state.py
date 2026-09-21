@@ -19,8 +19,11 @@ from job_finder.evaluation.models import (
     ModelCallContext,
     OperationalError,
     PromptReleaseId,
+    ReleaseTarget,
+    RelevanceReleaseId,
     RetryableOperationalError,
 )
+from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.jobs.decision_pipeline import job_id_for_url
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
@@ -41,11 +44,15 @@ class OrchestrationRun(PipelineStateModel):
     configuration_revision_id: Annotated[
         SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
     ]
-    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    target: ReleaseTarget
     exchange_rates: ExchangeRateSnapshot
     status: Literal["running", "completed", "failed"]
     started_at: datetime
     completed_at: datetime | None
+
+    @property
+    def prompt_release_id(self) -> PromptReleaseId:
+        return self.target.prompt_release_id
 
 
 class DiscoveryRegistration(PipelineStateModel):
@@ -89,6 +96,7 @@ def prepare_orchestration_run(
             return _load_run_by_id(connection, existing.id)
         return existing
     active_configuration = load_active_configuration(connection)
+    active_target = get_active_release_target(connection)
     rates = fetch_rates()
     run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
     rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
@@ -98,8 +106,9 @@ def prepare_orchestration_run(
             """
             INSERT INTO pipeline_runs (
               id, idempotency_key, kind, implementation_ref,
-              configuration_revision_id, prompt_release_id, parameters, status, started_at
-            ) VALUES (%s, %s, 'orchestration', %s, %s, %s, '{}'::jsonb, 'running', %s)
+              configuration_revision_id, prompt_release_id, relevance_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'orchestration', %s, %s, %s, %s, '{}'::jsonb, 'running', %s)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id
             """,
@@ -108,7 +117,8 @@ def prepare_orchestration_run(
                 idempotency_key,
                 implementation_ref,
                 active_configuration.publication.revision_id,
-                active_configuration.publication.prompt_release_id,
+                active_target.target.prompt_release_id,
+                active_target.target.relevance_release_id,
                 started_at,
             ),
         ).fetchone()
@@ -515,7 +525,8 @@ def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
     row = connection.execute(
         """
         SELECT r.idempotency_key, r.implementation_ref, r.configuration_revision_id,
-               r.prompt_release_id, r.status, r.started_at, r.completed_at,
+               r.prompt_release_id, r.relevance_release_id,
+               r.status, r.started_at, r.completed_at,
                x.rates, x.source, x.observed_at
         FROM pipeline_runs r
         JOIN run_exchange_rate_snapshots x ON x.pipeline_run_id = r.id
@@ -525,20 +536,25 @@ def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
     ).fetchone()
     if row is None:
         raise RuntimeError("Orchestration run is incomplete")
+    if row[4] is None:
+        raise RuntimeError("Legacy orchestration run has unknown relevance provenance")
     return OrchestrationRun.model_validate(
         {
             "id": run_id,
             "idempotency_key": row[0],
             "implementation_ref": row[1],
             "configuration_revision_id": row[2],
-            "prompt_release_id": row[3],
-            "status": row[4],
-            "started_at": row[5],
-            "completed_at": row[6],
+            "target": {
+                "prompt_release_id": PromptReleaseId(str(row[3])),
+                "relevance_release_id": RelevanceReleaseId(str(row[4])),
+            },
+            "status": row[5],
+            "started_at": row[6],
+            "completed_at": row[7],
             "exchange_rates": {
-                "rates": _RATES.validate_python(row[7]),
-                "source": row[8],
-                "observed_at": row[9],
+                "rates": _RATES.validate_python(row[8]),
+                "source": row[9],
+                "observed_at": row[10],
             },
         }
     )

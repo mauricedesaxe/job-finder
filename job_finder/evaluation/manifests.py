@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, model_validator
 
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import (
@@ -167,6 +167,10 @@ class EvaluationMetrics(ManifestModel):
     false_positive_rate: Decimal = Field(ge=0, le=1)
     false_negative_rate: Decimal = Field(ge=0, le=1)
 
+    @field_serializer("false_positive_rate", "false_negative_rate", when_used="json")
+    def serialize_rates(self, value: Decimal) -> str:
+        return format(value, "f")
+
 
 class EvaluationRun(ManifestModel):
     id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -209,6 +213,10 @@ class EvaluationRunTelemetry(ManifestModel):
     usage_complete: bool = True
     p50_latency_ms: Decimal | None = Field(default=None, ge=0)
     p95_latency_ms: Decimal | None = Field(default=None, ge=0)
+
+    @field_serializer("cost_usd", "p50_latency_ms", "p95_latency_ms", when_used="json")
+    def serialize_decimals(self, value: Decimal | None) -> str | None:
+        return None if value is None else format(value, "f")
 
     @model_validator(mode="after")
     def percentiles_match_request_count(self) -> Self:

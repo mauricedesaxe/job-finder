@@ -49,17 +49,42 @@ from job_finder.configuration_service import (
 from job_finder.evaluation.langfuse import ProjectionQueueStatus, load_projection_queue_status
 from job_finder.evaluation.manifests import (
     CuratedReviewEvent,
+    EvaluateManifestCommand,
     ManifestOperationError,
     ManifestPolicy,
     ManifestSummary,
     ManifestSummaryPage,
+    EvaluationExecutionState,
+    EvaluationRun,
+    EvaluationRunComparison,
+    PromptPromotionDecision,
     create_manifest,
     exclude_review_event,
     include_review_event,
     list_manifests,
+    load_evaluation_execution,
+    load_run,
     load_manifest,
     preview_manifest,
+    preview_run_comparison,
+    record_prompt_promotion_decision,
     summarize_manifest,
+)
+from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
+from job_finder.evaluation.prompt_releases import PromptReleaseError
+from job_finder.evaluation.release_targets import (
+    ActivateReleaseTargetCommand,
+    ActivateReleaseTargetResult,
+    ActiveReleaseTarget,
+    CreateReleaseTargetCandidateCommand,
+    ReleaseTargetLifecycleError,
+    activate_release_target,
+    create_release_target_candidate,
+    get_active_release_target,
+)
+from job_finder.evaluation.relevance_releases import (
+    RelevanceExecutionPolicy,
+    RelevanceReleaseError,
 )
 from job_finder.review.models import FeedbackCurationFilter, ReviewFeedback, ReviewFeedbackPage
 from job_finder.review.postgres import (
@@ -72,6 +97,7 @@ from job_finder.search_configuration import SearchConfiguration, SearchConfigura
 Connection = psycopg.Connection[tuple[object, ...]]
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
 Clock = Callable[[], datetime]
+EvaluationRunner = Callable[[Connection, EvaluateManifestCommand], EvaluationExecutionState]
 _DEFAULT_MAX_FALSE_POSITIVE_RATE = Decimal("0.05")
 _DEFAULT_MAX_FALSE_NEGATIVE_RATE = Decimal("0.10")
 
@@ -81,6 +107,7 @@ class McpDependencies:
     connect: ConnectionFactory
     actor: str = "mcp-owner"
     now: Clock = lambda: datetime.now(UTC)
+    run_evaluation: EvaluationRunner | None = None
 
 
 def create_mcp_server(dependencies: McpDependencies) -> FastMCP:
@@ -119,6 +146,12 @@ def create_mcp_server(dependencies: McpDependencies) -> FastMCP:
         destructive_hint=False,
         idempotent_hint=True,
         open_world_hint=False,
+    )
+    provider_write = ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
     )
 
     def parse_configuration(candidate: object) -> SearchConfiguration:
@@ -366,6 +399,147 @@ def create_mcp_server(dependencies: McpDependencies) -> FastMCP:
         """List immutable eval manifests without returning every case body."""
         with dependencies.connect() as connection:
             return list_manifests(connection, limit=limit, offset=offset)
+
+    @mcp.tool(annotations=append_only)
+    def release_target_candidate_create(
+        prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")],
+        relevance_release_id: Annotated[
+            RelevanceReleaseId | None, Field(pattern=r"^[0-9a-f]{64}$")
+        ] = None,
+        relevance_policy: RelevanceExecutionPolicy | None = None,
+    ) -> ReleaseTarget:
+        """Create or validate an immutable prompt-and-relevance release target."""
+        try:
+            with dependencies.connect() as connection:
+                return create_release_target_candidate(
+                    connection,
+                    CreateReleaseTargetCandidateCommand(
+                        prompt_release_id=prompt_release_id,
+                        relevance_release_id=relevance_release_id,
+                        relevance_policy=relevance_policy,
+                        actor=dependencies.actor,
+                        timestamp=dependencies.now(),
+                    ),
+                )
+        except (PromptReleaseError, RelevanceReleaseError, ValueError) as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=read_only)
+    def release_target_active_get() -> ActiveReleaseTarget:
+        """Get the active release target and its CAS generation."""
+        try:
+            with dependencies.connect() as connection:
+                return get_active_release_target(connection)
+        except ReleaseTargetLifecycleError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=read_only)
+    def evaluation_execution_get(
+        execution_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+    ) -> EvaluationExecutionState:
+        """Get one evaluation execution, including running or failure state."""
+        try:
+            with dependencies.connect() as connection:
+                return load_evaluation_execution(connection, execution_id)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=provider_write)
+    def evaluation_run(
+        idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
+        manifest_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        target: ReleaseTarget,
+        implementation_ref: Annotated[str, Field(min_length=1, max_length=200)],
+    ) -> EvaluationExecutionState:
+        """Run or replay a manifest evaluation when this MCP deployment has providers configured."""
+        if dependencies.run_evaluation is None:
+            raise ToolError("Evaluation execution is not configured for this MCP server")
+        try:
+            with dependencies.connect() as connection:
+                return dependencies.run_evaluation(
+                    connection,
+                    EvaluateManifestCommand(
+                        idempotency_key=idempotency_key,
+                        manifest_id=manifest_id,
+                        target=target,
+                        implementation_ref=implementation_ref,
+                    ),
+                )
+        except (PromptReleaseError, RelevanceReleaseError, ValueError) as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=read_only)
+    def evaluation_run_get(
+        run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+    ) -> EvaluationRun:
+        """Get one completed exact-target evaluation run."""
+        try:
+            with dependencies.connect() as connection:
+                return load_run(connection, run_id)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=read_only)
+    def release_target_compare(
+        baseline_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        candidate_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+    ) -> EvaluationRunComparison:
+        """Compare two exact-target runs over their shared immutable manifest."""
+        try:
+            with dependencies.connect() as connection:
+                return preview_run_comparison(connection, baseline_run_id, candidate_run_id)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=append_only)
+    def release_target_decide(
+        baseline_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        candidate_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        expected_comparison_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        decision: Literal["approved", "rejected"],
+        reason: Annotated[str, Field(min_length=1, max_length=2000)],
+        idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
+    ) -> PromptPromotionDecision:
+        """Record an immutable decision over one exact run comparison."""
+        try:
+            with dependencies.connect() as connection:
+                return record_prompt_promotion_decision(
+                    connection,
+                    baseline_run_id=baseline_run_id,
+                    candidate_run_id=candidate_run_id,
+                    expected_comparison_id=expected_comparison_id,
+                    decision=decision,
+                    reason=reason,
+                    actor=dependencies.actor,
+                    created_at=dependencies.now(),
+                    idempotency_key=idempotency_key,
+                )
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @mcp.tool(annotations=cas_write)
+    def release_target_activate(
+        promotion_decision_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        expected_active_target: ReleaseTarget,
+        expected_generation: Annotated[int, Field(ge=0, le=MAX_POSTGRES_BIGINT)],
+        idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
+    ) -> ActivateReleaseTargetResult:
+        """Activate an approved decision's candidate if active target and generation still match."""
+        try:
+            with dependencies.connect() as connection:
+                return activate_release_target(
+                    connection,
+                    ActivateReleaseTargetCommand(
+                        idempotency_key=idempotency_key,
+                        promotion_decision_id=promotion_decision_id,
+                        expected_active_target=expected_active_target,
+                        expected_generation=expected_generation,
+                        actor=dependencies.actor,
+                        timestamp=dependencies.now(),
+                    ),
+                )
+        except ReleaseTargetLifecycleError as error:
+            raise ToolError(str(error)) from error
 
     @mcp.tool(annotations=read_only)
     def langfuse_projection_status(
