@@ -10,12 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 PromptVersionId = NewType("PromptVersionId", str)
 PromptReleaseId = NewType("PromptReleaseId", str)
+RelevanceReleaseId = NewType("RelevanceReleaseId", str)
 InputDigest = NewType("InputDigest", str)
 ModelRequestId = NewType("ModelRequestId", str)
 
 
 class EvaluationModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+
+class ReleaseTarget(EvaluationModel):
+    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    relevance_release_id: Annotated[RelevanceReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class EvaluationToolOutput(EvaluationModel):
