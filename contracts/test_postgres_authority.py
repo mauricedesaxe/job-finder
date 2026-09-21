@@ -37,6 +37,7 @@ from job_finder.configuration_service import (
     ConfigurationRevisionDetails,
     ConfigurationRevisionNotFound,
     ConfigurationRevisionPage,
+    ConfigurationValid,
     DraftChanged,
     DraftSaved,
     PublicationIdempotencyKeyConflict,
@@ -128,6 +129,7 @@ from job_finder.search_configuration import (
     SearchConfigurationDraft,
     SearchConfigurationRevision,
     SearchConfigurationRevisionId,
+    SupportedSearchSource,
     build_search_configuration_revision,
     compare_and_swap_active_search_configuration,
     load_active_search_configuration,
@@ -163,7 +165,9 @@ from job_finder.evaluation.relevance_releases import (
     validate_release_target,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
+from job_finder.discovery.jina import SearchSucceeded
 from job_finder.mcp_server import McpDependencies, create_mcp_server
+from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
 from job_finder.pipeline.state import prepare_orchestration_run
 
 
@@ -865,6 +869,7 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
     configured = DEFAULT_SEARCH_CONFIGURATION.model_copy(
         update={
             "search_keywords": ("mcp-configured-search",),
+            "enabled_sources": (SupportedSearchSource.LEVER,),
             "target_profiles": (
                 configured_profile,
                 *DEFAULT_SEARCH_CONFIGURATION.target_profiles[1:],
@@ -884,7 +889,13 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
         )
     )
 
-    async def configure() -> None:
+    async def configure() -> (
+        tuple[
+            PublishedActiveSearchConfiguration,
+            ConfigurationPreview,
+            ConfigurationPublished,
+        ]
+    ):
         async with Client(server) as client:
             active_result = await client.call_tool("configuration_active_get", {})
             active = PublishedActiveSearchConfiguration.model_validate(
@@ -893,6 +904,16 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
 
             draft_result = await client.call_tool("configuration_draft_get", {})
             draft = SearchConfigurationDraft.model_validate(draft_result.structured_content)
+            assert active.active.revision.configuration == DEFAULT_SEARCH_CONFIGURATION
+            assert draft.configuration == DEFAULT_SEARCH_CONFIGURATION
+
+            valid_result = await client.call_tool(
+                "configuration_validate",
+                {"candidate": configured.model_dump(mode="json")},
+            )
+            assert valid_result.structured_content is not None
+            valid = ConfigurationValid.model_validate(valid_result.structured_content["result"])
+            assert valid.configuration == configured
 
             preview_result = await client.call_tool(
                 "configuration_preview",
@@ -900,6 +921,22 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
             )
             preview = ConfigurationPreview.model_validate(preview_result.structured_content)
             assert preview.configuration_revision_id == expected_revision_id
+            assert preview.total_generated_search_count == 1
+            assert preview.search_samples == ("site:jobs.lever.co mcp-configured-search",)
+            expected_prompt = build_prompt_release(configured)
+            expected_profile_version = next(
+                version
+                for version in expected_prompt.versions
+                if version.definition.phase == "profile"
+                and version.definition.criterion == configured_profile.key
+            )
+            profile_summary = next(
+                summary
+                for summary in preview.prompt_summaries
+                if summary.phase == "profile" and summary.criterion == configured_profile.key
+            )
+            assert preview.total_compiled_prompt_count == len(expected_prompt.versions)
+            assert profile_summary.prompt_version_id == expected_profile_version.id
 
             saved_result = await client.call_tool(
                 "configuration_draft_update",
@@ -924,6 +961,7 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
                 published_result.structured_content["result"]
             )
             assert published.publication.revision_id == expected_revision_id
+            assert published.publication.prompt_release_id == preview.prompt_release_id
 
             listed_result = await client.call_tool("configuration_revision_list", {"limit": 100})
             listed = ConfigurationRevisionPage.model_validate(listed_result.structured_content)
@@ -948,8 +986,15 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
                 activated_result.structured_content["result"]
             )
             assert activated.active_configuration.active.revision.id == expected_revision_id
+            return active, preview, published
 
-    asyncio.run(configure())
+    initial_active, preview, published = asyncio.run(configure())
+
+    searches: list[tuple[str, str]] = []
+
+    def search(keyword: str, domain: str) -> SearchSucceeded:
+        searches.append((keyword, domain))
+        return SearchSucceeded(urls=())
 
     with _connection(authority_schema) as connection:
         run = prepare_orchestration_run(
@@ -964,7 +1009,32 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
                 observed_at=datetime(2030, 1, 3, tzinfo=UTC),
             ),
         )
+        discovery = discover_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=search,
+                scrape=lambda _url: pytest.fail("scrape was called"),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
+            ),
+            discovered_at=datetime(2030, 1, 3, tzinfo=UTC),
+            max_workers=1,
+        )
+        active_target = get_active_release_target(connection)
+        stored_revision = load_search_configuration_revision(
+            connection, run.configuration_revision_id
+        )
+        published_prompt = load_prompt_release(connection, published.publication.prompt_release_id)
+
         assert run.configuration_revision_id == expected_revision_id
+        assert run.target == active_target.target
+        assert run.prompt_release_id == initial_active.publication.prompt_release_id
+        assert run.prompt_release_id != published.publication.prompt_release_id
+        assert stored_revision.configuration == configured
+        assert published_prompt == build_prompt_release(configured)
+        assert preview.prompt_release_id == published_prompt.id
+        assert discovery.query_count == 1
+        assert searches == [("mcp-configured-search", "jobs.lever.co")]
 
 
 def test_configuration_editor_inspects_the_live_draft_active_and_saved_revisions(

@@ -13,6 +13,7 @@ from job_finder.config import ReviewAppSettings
 from job_finder.configuration_service import (
     ActivateConfigurationCommand,
     ActivateConfigurationResult,
+    ActivationTargetUnpublished,
     ActiveConfigurationChanged,
     ConfigurationActivated,
     ConfigurationPublished,
@@ -511,6 +512,32 @@ def test_activation_is_separate_and_reports_cas_conflict() -> None:
     assert f"generation {current.active.generation}" in response.text
     assert current.active.revision.id in response.text
     assert harness.activate_commands[0].target_revision_id == publication.revision_id
+    assert harness.publish_commands == []
+
+
+def test_activation_rejects_an_unpublished_revision_without_publishing() -> None:
+    harness = ServiceHarness()
+    publication = _publication(harness.configuration)
+    harness.state = _state(harness.configuration, publication=publication)
+    harness.activate_result = ActivationTargetUnpublished(
+        target_revision_id=publication.revision_id
+    )
+    client = _client(harness)
+    active = harness.state.active.active
+
+    response = client.post(
+        "/configuration/activate",
+        data={
+            "csrf_token": _csrf(client),
+            "target_revision_id": publication.revision_id,
+            "expected_active_revision_id": active.revision.id,
+            "expected_generation": str(active.generation),
+        },
+    )
+
+    assert response.status_code == 409
+    assert f"Revision {publication.revision_id} is not published" in response.text
+    assert "Nothing was activated" in response.text
     assert harness.publish_commands == []
 
 
