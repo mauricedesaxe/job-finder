@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 
+import pytest
+
 from job_finder.evaluation.evaluate import evaluate_job, job_message
 from job_finder.evaluation.models import (
     CriterionAccepted,
@@ -14,6 +16,11 @@ from job_finder.evaluation.models import (
 )
 from job_finder.evaluation.prompt_releases import PromptVersion, build_prompt_release
 from job_finder.jobs.models import JobListing
+from job_finder.search_configuration import (
+    DEFAULT_SEARCH_CONFIGURATION,
+    PersonalCriterion,
+    TargetProfile,
+)
 
 JOB = JobListing(
     title="Senior Engineer",
@@ -58,6 +65,47 @@ def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
     )
 
 
+def test_executes_variable_length_filters_and_profiles_eagerly_in_order() -> None:
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "personal_criteria": (
+                PersonalCriterion(key="filter-one", name="One", instructions="Filter one."),
+            ),
+            "target_profiles": (
+                TargetProfile(key="profile-one", name="One", instructions="Profile one."),
+                TargetProfile(key="profile-two", name="Two", instructions="Profile two."),
+                TargetProfile(key="profile-three", name="Three", instructions="Profile three."),
+            ),
+        }
+    )
+    release = build_prompt_release(configuration)
+    calls: list[str] = []
+
+    def evaluate(version: PromptVersion, _values: Mapping[str, str]) -> CriterionResult:
+        calls.append(version.definition.criterion)
+        return _accepted(version, passed=True)
+
+    result = evaluate_job(JOB, release, evaluate, rates=RATES)
+
+    assert calls == ["filter-one", "profile-one", "profile-two", "profile-three"]
+    assert result == Qualified(reason="profile-one", profile_name="profile-one")
+
+
+@pytest.mark.parametrize("missing_phase", ["filter", "profile"])
+def test_rejects_a_release_with_an_empty_evaluation_phase(missing_phase: str) -> None:
+    release = build_prompt_release()
+    synthetic = release.model_copy(
+        update={
+            "versions": tuple(
+                version for version in release.versions if version.definition.phase != missing_phase
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="at least one filter and one profile"):
+        evaluate_job(JOB, synthetic, lambda _version, _values: pytest.fail(), rates=RATES)
+
+
 def test_isolates_location_and_compensation_evidence() -> None:
     release = build_prompt_release()
     job = JOB.model_copy(
@@ -80,6 +128,26 @@ Build customer-facing AI features."""
     assert "compensation reflects" in inputs["compensation-minimum"]
     assert "Remote across Europe." not in inputs["compensation-minimum"]
     assert "Build customer-facing AI features." in inputs["early-stage-product-engineer"]
+
+
+def test_uses_structured_location_for_location_relevance() -> None:
+    release = build_prompt_release()
+    job = JOB.model_copy(
+        update={
+            "description": "Build customer-facing software.",
+            "location": "Hybrid (Vancouver, Canada)",
+        }
+    )
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        if version.definition.criterion == "remote-europe-eligible":
+            assert "Location: Hybrid (Vancouver, Canada)" in values["job"]
+            return _accepted(version, passed=False)
+        return _accepted(version, passed=True)
+
+    result = evaluate_job(job, release, evaluate, rates=RATES)
+
+    assert result == Rejected(reason="remote-europe-eligible")
 
 
 def test_returns_the_first_filter_result_in_catalog_order() -> None:

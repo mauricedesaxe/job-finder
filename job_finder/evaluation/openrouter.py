@@ -353,6 +353,8 @@ def send_generation(
 
 def postgres_model_call_persistence(
     connection: psycopg.Connection[tuple[object, ...]],
+    *,
+    provider: Literal["openrouter", "typesafe"] = "openrouter",
 ) -> ModelCallPersistence:
     if not connection.autocommit:
         raise ValueError("Model-call persistence requires an autocommit connection")
@@ -366,6 +368,7 @@ def postgres_model_call_persistence(
                    provider_response_id, raw_response
             FROM model_call_attempts
             WHERE request_id = %s
+              AND provider = %s
               AND (
                 status IN ('accepted', 'terminal_error')
                 OR (
@@ -379,7 +382,7 @@ def postgres_model_call_persistence(
             ORDER BY (status = 'accepted') DESC, attempt_number DESC
             LIMIT 1
             """,
-            (request_id,),
+            (request_id, provider),
         ).fetchone()
         if row is None:
             return None
@@ -423,7 +426,7 @@ def postgres_model_call_persistence(
                   input_tokens, output_tokens, cost_usd, latency_ms, error, observed_at
                 ) VALUES (
                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                  'openrouter', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -440,6 +443,7 @@ def postgres_model_call_persistence(
                     attempt.context.input_digest,
                     attempt.requested_model,
                     attempt.response_model,
+                    provider,
                     attempt.provider_response_id,
                     attempt.status,
                     Jsonb(attempt.parsed_output) if attempt.parsed_output is not None else None,

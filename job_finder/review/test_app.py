@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 import re
+from typing import Never, cast
 from uuid import UUID
 
 import psycopg
@@ -11,6 +12,7 @@ from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
 from job_finder.review.app import create_review_app
+from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.review.models import (
     Compensation,
     ReviewConflict,
@@ -113,6 +115,7 @@ def test_the_login_uses_the_editorial_split_and_route_line() -> None:
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
             SETTINGS,
             now=lambda: NOW,
         )
@@ -302,7 +305,9 @@ def test_submitting_a_revision_returns_to_the_item_page_with_the_update() -> Non
         review_queue=lambda: ReviewQueue(reviewed_items=(decided[0],), reviewed_counts={TODAY: 1}),
         submit=submit,
     )
-    client = TestClient(create_review_app(service, SETTINGS, now=lambda: NOW))
+    client = TestClient(
+        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+    )
     _authenticate(client)
 
     response = client.post(f"/review/{item.id}", data=_form(item, client), follow_redirects=False)
@@ -507,6 +512,7 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
 
     app = create_review_app(
         ReviewService(review_queue=unavailable, submit=_saved),
+        _configuration_service(),
         SETTINGS,
         now=lambda: NOW,
     )
@@ -525,6 +531,7 @@ def test_requires_a_signed_session_for_review_routes() -> None:
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
             SETTINGS,
             now=lambda: NOW,
         )
@@ -540,6 +547,7 @@ def test_authenticates_and_signs_out_the_owner() -> None:
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
             SETTINGS,
             now=lambda: NOW,
         )
@@ -571,6 +579,7 @@ def test_exposes_public_health_and_database_readiness() -> None:
 
     app = create_review_app(
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        _configuration_service(),
         SETTINGS,
         readiness=ready,
         now=lambda: NOW,
@@ -589,6 +598,7 @@ def test_reports_database_readiness_failure_without_authentication() -> None:
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
             SETTINGS,
             readiness=unavailable,
             now=lambda: NOW,
@@ -607,14 +617,18 @@ def _saved(_review: ReviewSubmission) -> ReviewSaved:
 
 def _client(queue: ReviewQueue, submit: Submitter = _saved) -> TestClient:
     service = ReviewService(review_queue=lambda: queue, submit=submit)
-    client = TestClient(create_review_app(service, SETTINGS, now=lambda: NOW))
+    client = TestClient(
+        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+    )
     _authenticate(client)
     return client
 
 
 def _draining_client(remaining: list[ReviewItem], submit: Submitter) -> TestClient:
     service = ReviewService(review_queue=lambda: ReviewQueue(items=tuple(remaining)), submit=submit)
-    client = TestClient(create_review_app(service, SETTINGS, now=lambda: NOW))
+    client = TestClient(
+        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+    )
     _authenticate(client)
     return client
 
@@ -674,3 +688,18 @@ def _csrf(client: TestClient) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
     assert match is not None
     return match.group(1)
+
+
+def _configuration_service() -> ConfigurationEditorService:
+    def unused(*_args: object) -> Never:
+        raise AssertionError("configuration service was not expected")
+
+    never = cast(Callable[..., Never], unused)
+    return ConfigurationEditorService(
+        inspect=never,
+        validate=never,
+        preview=never,
+        save=never,
+        publish=never,
+        activate=never,
+    )
