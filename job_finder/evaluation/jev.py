@@ -20,6 +20,7 @@ from job_finder.evaluation.models import (
     CriterionResult,
     ModelCallAttempt,
     ModelCallContext,
+    ProviderRequestObservation,
     RetryableOperationalError,
     TerminalOperationalError,
 )
@@ -152,6 +153,7 @@ JevCriterionResult = JevCriterionObservation | RetryableOperationalError | Termi
 Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 RequestObserver = Callable[[int], None]
+AttemptObserver = Callable[[ProviderRequestObservation], None]
 RetryObserver = Callable[[RetryableOperationalError, int], None]
 JevPolicy = Literal["faithful", "atomic"]
 
@@ -384,6 +386,7 @@ def evaluate_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     observe_request: RequestObserver | None = None,
+    observe_attempt: AttemptObserver | None = None,
     observe_retry: RetryObserver | None = None,
     policy: JevPolicy = "faithful",
     execution_policy: JevFaithfulExecutionPolicy | JevAtomicExecutionPolicy | None = None,
@@ -409,6 +412,7 @@ def evaluate_prompt(
         sleep,
         clock,
         observe_request,
+        observe_attempt,
         observe_retry,
     )
     if isinstance(request_result, RetryableOperationalError | TerminalOperationalError):
@@ -417,10 +421,22 @@ def evaluate_prompt(
     try:
         parsed = JevSystemOneResponse.model_validate_json(response.body)
     except ValidationError as error:
+        if observe_attempt is not None:
+            observe_attempt(ProviderRequestObservation(latency_ms=latency_ms))
         return TerminalOperationalError(
             prompt_name=prompt.definition.name,
             error_code="invalid_response",
             reason=str(error),
+        )
+    cost = Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
+    if observe_attempt is not None:
+        observe_attempt(
+            ProviderRequestObservation(
+                input_tokens=parsed.usage.input_tokens,
+                output_tokens=parsed.usage.output_tokens,
+                cost_usd=cost,
+                latency_ms=latency_ms,
+            )
         )
     if set(parsed.answers) != set(resolved.questions):
         return TerminalOperationalError(
@@ -458,9 +474,7 @@ def evaluate_prompt(
         input_tokens=parsed.usage.input_tokens,
         output_tokens=parsed.usage.output_tokens,
         latency_ms=latency_ms,
-        estimated_cost_usd=(
-            Decimal(parsed.usage.input_tokens) * JEV_INPUT_COST_PER_MILLION / Decimal(1_000_000)
-        ),
+        estimated_cost_usd=cost,
         raw_response=parsed.model_dump(mode="json"),
     )
 
@@ -474,6 +488,7 @@ def _send_with_retry(
     sleep: Sleeper,
     clock: Clock,
     observe_request: RequestObserver | None,
+    observe_attempt: AttemptObserver | None,
     observe_retry: RetryObserver | None,
 ) -> tuple[JevHttpResponse, int] | RetryableOperationalError | TerminalOperationalError:
     for attempt in range(retry_policy.max_attempts):
@@ -514,6 +529,8 @@ def _send_with_retry(
             )
         if observe_request is not None:
             observe_request(latency_ms)
+        if observe_attempt is not None:
+            observe_attempt(ProviderRequestObservation(latency_ms=latency_ms))
         if (
             not isinstance(failure, RetryableOperationalError)
             or attempt + 1 >= retry_policy.max_attempts

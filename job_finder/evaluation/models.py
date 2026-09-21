@@ -24,6 +24,15 @@ class ReleaseTarget(EvaluationModel):
     relevance_release_id: Annotated[RelevanceReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
+class ProviderRequestObservation(EvaluationModel):
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cost_usd: Decimal = Field(default=Decimal(0), ge=0)
+    usage_complete: bool = True
+    resolves_prior_usage: bool = False
+    latency_ms: int = Field(ge=0)
+
+
 class EvaluationToolOutput(EvaluationModel):
     passed: bool = Field(alias="pass")
     reason: str

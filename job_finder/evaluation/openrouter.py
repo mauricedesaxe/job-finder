@@ -27,6 +27,7 @@ from job_finder.evaluation.models import (
     InputDigest,
     ModelCallContext,
     ModelRequestId,
+    ProviderRequestObservation,
     PromptAccepted,
     RetryableOperationalError,
     TerminalOperationalError,
@@ -59,6 +60,7 @@ class PendingModelCallUsage:
 ChatCompletionSender = Callable[[str, Mapping[str, str], dict[str, object], float], HttpResponse]
 GenerationSender = Callable[[str, Mapping[str, str], str, float], HttpResponse]
 AttemptRecorder = Callable[[ModelCallAttempt], None]
+RequestObserver = Callable[[ProviderRequestObservation], None]
 CompletedLookup = Callable[
     [ModelRequestId], CompletedModelCall | PendingModelCallUsage | TerminalOperationalError | None
 ]
@@ -158,6 +160,7 @@ def evaluate_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     now: Now = lambda: datetime.now(UTC),
+    observe_request: RequestObserver | None = None,
 ) -> CriterionResult:
     result = invoke_prompt(
         prompt,
@@ -172,6 +175,7 @@ def evaluate_prompt(
         sleep=sleep,
         clock=clock,
         now=now,
+        observe_request=observe_request,
     )
     if isinstance(result, OperationalError):
         return result
@@ -196,6 +200,7 @@ def invoke_prompt(
     sleep: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     now: Now = lambda: datetime.now(UTC),
+    observe_request: RequestObserver | None = None,
 ) -> PromptAccepted[_OutputT] | OperationalFailure:
     policy = retry_policy or RetryPolicy()
     messages = _render_messages(prompt, values)
@@ -221,6 +226,7 @@ def invoke_prompt(
                 sleep,
                 clock,
                 now,
+                observe_request,
             )
         return PromptAccepted(
             prompt_name=completed.prompt_name,
@@ -241,6 +247,7 @@ def invoke_prompt(
                 30.0,
             )
             latency_ms = max(0, round((clock() - started_at) * 1000))
+            _observe_completion_request(response, latency_ms, observe_request)
             result, attempt, retry_completion = _interpret_response(
                 response,
                 prompt,
@@ -255,9 +262,13 @@ def invoke_prompt(
                 get_generation,
                 policy,
                 sleep,
+                clock,
+                observe_request,
             )
         except requests.RequestException as error:
             latency_ms = max(0, round((clock() - started_at) * 1000))
+            if observe_request is not None:
+                observe_request(ProviderRequestObservation(latency_ms=latency_ms))
             result = RetryableOperationalError(
                 prompt_name=prompt.definition.name,
                 error_code="network_error",
@@ -304,6 +315,7 @@ def _resume_usage_lookup(
     sleep: Sleeper,
     clock: Clock,
     now: Now,
+    observe_request: RequestObserver | None,
 ) -> PromptAccepted[_OutputT] | OperationalFailure:
     started_at = clock()
     result, attempt, _retry_completion = _interpret_response(
@@ -320,6 +332,8 @@ def _resume_usage_lookup(
         generation_sender,
         policy,
         sleep,
+        clock,
+        observe_request,
     )
     attempt = dataclass_replace(
         attempt,
@@ -560,6 +574,8 @@ def _interpret_response(
     generation_sender: GenerationSender,
     retry_policy: RetryPolicy,
     sleep: Sleeper,
+    clock: Clock,
+    observe_request: RequestObserver | None,
 ) -> tuple[PromptAccepted[_OutputT] | OperationalFailure, ModelCallAttempt, bool]:
     raw = _response_json(response.body)
     if response.status_code != 200:
@@ -683,6 +699,8 @@ def _interpret_response(
         generation_sender,
         retry_policy,
         sleep,
+        clock,
+        observe_request,
     )
     if isinstance(usage, UsageUnavailable):
         error_type = RetryableOperationalError if usage.retryable else TerminalOperationalError
@@ -748,30 +766,76 @@ def _load_generation_usage(
     sender: GenerationSender,
     policy: RetryPolicy,
     sleep: Sleeper,
+    clock: Clock,
+    observe_request: RequestObserver | None,
 ) -> OpenRouterUsage | UsageUnavailable:
     reason = "OpenRouter generation metadata was unavailable"
     for attempt in range(policy.max_attempts):
         retryable = True
+        latency_ms = 0
+        started_at = clock()
         try:
             response = sender(OPENROUTER_GENERATION_URL, headers, generation_id, 30.0)
+            latency_ms = max(0, round((clock() - started_at) * 1000))
             raw = _response_json(response.body)
             if response.status_code == 200:
                 metadata = OpenRouterGeneration.model_validate(raw).data
-                return OpenRouterUsage(
+                usage = OpenRouterUsage(
                     prompt_tokens=metadata.tokens_prompt,
                     completion_tokens=metadata.tokens_completion,
                     cost=metadata.total_cost,
                 )
+                if observe_request is not None:
+                    observe_request(
+                        ProviderRequestObservation(
+                            input_tokens=usage.prompt_tokens,
+                            output_tokens=usage.completion_tokens,
+                            cost_usd=usage.cost,
+                            resolves_prior_usage=True,
+                            latency_ms=latency_ms,
+                        )
+                    )
+                return usage
             reason = _error_reason(raw, response.status_code)
             retryable = response.status_code in RETRYABLE_GENERATION_HTTP_STATUSES
         except requests.RequestException as error:
+            latency_ms = max(0, round((clock() - started_at) * 1000))
             reason = str(error)
         except ValidationError as error:
             reason = str(error)
+        if observe_request is not None:
+            observe_request(ProviderRequestObservation(latency_ms=latency_ms))
         if not retryable or attempt + 1 == policy.max_attempts:
             return UsageUnavailable(reason=reason, retryable=retryable)
         sleep(policy.base_delay_seconds * 2.0**attempt)
     raise AssertionError("A valid retry policy always returns from the metadata loop")
+
+
+def _observe_completion_request(
+    response: HttpResponse,
+    latency_ms: int,
+    observer: RequestObserver | None,
+) -> None:
+    if observer is None:
+        return
+    raw = _response_json(response.body)
+    try:
+        usage = (
+            OpenRouterUsage.model_validate(raw.get("usage"))
+            if isinstance(raw, dict) and raw.get("usage") is not None
+            else None
+        )
+    except ValidationError:
+        usage = None
+    observer(
+        ProviderRequestObservation(
+            input_tokens=usage.prompt_tokens if usage is not None else 0,
+            output_tokens=usage.completion_tokens if usage is not None else 0,
+            cost_usd=usage.cost if usage is not None else Decimal(0),
+            usage_complete=usage is not None,
+            latency_ms=latency_ms,
+        )
+    )
 
 
 def _response_json(body: str) -> JsonValue:
