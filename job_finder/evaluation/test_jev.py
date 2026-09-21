@@ -37,13 +37,17 @@ from job_finder.evaluation.models import (
     TerminalOperationalError,
 )
 from job_finder.evaluation.openrouter import ModelCallPersistence, prompt_input_digest
-from job_finder.evaluation.prompt_releases import build_prompt_release
+from job_finder.evaluation.prompt_releases import (
+    build_prompt_release,
+    build_work_culture_candidate_release,
+)
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 from job_finder.evaluation.relevance_releases import (
     RelevanceQuestion,
     ThresholdComposition,
     build_jev_atomic_policy,
     build_jev_faithful_policy,
+    build_work_culture_candidate_policy,
 )
 
 
@@ -303,6 +307,49 @@ def test_release_atomic_policy_rejects_primary_model_work_but_not_fine_tuning() 
     assert "model_architecture_research=0.900" in research.result.reason
     assert isinstance(fine_tuning, JevCriterionObservation)
     assert fine_tuning.result.passed
+
+
+def test_release_atomic_policy_requires_both_hype_and_permanent_availability() -> None:
+    prompt = next(
+        version
+        for version in build_work_culture_candidate_release(build_prompt_release()).versions
+        if version.definition.criterion == "work-culture"
+    )
+    policy = build_work_culture_candidate_policy(build_jev_atomic_policy())
+
+    def evaluate(probabilities: Mapping[str, float]) -> JevCriterionObservation:
+        def send(
+            _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+        ) -> JevHttpResponse:
+            questions = JevSystemOneRequest.model_validate(body).questions
+            return JevHttpResponse(
+                status_code=200,
+                body=_multi_response_body({**dict.fromkeys(questions, 0.1), **probabilities}),
+            )
+
+        result = evaluate_prompt(
+            prompt,
+            {"job": "A product engineering role."},
+            api_key="secret",
+            sender=send,
+            execution_policy=policy,
+            clock=iter((0.0, 0.1)).__next__,
+        )
+        assert isinstance(result, JevCriterionObservation)
+        return result
+
+    hype_only = evaluate({"extreme_intensity_culture": 0.9})
+    availability_only = evaluate({"permanent_personal_availability": 0.9})
+    combined = evaluate(
+        {
+            "extreme_intensity_culture": 0.9,
+            "permanent_personal_availability": 0.8,
+        }
+    )
+    assert hype_only.result.passed
+    assert availability_only.result.passed
+    assert not combined.result.passed
+    assert abs(combined.pass_probability - 0.2) < 1e-9
 
 
 def test_atomic_policy_fails_disqualified_criteria_with_one_minus_the_max_signal() -> None:

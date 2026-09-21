@@ -169,6 +169,29 @@ _MODEL_ARCHITECTURE_RESEARCH_QUESTION = RelevanceQuestion(
     true="New base-model architecture or pretraining research is primary work.",
     false="The role applies or fine-tunes existing models, or model research is only secondary.",
 )
+_EXTREME_INTENSITY_CULTURE_QUESTION = RelevanceQuestion(
+    instructions=(
+        "Does the listing describe its expected working culture with multiple explicit "
+        "extreme-intensity commitments, such as elite-only builders, maximum intensity, "
+        "relentless or hustle culture, moving at the speed of light, total or 100% "
+        "commitment, obsession with winning, or rejecting ordinary working hours? Answer "
+        "false for normal startup ambition, a fast pace, high ownership, or an isolated "
+        "marketing superlative."
+    ),
+    true="Multiple explicit extreme-intensity culture expectations are present.",
+    false="The listing expresses ordinary ambition, pace, ownership, or isolated marketing copy.",
+)
+_PERMANENT_PERSONAL_AVAILABILITY_QUESTION = RelevanceQuestion(
+    instructions=(
+        "Does the listing explicitly require each engineer to remain personally available "
+        "seven days a week, 24/7, at all times, or without protected off-call periods as "
+        "a continuing expectation? Treat round-the-clock service uptime, shared or rotating "
+        "on-call, incident response, runbooks, postmortems, observability, and owning "
+        "production services as false."
+    ),
+    true="Permanent individual availability without protected off-call time is required.",
+    false="Availability is limited to normal ownership or a shared, bounded on-call rotation.",
+)
 
 
 class RelevanceRelease(RelevanceModel):
@@ -245,6 +268,30 @@ def build_jev_atomic_policy() -> JevAtomicExecutionPolicy:
             _evaluation_artifact("evaluate_job"),
             _module_artifact("jev.py", "_compose_release_atomic"),
         ),
+    )
+
+
+def build_work_culture_candidate_policy(
+    baseline: JevAtomicExecutionPolicy,
+) -> JevAtomicExecutionPolicy:
+    if "work-culture" in baseline.questions:
+        raise RelevanceReleaseError("Relevance policy already contains work-culture")
+    questions = {
+        criterion: dict(criterion_questions)
+        for criterion, criterion_questions in baseline.questions.items()
+    }
+    questions["work-culture"] = {
+        "extreme_intensity_culture": _EXTREME_INTENSITY_CULTURE_QUESTION,
+        "permanent_personal_availability": _PERMANENT_PERSONAL_AVAILABILITY_QUESTION,
+    }
+    criteria = dict(baseline.composition.criteria)
+    criteria["work-culture"] = FewerThanActiveSignals(count=2)
+    return JevAtomicExecutionPolicy.model_validate(
+        baseline.model_dump(mode="python")
+        | {
+            "questions": questions,
+            "composition": baseline.composition.model_copy(update={"criteria": criteria}),
+        }
     )
 
 

@@ -24,6 +24,7 @@ from job_finder.evaluation.prompts import (
     EVALUATION_PROMPTS,
     PROMPTS,
     TITLE_DEDUPLICATION,
+    WORK_CULTURE,
     PromptDefinition,
     PromptPhase,
 )
@@ -147,6 +148,29 @@ def build_prompt_release(configuration: SearchConfiguration | None = None) -> Pr
     return PromptRelease(
         id=PromptReleaseId(digest),
         name=RELEASE_NAME if prompts == PROMPTS else f"release-{digest}",
+        content_digest=digest,
+        versions=versions,
+    )
+
+
+def build_work_culture_candidate_release(baseline: PromptRelease) -> PromptRelease:
+    if any(version.definition.criterion == WORK_CULTURE.criterion for version in baseline.versions):
+        raise PromptReleaseError("Prompt release already contains the work-culture criterion")
+    work_culture = build_prompt_version(WORK_CULTURE)
+    first_profile = next(
+        index
+        for index, version in enumerate(baseline.versions)
+        if version.definition.phase == "profile"
+    )
+    versions = (
+        *baseline.versions[:first_profile],
+        work_culture,
+        *baseline.versions[first_profile:],
+    )
+    digest = _digest([[version.definition.name, version.id] for version in versions])
+    return PromptRelease(
+        id=PromptReleaseId(digest),
+        name=f"release-{digest}",
         content_digest=digest,
         versions=versions,
     )

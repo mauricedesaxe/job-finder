@@ -9,6 +9,7 @@ from job_finder.evaluation.prompt_releases import (
     EVALUATION_OUTPUT_SCHEMA,
     MODEL,
     build_prompt_release,
+    build_work_culture_candidate_release,
     build_prompt_version,
 )
 from job_finder.evaluation.prompts import PROMPTS, PromptDefinition
@@ -85,6 +86,18 @@ def test_derives_stable_content_identities() -> None:
 
     assert first == second
     assert all(len(version.id) == 64 for version in first.versions)
+
+
+def test_builds_work_culture_candidate_from_an_immutable_baseline() -> None:
+    baseline = build_prompt_release()
+    candidate = build_work_culture_candidate_release(baseline)
+
+    assert baseline.id == "4a97113e9adf11dcf56b8aecdb0414cf7ce484ef30935546f2d42b6dadaf1dc0"
+    assert candidate.id == "a1db57ec4b220f6553b6e28f385139aa325a035098351564460da0a690b7ec1e"
+    assert candidate.name == f"release-{candidate.id}"
+    assert [version.definition.criterion for version in candidate.versions][4] == "work-culture"
+    assert candidate.versions[:4] == baseline.versions[:4]
+    assert candidate.versions[5:] == baseline.versions[4:]
 
 
 def test_default_configuration_exactly_preserves_the_legacy_release() -> None:
