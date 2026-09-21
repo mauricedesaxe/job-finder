@@ -81,6 +81,14 @@ from job_finder.review.models import (
     ReviewQueue,
     ReviewSubmission,
 )
+from job_finder.review.operations import (
+    FailureSample,
+    OperationsHealth,
+    OperationsService,
+    OperationsSnapshot,
+    PipelineRunSummary,
+    unknown_operations_service,
+)
 from job_finder.review.postgres import ReviewService
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
@@ -116,9 +124,11 @@ def create_review_app(
     settings: ReviewAppSettings,
     *,
     readiness: ReadinessProbe = lambda: None,
+    operations_service: OperationsService | None = None,
     actor: str = "owner",
     now: DateTimeClock = lambda: datetime.now(UTC),
 ) -> FastHTML:
+    operations = operations_service or unknown_operations_service()
     app = FastHTML(
         before=Beforeware(
             _require_owner,
@@ -162,8 +172,21 @@ def create_review_app(
         return await _submit_login(request, settings, login_failures)
 
     @app.route("/", methods=["GET"])
-    def home() -> RedirectResponse:
-        return RedirectResponse("/review", status_code=303)
+    def home(request: Request) -> HTMLResponse:
+        try:
+            snapshot = operations.load()
+        except psycopg.Error:
+            return _state_response(
+                "Operations status is unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        return HTMLResponse(
+            _document(_operations_page(snapshot, csrf_token), title="Job Finder operations")
+        )
 
     @app.route("/review", methods=["GET"])
     def review_page(request: Request) -> HTMLResponse:
@@ -649,6 +672,151 @@ def _review_page(queue: ReviewQueue, csrf_token: str) -> object:
         *_day_sections(queue),
         cls="review-shell",
     )
+
+
+def _operations_page(snapshot: OperationsSnapshot, csrf_token: str) -> object:
+    health_title, health_detail = {
+        OperationsHealth.CAUGHT_UP: (
+            "Caught up",
+            "No queued work or current failures need attention.",
+        ),
+        OperationsHealth.WORKING: (
+            "Work is in progress",
+            "The pipeline has active or retryable work.",
+        ),
+        OperationsHealth.ACTION_REQUIRED: (
+            "Action required",
+            "A terminal failure or the latest pipeline run needs attention.",
+        ),
+        OperationsHealth.UNKNOWN: (
+            "Status unknown",
+            "No pipeline run or queued work has been recorded yet.",
+        ),
+    }[snapshot.health]
+    return Main(
+        authenticated_masthead(csrf_token, current="operations"),
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1(health_title),
+            P(health_detail, cls="operations-intro"),
+            cls=f"operations-header health-{snapshot.health.value}",
+        ),
+        Div(
+            _metric("Pending", snapshot.queues.pending, "pending", "pending"),
+            _metric("Leased", snapshot.queues.leased, "leased", "leased"),
+            _metric("Retrying", snapshot.queues.retrying, "retrying", "retrying"),
+            _metric("Completed", snapshot.queues.completed, "completed", "completed"),
+            _metric(
+                "Terminal",
+                snapshot.queues.terminal_error,
+                "terminal error",
+                "terminal errors",
+            ),
+            cls="operations-metrics",
+            aria_label="Job work queue",
+        ),
+        Div(
+            Div(
+                Small("Recorded model spend", cls="eyebrow"),
+                Strong(f"${snapshot.spend.known_usd:,.4f}", cls="spend-value"),
+                P(
+                    _count_phrase(
+                        snapshot.spend.unknown_attempts,
+                        "attempt has no recorded cost",
+                        "attempts have no recorded cost",
+                    ),
+                    cls="operations-muted",
+                ),
+                cls="operations-panel spend-panel",
+            ),
+            Div(
+                Small("Dagster control plane", cls="eyebrow"),
+                H2("Schedule status unavailable"),
+                P(
+                    "Dagster schedule status is not available here yet. "
+                    + "PostgreSQL does not infer or duplicate schedule state.",
+                    cls="operations-muted",
+                ),
+                cls="operations-panel",
+            ),
+            cls="operations-grid",
+        ),
+        _runs_panel(snapshot.recent_runs),
+        _failures_panel(snapshot.failures),
+        cls="review-shell operations-shell",
+    )
+
+
+def _metric(label: str, value: int, singular: str, plural: str) -> object:
+    return Div(
+        Small(label),
+        Strong(str(value)),
+        Span(_count_phrase(value, singular, plural)),
+    )
+
+
+def _count_phrase(value: int, singular: str, plural: str) -> str:
+    return f"{value} {singular if value == 1 else plural}"
+
+
+def _runs_panel(runs: tuple[PipelineRunSummary, ...]) -> object:
+    rows = (
+        Ul(*(_run_row(run) for run in runs), cls="operations-list")
+        if runs
+        else P("No pipeline runs recorded.", cls="operations-empty")
+    )
+    return Div(
+        Small("Recent activity", cls="eyebrow"),
+        H2("Pipeline runs"),
+        rows,
+        cls="operations-section",
+    )
+
+
+def _run_row(run: PipelineRunSummary) -> object:
+    timing = _format_timestamp(run.started_at)
+    if run.completed_at is not None:
+        elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
+        timing = f"{timing} · {_format_duration(elapsed)}"
+    return Li(
+        Div(Strong(run.kind.replace("_", " ").title()), Span(run.status, cls="run-status")),
+        Small(timing),
+    )
+
+
+def _failures_panel(failures: tuple[FailureSample, ...]) -> object:
+    rows = (
+        Ul(*(_failure_row(failure) for failure in failures), cls="operations-list failure-list")
+        if failures
+        else P("No recent failures recorded.", cls="operations-empty")
+    )
+    return Div(
+        Small("Bounded sample", cls="eyebrow"),
+        H2("Recent failures"),
+        rows,
+        cls="operations-section",
+    )
+
+
+def _failure_row(failure: FailureSample) -> object:
+    return Li(
+        Div(Strong(failure.source.title()), Span(_format_timestamp(failure.occurred_at))),
+        P(failure.summary),
+    )
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_duration(total_seconds: int) -> str:
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def _day_sections(queue: ReviewQueue) -> list[object]:
@@ -1204,6 +1372,29 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .login-card input { width: 100%; min-height: 48px; padding: 0.75rem; border: 2px solid var(--line); border-radius: 0; background: var(--surface-raised); color: var(--ink); }
 .login-card button { width: 100%; min-height: 48px; margin-top: 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
 .error { padding: 0.75rem; border: 2px solid var(--line); background: var(--caution); color: var(--accent-ink); font-weight: 800; }
+.operations-header { margin-top: 1.25rem; padding: clamp(1.5rem, 5vw, 3rem); border: 2px solid var(--line); background: var(--panel); box-shadow: 8px 8px 0 var(--shadow); }
+.operations-header.health-caught_up { box-shadow: 8px 8px 0 var(--acid); }
+.operations-header.health-working, .operations-header.health-unknown { box-shadow: 8px 8px 0 var(--caution); }
+.operations-header.health-action_required { background: var(--caution); color: var(--accent-ink); }
+.operations-intro { max-width: 54ch; margin: 1rem 0 0; font-size: 1.08rem; line-height: 1.55; }
+.operations-metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 2rem; border: 2px solid var(--line); background: var(--panel); }
+.operations-metrics > div { min-width: 0; padding: 0.8rem; border-right: 2px solid var(--line); }
+.operations-metrics > div:last-child { border-right: 0; }
+.operations-metrics small, .operations-metrics strong, .operations-metrics span { display: block; }
+.operations-metrics small { text-transform: uppercase; letter-spacing: 0.08em; font-weight: 900; }
+.operations-metrics strong { margin-top: 0.25rem; font: 700 2rem Georgia, 'Times New Roman', serif; }
+.operations-metrics span { margin-top: 0.15rem; color: var(--muted); font-size: 0.8rem; }
+.operations-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin-top: 1.25rem; }
+.operations-panel, .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
+.spend-value { display: block; font: 700 clamp(2rem, 6vw, 4rem) Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
+.operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
+.operations-section { margin-top: 1.25rem; }
+.operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
+.operations-list li { padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
+.operations-list li > div { display: flex; justify-content: space-between; gap: 1rem; }
+.operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
+.run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
+.failure-list p { margin-bottom: 0; overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) {
   :root {
     --ink: #f3f0e7;
@@ -1241,6 +1432,10 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .change-link { grid-column: 2; grid-row: 1 / 3; }
   .card-topline { align-items: flex-start; flex-direction: column; }
   .job-description { max-height: none; overflow: visible; }
+  .operations-metrics { grid-template-columns: 1fr; }
+  .operations-metrics > div { border-right: 0; border-bottom: 2px solid var(--line); }
+  .operations-metrics > div:last-child { border-bottom: 0; }
+  .operations-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 360px) {
   .masthead-label { display: none; }
