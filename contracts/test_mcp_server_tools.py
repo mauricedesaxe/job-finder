@@ -5,7 +5,7 @@ from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Callable
 from uuid import UUID, uuid4
 
 import psycopg
@@ -86,13 +86,14 @@ _TOOL_NAMES = {
     "configuration_revision_get",
     "configuration_activate",
 }
-_ACTIVATION_RESULT = TypeAdapter(ActivateReleaseTargetResult)
+_ACTIVATION_RESULT: TypeAdapter[ActivateReleaseTargetResult] = TypeAdapter(
+    ActivateReleaseTargetResult
+)
 
 
-def _unwrap_tool_union(content: dict[str, Any] | None) -> dict[str, Any]:
+def _unwrap_tool_union(content: dict[str, object] | None) -> object:
     assert content is not None
-    wrapped = content.get("result")
-    return wrapped if isinstance(wrapped, dict) else content
+    return content.get("result", content)
 
 
 @pytest.fixture
