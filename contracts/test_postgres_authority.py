@@ -152,22 +152,42 @@ def authority_schema() -> Iterator[str]:
             )
 
 
-def _expected_migrations() -> tuple[str, ...]:
-    return tuple(path.name for path in sorted(MIGRATIONS_PATH.glob("*.sql")))
+EXPECTED_MIGRATIONS = (
+    "0001_authoritative_job_state.sql",
+    "0002_model_call_response_model.sql",
+    "0003_one_review_event_per_item.sql",
+    "0004_evaluation_manifests.sql",
+    "0005_dagster_orchestration.sql",
+    "0006_stored_prompt_execution.sql",
+    "0007_model_call_request_messages.sql",
+    "0008_pending_usage_response_model.sql",
+    "0009_frozen_daily_reviews.sql",
+    "0010_review_event_revisions.sql",
+    "0011_review_queue.sql",
+    "0012_company_application_cooldown.sql",
+    "0013_snapshot_compensation.sql",
+    "0014_snapshot_corrections.sql",
+    "0015_manifest_idempotency.sql",
+    "0016_search_configuration_revisions.sql",
+    "0017_search_configuration_publications.sql",
+    "0018_published_search_configuration_pointers.sql",
+    "0019_configuration_publication_receipts.sql",
+    "0020_pipeline_run_configuration_revisions.sql",
+    "0021_typesafe_model_provider.sql",
+)
 
 
 def test_migrations_are_repeatable(authority_schema: str) -> None:
-    expected = _expected_migrations()
     with _connection(authority_schema) as connection:
         first = apply_migrations(connection)
         second = apply_migrations(connection)
 
-        assert first == expected
+        assert first == EXPECTED_MIGRATIONS
         assert list(first) == sorted(first)
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (len(expected),)
+        ).fetchone() == (len(EXPECTED_MIGRATIONS),)
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -183,7 +203,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = tuple(executor.map(migrate_for_index, range(2)))
 
-    assert results[0] == results[1] == _expected_migrations()
+    assert results[0] == results[1] == EXPECTED_MIGRATIONS
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
