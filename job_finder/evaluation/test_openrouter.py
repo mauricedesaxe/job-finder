@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -18,6 +19,7 @@ from job_finder.evaluation.models import (
     TerminalOperationalError,
     ModelCallAttempt,
     ModelCallContext,
+    ProviderRequestObservation,
 )
 from job_finder.evaluation.openrouter import (
     HttpResponse,
@@ -480,6 +482,24 @@ def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
     attempts: list[ModelCallAttempt] = []
     completion_calls = 0
     generation_calls = 0
+    observations: list[ProviderRequestObservation] = []
+    generation_responses = iter(
+        (
+            HttpResponse(404, '{"error":{"message":"not ready"}}'),
+            HttpResponse(
+                200,
+                json.dumps(
+                    {
+                        "data": {
+                            "tokens_prompt": 12,
+                            "tokens_completion": 4,
+                            "total_cost": 0.00012,
+                        }
+                    }
+                ),
+            ),
+        )
+    )
 
     def send(
         _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
@@ -497,18 +517,7 @@ def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
         assert headers["authorization"] == "Bearer secret"
         assert generation_id == "generation-1"
         assert timeout == 30.0
-        return HttpResponse(
-            200,
-            json.dumps(
-                {
-                    "data": {
-                        "tokens_prompt": 12,
-                        "tokens_completion": 4,
-                        "total_cost": 0.00012,
-                    }
-                }
-            ),
-        )
+        return next(generation_responses)
 
     result = evaluate_prompt(
         prompt,
@@ -524,17 +533,30 @@ def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
         generation_sender=get_generation,
         retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
         sleep=lambda _delay: None,
+        clock=iter((0.0, 0.1, 1.0, 1.2, 2.0, 2.3)).__next__,
         now=lambda: NOW,
+        observe_request=observations.append,
     )
 
     assert isinstance(result, CriterionAccepted)
     assert completion_calls == 1
-    assert generation_calls == 1
+    assert generation_calls == 2
     assert len(attempts) == 1
     assert attempts[0].status == "accepted"
     assert attempts[0].input_tokens == 12
     assert attempts[0].output_tokens == 4
     assert str(attempts[0].cost_usd) == "0.00012"
+    assert observations == [
+        ProviderRequestObservation(latency_ms=100, usage_complete=False),
+        ProviderRequestObservation(latency_ms=200),
+        ProviderRequestObservation(
+            input_tokens=12,
+            output_tokens=4,
+            cost_usd=Decimal("0.00012"),
+            resolves_prior_usage=True,
+            latency_ms=300,
+        ),
+    ]
 
 
 def test_returns_one_retryable_attempt_when_generation_usage_stays_unavailable() -> None:
@@ -542,6 +564,7 @@ def test_returns_one_retryable_attempt_when_generation_usage_stays_unavailable()
     attempts: list[ModelCallAttempt] = []
     completion_calls = 0
     generation_calls = 0
+    observations: list[ProviderRequestObservation] = []
 
     def send(
         _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
@@ -572,6 +595,7 @@ def test_returns_one_retryable_attempt_when_generation_usage_stays_unavailable()
         retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
         sleep=lambda _delay: None,
         now=lambda: NOW,
+        observe_request=observations.append,
     )
 
     assert isinstance(result, RetryableOperationalError)
@@ -582,6 +606,9 @@ def test_returns_one_retryable_attempt_when_generation_usage_stays_unavailable()
     assert attempts[0].status == "retryable_error"
     assert attempts[0].provider_response_id == "generation-1"
     assert attempts[0].response_model == "google/gemini-2.5-flash-001"
+    assert len(observations) == 3
+    assert not observations[0].usage_complete
+    assert all(observation.usage_complete for observation in observations[1:])
 
 
 def test_resumes_usage_lookup_without_reissuing_the_completion() -> None:

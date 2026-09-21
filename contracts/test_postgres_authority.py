@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
+import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from secrets import token_hex
-from threading import Barrier
+from threading import Barrier, Event
 from typing import LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -56,6 +57,9 @@ from job_finder.database import (
     apply_migrations,
 )
 from job_finder.evaluation import (
+    CompletedEvaluationExecution,
+    EvaluateManifestCommand,
+    FailedEvaluationExecution,
     EvaluationManifestCase,
     LangfuseProjection,
     LangfuseUnavailable,
@@ -70,10 +74,12 @@ from job_finder.evaluation import (
     include_review_event,
     list_manifests,
     load_projection_queue_status,
+    load_evaluation_execution_by_key,
     load_prompt_release,
     load_run,
     preview_manifest,
     run_manifest,
+    exchange_rate_snapshot_digest,
 )
 from job_finder.evaluation.models import (
     CriterionAccepted,
@@ -82,6 +88,7 @@ from job_finder.evaluation.models import (
     TerminalOperationalError,
     ModelCallContext,
     PromptAccepted,
+    ProviderRequestObservation,
     PromptReleaseId,
     Qualified,
     Rejected,
@@ -186,6 +193,7 @@ EXPECTED_MIGRATIONS = (
     "0021_typesafe_model_provider.sql",
     "0022_relevance_releases.sql",
     "0023_unbounded_review_event_notes.sql",
+    "0024_evaluation_run_executions.sql",
 )
 
 
@@ -233,7 +241,10 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-1] == "0023_unbounded_review_event_notes.sql"
+        assert apply_migrations(connection)[-2:] == (
+            "0023_unbounded_review_event_notes.sql",
+            "0024_evaluation_run_executions.sql",
+        )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
         assert len(note) == 2001
@@ -3266,6 +3277,598 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
             )
 
 
+def test_concurrent_manifest_execution_calls_provider_once(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+    command = EvaluateManifestCommand(
+        idempotency_key="evaluation:concurrent",
+        manifest_id=manifest_id,
+        target=target,
+        implementation_ref="concurrency-test",
+    )
+    evaluator_entered = Barrier(2)
+    second_connected = Event()
+    second_backend_pid: list[int] = []
+    allow_first_to_finish = Event()
+    factory_calls: list[int] = []
+    evaluator_calls: list[int] = []
+
+    def execute(worker: int) -> object:
+        with _connection(authority_schema) as connection:
+            if worker == 2:
+                second_backend_pid.append(connection.info.backend_pid)
+                second_connected.set()
+
+            def create_evaluator(
+                stored_rates: ExchangeRateSnapshot,
+                _record: Callable[[ProviderRequestObservation], None],
+            ) -> Callable[[EvaluationManifestCase, ReleaseTarget, int], EvaluationResult]:
+                factory_calls.append(worker)
+                assert stored_rates == rates
+
+                def evaluate(
+                    _case: EvaluationManifestCase,
+                    case_target: ReleaseTarget,
+                    trial: int,
+                ) -> EvaluationResult:
+                    evaluator_calls.append(worker)
+                    assert case_target == target
+                    assert trial == 0
+                    if len(evaluator_calls) == 1:
+                        evaluator_entered.wait(timeout=5)
+                        assert allow_first_to_finish.wait(timeout=5)
+                    return Qualified(reason="Expected positive.", profile_name="profile")
+
+                return evaluate
+
+            return run_manifest(
+                connection,
+                command=command,
+                create_exchange_rates=lambda: rates,
+                create_evaluator=create_evaluator,
+                now=lambda: now,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(execute, 1)
+        evaluator_entered.wait(timeout=5)
+        second = executor.submit(execute, 2)
+        assert second_connected.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        with _connection(authority_schema) as observer:
+            while True:
+                wait_state = observer.execute(
+                    "SELECT wait_event_type, wait_event FROM pg_stat_activity WHERE pid = %s",
+                    (second_backend_pid[0],),
+                ).fetchone()
+                if wait_state == ("Lock", "advisory"):
+                    break
+                if time.monotonic() >= deadline:
+                    pytest.fail("second evaluator did not contend on the advisory lock")
+                time.sleep(0.01)
+        allow_first_to_finish.set()
+        first_execution = first.result(timeout=5)
+        second_execution = second.result(timeout=5)
+
+    assert isinstance(first_execution, CompletedEvaluationExecution)
+    assert second_execution == first_execution
+    assert factory_calls == [1]
+    assert evaluator_calls == [1]
+
+
+def test_same_connection_manifest_execution_is_rejected_before_database_work(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        command = EvaluateManifestCommand(
+            idempotency_key="evaluation:same-connection",
+            manifest_id=manifest_id,
+            target=target,
+            implementation_ref="same-connection-test",
+        )
+        evaluator_entered = Event()
+        allow_first_to_finish = Event()
+
+        def create_evaluator(
+            _rates: ExchangeRateSnapshot,
+            _record: Callable[[ProviderRequestObservation], None],
+        ) -> Callable[[EvaluationManifestCase, ReleaseTarget, int], EvaluationResult]:
+            def evaluate(
+                _case: EvaluationManifestCase,
+                _target: ReleaseTarget,
+                _trial: int,
+            ) -> EvaluationResult:
+                evaluator_entered.set()
+                assert allow_first_to_finish.wait(timeout=5)
+                return Qualified(reason="Expected positive.", profile_name="profile")
+
+            return evaluate
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                run_manifest,
+                connection,
+                command=command,
+                create_exchange_rates=lambda: rates,
+                create_evaluator=create_evaluator,
+                now=lambda: now,
+            )
+            assert evaluator_entered.wait(timeout=5)
+            side_effects: list[str] = []
+            try:
+                with pytest.raises(RuntimeError, match="already active on this connection"):
+                    run_manifest(
+                        connection,
+                        command=command,
+                        create_exchange_rates=lambda: side_effects.append("rates") or rates,
+                        create_evaluator=lambda _rates, _record: side_effects.append("evaluator")
+                        or (lambda _case, _target, _trial: Rejected(reason="unexpected")),
+                        now=lambda: now,
+                    )
+            finally:
+                allow_first_to_finish.set()
+            assert isinstance(first.result(timeout=5), CompletedEvaluationExecution)
+        assert side_effects == []
+
+
+def test_terminal_execution_retries_and_mismatches_have_no_side_effects(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        command = EvaluateManifestCommand(
+            idempotency_key="evaluation:terminal",
+            manifest_id=manifest_id,
+            target=target,
+            implementation_ref="terminal-test",
+        )
+        completed = run_manifest(
+            connection,
+            command=command,
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, record: (
+                lambda _case, _target, _trial: Qualified(
+                    reason="Expected positive.", profile_name="profile"
+                )
+            ),
+            now=lambda: now,
+        )
+        side_effects: list[str] = []
+        repeated = run_manifest(
+            connection,
+            command=command,
+            create_exchange_rates=lambda: side_effects.append("rates") or rates,
+            create_evaluator=lambda _rates, _record: side_effects.append("evaluator")
+            or (lambda _case, _target, _trial: Rejected(reason="unexpected")),
+            now=lambda: now,
+        )
+
+        assert repeated == completed
+        assert side_effects == []
+        with pytest.raises(ValueError, match="different evaluation execution"):
+            run_manifest(
+                connection,
+                command=command.model_copy(update={"implementation_ref": "different"}),
+                create_exchange_rates=lambda: side_effects.append("rates") or rates,
+                create_evaluator=lambda _rates, _record: side_effects.append("evaluator")
+                or (lambda _case, _target, _trial: Rejected(reason="unexpected")),
+                now=lambda: now,
+            )
+        assert side_effects == []
+
+
+def test_interrupted_and_exceptional_executions_fail_without_replay(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        interrupted_command = EvaluateManifestCommand(
+            idempotency_key="evaluation:interrupted",
+            manifest_id=manifest_id,
+            target=target,
+            implementation_ref="interrupted-test",
+        )
+        interrupted_id = hashlib.sha256(
+            f"evaluation_execution:{interrupted_command.idempotency_key}".encode()
+        ).hexdigest()
+        connection.execute(
+            """
+            INSERT INTO evaluation_run_executions (
+              id, idempotency_key, manifest_id, prompt_release_id,
+              relevance_release_id, implementation_ref, state,
+              exchange_rate_snapshot, exchange_rate_digest, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)
+            """,
+            (
+                interrupted_id,
+                interrupted_command.idempotency_key,
+                manifest_id,
+                target.prompt_release_id,
+                target.relevance_release_id,
+                interrupted_command.implementation_ref,
+                Jsonb(rates.model_dump(mode="json")),
+                exchange_rate_snapshot_digest(rates),
+                now,
+            ),
+        )
+        side_effects: list[str] = []
+        interrupted = run_manifest(
+            connection,
+            command=interrupted_command,
+            create_exchange_rates=lambda: side_effects.append("rates") or rates,
+            create_evaluator=lambda _rates, _record: side_effects.append("evaluator")
+            or (lambda _case, _target, _trial: Rejected(reason="unexpected")),
+            now=lambda: now,
+        )
+        assert isinstance(interrupted, FailedEvaluationExecution)
+        assert interrupted.failure.code == "interrupted_execution"
+        assert interrupted.telemetry is None
+        assert side_effects == []
+
+        exception_command = interrupted_command.model_copy(
+            update={"idempotency_key": "evaluation:exception"}
+        )
+
+        def exceptional_factory(
+            _rates: ExchangeRateSnapshot,
+            record: Callable[[ProviderRequestObservation], None],
+        ) -> Callable[[EvaluationManifestCase, ReleaseTarget, int], EvaluationResult]:
+            def evaluate(
+                _case: EvaluationManifestCase,
+                _target: ReleaseTarget,
+                _trial: int,
+            ) -> EvaluationResult:
+                record(
+                    ProviderRequestObservation(
+                        input_tokens=7,
+                        output_tokens=2,
+                        cost_usd=Decimal("0.03"),
+                        latency_ms=50,
+                    )
+                )
+                raise RuntimeError("provider response processing failed")
+
+            return evaluate
+
+        failed = run_manifest(
+            connection,
+            command=exception_command,
+            create_exchange_rates=lambda: rates,
+            create_evaluator=exceptional_factory,
+            now=lambda: now,
+        )
+        assert isinstance(failed, FailedEvaluationExecution)
+        assert failed.failure.code == "unexpected_exception"
+        assert failed.failure.error_type == "RuntimeError"
+        assert failed.telemetry is not None
+        assert failed.telemetry.request_count == 1
+        assert failed.telemetry.input_tokens == 7
+        assert "provider response processing failed" not in failed.failure.message
+
+        retry_side_effects: list[str] = []
+        assert (
+            run_manifest(
+                connection,
+                command=exception_command,
+                create_exchange_rates=lambda: retry_side_effects.append("rates") or rates,
+                create_evaluator=lambda _rates, _record: retry_side_effects.append("evaluator")
+                or (lambda _case, _target, _trial: Rejected(reason="unexpected")),
+                now=lambda: now,
+            )
+            == failed
+        )
+        assert retry_side_effects == []
+
+
+def test_evaluation_execution_sql_rejects_invalid_digest_and_transitions(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        values = (
+            "d" * 64,
+            "evaluation:invalid-sql",
+            manifest_id,
+            target.prompt_release_id,
+            target.relevance_release_id,
+            "sql-test",
+            Jsonb(rates.model_dump(mode="json")),
+            "0" * 64,
+            now,
+        )
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="evaluation_execution_rate_digest_matches",
+        ):
+            connection.execute(
+                """
+                INSERT INTO evaluation_run_executions (
+                  id, idempotency_key, manifest_id, prompt_release_id,
+                  relevance_release_id, implementation_ref, state,
+                  exchange_rate_snapshot, exchange_rate_digest, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)
+                """,
+                values,
+            )
+
+        valid_values = (*values[:-2], exchange_rate_snapshot_digest(rates), now)
+        connection.execute(
+            """
+            INSERT INTO evaluation_run_executions (
+              id, idempotency_key, manifest_id, prompt_release_id,
+              relevance_release_id, implementation_ref, state,
+              exchange_rate_snapshot, exchange_rate_digest, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)
+            """,
+            valid_values,
+        )
+        with pytest.raises(psycopg.errors.IntegrityConstraintViolation, match="must become"):
+            connection.execute(
+                "UPDATE evaluation_run_executions SET created_at = created_at WHERE id = %s",
+                (values[0],),
+            )
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="evaluation_execution_latency_percentiles_ordered",
+        ):
+            connection.execute(
+                """
+                UPDATE evaluation_run_executions
+                SET state = 'failed', request_count = 1, input_tokens = 0,
+                    output_tokens = 0, cost_usd = 0, usage_complete = TRUE,
+                    p50_latency_ms = 2, p95_latency_ms = 1,
+                    failure = '{"code":"failed","message":"failed"}', terminal_at = %s
+                WHERE id = %s
+                """,
+                (now, values[0]),
+            )
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="evaluation_execution_terminal_time_ordered",
+        ):
+            connection.execute(
+                """
+                UPDATE evaluation_run_executions
+                SET state = 'failed', request_count = 0, input_tokens = 0,
+                    output_tokens = 0, cost_usd = 0, usage_complete = TRUE,
+                    failure = '{"code":"failed","message":"failed"}', terminal_at = %s
+                WHERE id = %s
+                """,
+                (now - timedelta(seconds=1), values[0]),
+            )
+
+
+def test_evaluation_execution_sql_enforces_insert_linkage_and_json_shapes(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        command = EvaluateManifestCommand(
+            idempotency_key="evaluation:link-source",
+            manifest_id=manifest_id,
+            target=target,
+            implementation_ref="link-source-ref",
+        )
+        completed = run_manifest(
+            connection,
+            command=command,
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: (
+                lambda _case, _target, _trial: Qualified(
+                    reason="Expected positive.", profile_name="profile"
+                )
+            ),
+            now=lambda: now,
+        )
+        assert isinstance(completed, CompletedEvaluationExecution)
+        unlinked_run_id = "9" * 64
+        with connection.transaction():
+            connection.execute(
+                """
+                INSERT INTO evaluation_runs (
+                  id, idempotency_key, manifest_id, prompt_release_id,
+                  relevance_release_id, expected_result_count, result_count,
+                  false_positive_count, false_negative_count,
+                  operational_failure_count, critical_false_positive_count,
+                  false_positive_rate, false_negative_rate, implementation_ref,
+                  completed_at
+                )
+                SELECT %s, 'evaluation:unlinked-run', manifest_id, prompt_release_id,
+                       relevance_release_id, expected_result_count, result_count,
+                       false_positive_count, false_negative_count,
+                       operational_failure_count, critical_false_positive_count,
+                       false_positive_rate, false_negative_rate, 'unlinked-ref', completed_at
+                FROM evaluation_runs WHERE id = %s
+                """,
+                (unlinked_run_id, completed.run.id),
+            )
+            connection.execute(
+                """
+                INSERT INTO evaluation_case_results (
+                  id, run_id, manifest_id, prompt_release_id,
+                  relevance_release_id, case_position, trial_index,
+                  expected_outcome, actual_outcome, failure_kind, reason
+                )
+                SELECT encode(sha256(convert_to(%s || ':' || id, 'UTF8')), 'hex'),
+                       %s, manifest_id, prompt_release_id, relevance_release_id,
+                       case_position, trial_index, expected_outcome, actual_outcome,
+                       failure_kind, reason
+                FROM evaluation_case_results WHERE run_id = %s
+                """,
+                (unlinked_run_id, unlinked_run_id, completed.run.id),
+            )
+
+        running_values = (
+            "e" * 64,
+            "evaluation:forged-link",
+            manifest_id,
+            target.prompt_release_id,
+            target.relevance_release_id,
+            "forged-ref",
+            Jsonb(rates.model_dump(mode="json")),
+            exchange_rate_snapshot_digest(rates),
+            now,
+        )
+        connection.execute(
+            """
+            INSERT INTO evaluation_run_executions (
+              id, idempotency_key, manifest_id, prompt_release_id,
+              relevance_release_id, implementation_ref, state,
+              exchange_rate_snapshot, exchange_rate_digest, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)
+            """,
+            running_values,
+        )
+        with pytest.raises(
+            psycopg.errors.ForeignKeyViolation,
+            match="evaluation_execution_exact_completed_run",
+        ):
+            connection.execute(
+                """
+                UPDATE evaluation_run_executions
+                SET state = 'completed', request_count = 0, input_tokens = 0,
+                    output_tokens = 0, cost_usd = 0, usage_complete = TRUE,
+                    run_id = %s, terminal_at = %s
+                WHERE id = %s
+                """,
+                (unlinked_run_id, now, running_values[0]),
+            )
+
+        for index, state in enumerate(("completed", "failed")):
+            with pytest.raises(
+                psycopg.errors.IntegrityConstraintViolation,
+                match="must start running",
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO evaluation_run_executions (
+                      id, idempotency_key, manifest_id, prompt_release_id,
+                      relevance_release_id, implementation_ref, state, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, 'direct-ref', %s, %s)
+                    """,
+                    (
+                        f"{index + 30:064x}",
+                        f"evaluation:direct-{state}",
+                        manifest_id,
+                        target.prompt_release_id,
+                        target.relevance_release_id,
+                        state,
+                        now,
+                    ),
+                )
+
+        invalid_snapshots = (
+            {"rates": [], "source": "fallback", "observed_at": now.isoformat()},
+            {"rates": {"EUR": True}, "source": "fallback", "observed_at": now.isoformat()},
+            {"rates": {"EUR": "1.1"}, "source": "other", "observed_at": now.isoformat()},
+            {"rates": {"EUR": "1.1"}, "source": "fallback", "observed_at": "nope"},
+            {
+                "rates": {"EUR": "1.1"},
+                "source": "fallback",
+                "observed_at": now.isoformat(),
+                "extra": True,
+            },
+        )
+        for index, snapshot in enumerate(invalid_snapshots):
+            with pytest.raises(
+                psycopg.errors.CheckViolation,
+                match="evaluation_execution_rate_snapshot_shape",
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO evaluation_run_executions (
+                      id, idempotency_key, manifest_id, prompt_release_id,
+                      relevance_release_id, implementation_ref, state,
+                      exchange_rate_snapshot, exchange_rate_digest, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, 'shape-test', 'running', %s,
+                      encode(sha256(convert_to(canonical_job_finder_json(%s), 'UTF8')), 'hex'), %s)
+                    """,
+                    (
+                        f"{index + 1:064x}",
+                        f"evaluation:invalid-shape:{index}",
+                        manifest_id,
+                        target.prompt_release_id,
+                        target.relevance_release_id,
+                        Jsonb(snapshot),
+                        Jsonb(snapshot),
+                        now,
+                    ),
+                )
+
+        invalid_failures = (
+            {},
+            {"code": "", "message": "message"},
+            {"code": "code", "message": ""},
+            {"code": "code", "message": "message", "error_type": 1},
+            {"code": "code", "message": "message", "extra": True},
+        )
+        for index, failure in enumerate(invalid_failures):
+            execution_id = f"{index + 10:064x}"
+            idempotency_key = f"evaluation:invalid-failure:{index}"
+            connection.execute(
+                """
+                INSERT INTO evaluation_run_executions (
+                  id, idempotency_key, manifest_id, prompt_release_id,
+                  relevance_release_id, implementation_ref, state,
+                  exchange_rate_snapshot, exchange_rate_digest, created_at
+                ) VALUES (%s, %s, %s, %s, %s, 'failure-test', 'running', %s, %s, %s)
+                """,
+                (
+                    execution_id,
+                    idempotency_key,
+                    manifest_id,
+                    target.prompt_release_id,
+                    target.relevance_release_id,
+                    Jsonb(rates.model_dump(mode="json")),
+                    exchange_rate_snapshot_digest(rates),
+                    now,
+                ),
+            )
+            with pytest.raises(
+                psycopg.errors.CheckViolation,
+                match="evaluation_execution_failure_shape",
+            ):
+                connection.execute(
+                    """
+                    UPDATE evaluation_run_executions
+                    SET state = 'failed', request_count = 0, input_tokens = 0,
+                        output_tokens = 0, cost_usd = 0, usage_complete = TRUE,
+                        failure = %s, terminal_at = %s
+                    WHERE id = %s
+                    """,
+                    (Jsonb(failure), now, execution_id),
+                )
+
+
+def test_exchange_rate_snapshot_digest_matches_postgres_for_unicode_keys(
+    authority_schema: str,
+) -> None:
+    snapshot = ExchangeRateSnapshot(
+        rates={"EURO-€": Decimal("1.10")},
+        source="fallback",
+        observed_at=datetime(2026, 9, 21, 12, 0, tzinfo=UTC),
+    )
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        row = connection.execute(
+            """
+            SELECT encode(
+              sha256(convert_to(canonical_job_finder_json(%s), 'UTF8')),
+              'hex'
+            )
+            """,
+            (Jsonb(snapshot.model_dump(mode="json")),),
+        ).fetchone()
+    assert row == (exchange_rate_snapshot_digest(snapshot),)
+
+
 def test_runs_trials_rejects_operational_failures_and_retries_projection(
     authority_schema: str,
 ) -> None:
@@ -3385,6 +3988,12 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         apply_migrations(connection)
         historical = load_run(connection, historical_run_id)
         assert historical.target is None
+        historical_execution = load_evaluation_execution_by_key(connection, "evaluation:historical")
+        assert isinstance(historical_execution, CompletedEvaluationExecution)
+        assert historical_execution.state == "completed"
+        assert historical_execution.exchange_rates is None
+        assert historical_execution.telemetry is None
+        assert historical_execution.run == historical
         assert connection.execute(
             "SELECT bool_and(relevance_release_id IS NULL) FROM evaluation_case_results WHERE run_id = %s",
             (historical_run_id,),
@@ -3465,25 +4074,36 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
                 return Qualified(reason="Expected positive.", profile_name="profile")
             return Rejected(reason="Expected negative.")
 
-        baseline = run_manifest(
+        rates = ExchangeRateSnapshot(
+            rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now
+        )
+        baseline_execution = run_manifest(
             connection,
-            manifest_id=manifest.id,
-            target=baseline_target,
-            evaluator=baseline_evaluator,
-            implementation_ref="baseline-ref",
-            completed_at=now,
-            idempotency_key="evaluation:baseline",
+            command=EvaluateManifestCommand(
+                manifest_id=manifest.id,
+                target=baseline_target,
+                implementation_ref="baseline-ref",
+                idempotency_key="evaluation:baseline",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: baseline_evaluator,
+            now=lambda: now,
         )
         repeated = run_manifest(
             connection,
-            manifest_id=manifest.id,
-            target=baseline_target,
-            evaluator=baseline_evaluator,
-            implementation_ref="baseline-ref",
-            completed_at=now,
-            idempotency_key="evaluation:baseline",
+            command=EvaluateManifestCommand(
+                manifest_id=manifest.id,
+                target=baseline_target,
+                implementation_ref="baseline-ref",
+                idempotency_key="evaluation:baseline",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: baseline_evaluator,
+            now=lambda: now,
         )
-        assert repeated == baseline
+        assert isinstance(baseline_execution, CompletedEvaluationExecution)
+        baseline = baseline_execution.run
+        assert repeated == baseline_execution
         assert baseline.target == baseline_target
         assert baseline_calls == 4
         assert connection.execute(
@@ -3516,18 +4136,21 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
                 ("2" * 64, faithful_release.id, baseline.id),
             )
 
-        with pytest.raises(ValueError, match="different evaluation run"):
+        with pytest.raises(ValueError, match="different evaluation execution"):
             run_manifest(
                 connection,
-                manifest_id=manifest.id,
-                target=ReleaseTarget(
-                    prompt_release_id=baseline_release.id,
-                    relevance_release_id=faithful_release.id,
+                command=EvaluateManifestCommand(
+                    manifest_id=manifest.id,
+                    target=ReleaseTarget(
+                        prompt_release_id=baseline_release.id,
+                        relevance_release_id=faithful_release.id,
+                    ),
+                    implementation_ref="baseline-ref",
+                    idempotency_key="evaluation:baseline",
                 ),
-                evaluator=baseline_evaluator,
-                implementation_ref="baseline-ref",
-                completed_at=now,
-                idempotency_key="evaluation:baseline",
+                create_exchange_rates=lambda: rates,
+                create_evaluator=lambda _rates, _record: baseline_evaluator,
+                now=lambda: now,
             )
 
         def candidate_evaluator(
@@ -3544,15 +4167,20 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
                 return Qualified(reason="Incorrect pass.", profile_name="profile")
             return Rejected(reason="Expected negative.")
 
-        candidate = run_manifest(
+        candidate_execution = run_manifest(
             connection,
-            manifest_id=manifest.id,
-            target=candidate_target,
-            evaluator=candidate_evaluator,
-            implementation_ref="candidate-ref",
-            completed_at=now,
-            idempotency_key="evaluation:candidate",
+            command=EvaluateManifestCommand(
+                manifest_id=manifest.id,
+                target=candidate_target,
+                implementation_ref="candidate-ref",
+                idempotency_key="evaluation:candidate",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: candidate_evaluator,
+            now=lambda: now,
         )
+        assert isinstance(candidate_execution, CompletedEvaluationExecution)
+        candidate = candidate_execution.run
         promotion = decide_prompt_promotion(
             connection,
             baseline_run_id=baseline.id,
@@ -3617,6 +4245,63 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
             "SELECT attempt_count FROM langfuse_projection_items WHERE id = %s",
             (delivered.projection_id,),
         ).fetchone() == (2,)
+
+
+def _seed_evaluation_execution_context(
+    connection: psycopg.Connection[tuple[object, ...]],
+    now: datetime,
+) -> tuple[str, ReleaseTarget, ExchangeRateSnapshot]:
+    apply_migrations(connection)
+    prompt_release = bootstrap_prompt_release(connection)
+    pipeline_run_id = uuid4()
+    _insert_prompt_run(connection, pipeline_run_id, prompt_release.id, now)
+    decision_id = _insert_review_decision(
+        connection, pipeline_run_id, prompt_release.id, now, 91, "qualified"
+    )
+    assert enqueue_qualified_review_item(connection, decision_id, now.date())
+    review_item = load_review_queue(connection).items[0]
+    feedback = record_review(
+        connection,
+        ReviewSubmission(
+            review_item_id=review_item.id,
+            evaluation_id=review_item.evaluation_id,
+            snapshot_id=review_item.snapshot_id,
+            decision="pursue",
+            target_profile="applied-ai-product-engineer",
+            primary_reason="technology-fit",
+            actor="owner",
+            created_at=now,
+        ),
+    )
+    assert isinstance(feedback, ReviewSaved)
+    include_review_event(
+        connection,
+        review_event_id=feedback.review_event_id,
+        critical=False,
+        reason="Execution lifecycle contract fixture.",
+        actor="owner",
+        created_at=now,
+        idempotency_key=f"curation:execution:{pipeline_run_id}",
+    )
+    manifest = create_manifest(
+        connection,
+        policy=ManifestPolicy(),
+        created_at=now,
+        created_by="contract",
+        idempotency_key=f"manifest:execution:{pipeline_run_id}",
+    )
+    relevance_release = store_relevance_release(
+        connection,
+        build_relevance_release(build_gemini_policy(prompt_release)),
+        created_at=now,
+        created_by="contract",
+    )
+    target = ReleaseTarget(
+        prompt_release_id=prompt_release.id,
+        relevance_release_id=relevance_release.id,
+    )
+    rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now)
+    return manifest.id, target, rates
 
 
 def _insert_candidate_release(

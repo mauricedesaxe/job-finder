@@ -32,6 +32,7 @@ from job_finder.evaluation.models import (
     CriterionAccepted,
     ModelCallAttempt,
     ModelCallContext,
+    ProviderRequestObservation,
     RetryableOperationalError,
     TerminalOperationalError,
 )
@@ -352,6 +353,7 @@ def test_retries_transient_responses_with_exponential_backoff() -> None:
     )
     delays: list[float] = []
     latencies: list[int] = []
+    attempts: list[ProviderRequestObservation] = []
 
     result = evaluate_prompt(
         prompt,
@@ -362,11 +364,22 @@ def test_retries_transient_responses_with_exponential_backoff() -> None:
         sleep=delays.append,
         clock=iter((0.0, 0.1, 1.0, 1.2, 2.0, 2.3)).__next__,
         observe_request=latencies.append,
+        observe_attempt=attempts.append,
     )
 
     assert isinstance(result, JevCriterionObservation)
     assert delays == [0.25, 0.75]
     assert latencies == [100, 200, 300]
+    assert attempts == [
+        ProviderRequestObservation(latency_ms=100),
+        ProviderRequestObservation(latency_ms=200),
+        ProviderRequestObservation(
+            input_tokens=100,
+            output_tokens=4,
+            cost_usd=Decimal("0.0000042"),
+            latency_ms=300,
+        ),
+    ]
 
 
 def test_reports_the_last_retryable_status_after_exhausting_every_attempt() -> None:
@@ -400,6 +413,7 @@ def test_reports_the_last_retryable_status_after_exhausting_every_attempt() -> N
 
 def test_maps_terminal_network_and_invalid_response_errors() -> None:
     prompt = build_prompt_release().versions[0]
+    mismatched_attempts: list[ProviderRequestObservation] = []
 
     terminal = evaluate_prompt(
         prompt,
@@ -428,6 +442,16 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
             status_code=200, body="not-json"
         ),
     )
+    mismatched = evaluate_prompt(
+        prompt,
+        {"job": "Remote in Europe"},
+        api_key="secret",
+        sender=lambda _url, _headers, _body, _timeout: JevHttpResponse(
+            status_code=200,
+            body=_multi_response_body({"unexpected_question": 0.5}),
+        ),
+        observe_attempt=mismatched_attempts.append,
+    )
 
     assert isinstance(terminal, TerminalOperationalError)
     assert terminal.error_code == "http_401"
@@ -435,6 +459,15 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
     assert network.error_code == "network_error"
     assert isinstance(invalid, TerminalOperationalError)
     assert invalid.error_code == "invalid_response"
+    assert isinstance(mismatched, TerminalOperationalError)
+    assert mismatched_attempts == [
+        ProviderRequestObservation(
+            input_tokens=100,
+            output_tokens=1,
+            cost_usd=Decimal("0.0000042"),
+            latency_ms=0,
+        )
+    ]
 
 
 def test_rejects_an_answer_set_that_does_not_match_the_requested_questions() -> None:
