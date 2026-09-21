@@ -19,6 +19,7 @@ from job_finder.evaluation.jev import (
     JevHttpResponse,
     JevRunMetrics,
     JevRetryPolicy,
+    JevSender,
     JevSystemOneResponse,
     evaluate_prompt,
     evaluate_persisted_prompt,
@@ -158,6 +159,82 @@ def test_atomic_policy_counts_staffing_signals_in_code() -> None:
     assert "recruiter_for_client=0.900" in result.result.reason
 
 
+def test_atomic_policy_fails_disqualified_criteria_with_one_minus_the_max_signal() -> None:
+    prompt = next(
+        version
+        for version in build_prompt_release().versions
+        if version.definition.criterion == "role-quality"
+    )
+
+    def send(
+        _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+    ) -> JevHttpResponse:
+        questions = cast(dict[str, object], body["questions"])
+        probabilities = dict.fromkeys(questions, 0.1)
+        probabilities["enterprise_stack"] = 0.9
+        return JevHttpResponse(status_code=200, body=_multi_response_body(probabilities))
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Senior Java/Spring engineer maintaining internal dashboards."},
+        api_key="secret",
+        sender=send,
+        policy="atomic",
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(result, JevCriterionObservation)
+    assert not result.result.passed
+    assert abs(result.pass_probability - 0.1) < 1e-9
+    assert "failed" in result.result.reason
+    assert "enterprise_stack=0.900" in result.result.reason
+
+
+def test_atomic_policy_profiles_gate_on_both_positive_and_exclusion_signals() -> None:
+    prompt = next(
+        version
+        for version in build_prompt_release().versions
+        if version.definition.criterion == "early-stage-product-engineer"
+    )
+    values = {"job": "Founding engineer owning the MVP from idea to production."}
+
+    def send(probabilities: Mapping[str, float]) -> JevSender:
+        def sender(
+            _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+        ) -> JevHttpResponse:
+            questions = cast(dict[str, object], body["questions"])
+            return JevHttpResponse(
+                status_code=200,
+                body=_multi_response_body({**dict.fromkeys(questions, 0.1), **probabilities}),
+            )
+
+        return sender
+
+    blocked = evaluate_prompt(
+        prompt,
+        values,
+        api_key="secret",
+        sender=send({"owns_product_delivery": 0.9, "excluded_primary_shape": 0.8}),
+        policy="atomic",
+        clock=iter((0.0, 0.1)).__next__,
+    )
+    admitted = evaluate_prompt(
+        prompt,
+        values,
+        api_key="secret",
+        sender=send({"owns_product_delivery": 0.9, "excluded_primary_shape": 0.1}),
+        policy="atomic",
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(blocked, JevCriterionObservation)
+    assert not blocked.result.passed
+    assert abs(blocked.pass_probability - 0.2) < 1e-9
+    assert isinstance(admitted, JevCriterionObservation)
+    assert admitted.result.passed
+    assert abs(admitted.pass_probability - 0.9) < 1e-9
+
+
 @pytest.mark.parametrize("status", (408, 429, 500, 529, 599))
 def test_maps_retryable_http_errors(status: int) -> None:
     prompt = build_prompt_release().versions[0]
@@ -207,6 +284,35 @@ def test_retries_transient_responses_with_exponential_backoff() -> None:
     assert latencies == [100, 200, 300]
 
 
+def test_reports_the_last_retryable_status_after_exhausting_every_attempt() -> None:
+    prompt = build_prompt_release().versions[0]
+    responses = iter(
+        (
+            JevHttpResponse(status_code=500, body="{}"),
+            JevHttpResponse(status_code=502, body="{}"),
+            JevHttpResponse(status_code=503, body="{}"),
+        )
+    )
+    delays: list[float] = []
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Remote in Europe"},
+        api_key="secret",
+        sender=lambda _url, _headers, _body, _timeout: next(responses),
+        retry_policy=JevRetryPolicy(max_attempts=3, base_delay_seconds=0.25),
+        sleep=delays.append,
+        clock=iter((0.0, 0.1, 1.0, 1.1, 2.0, 2.1)).__next__,
+    )
+
+    assert result == RetryableOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="http_503",
+        reason="Jev returned HTTP 503",
+    )
+    assert delays == [0.25, 0.5]
+
+
 def test_maps_terminal_network_and_invalid_response_errors() -> None:
     prompt = build_prompt_release().versions[0]
 
@@ -244,6 +350,25 @@ def test_maps_terminal_network_and_invalid_response_errors() -> None:
     assert network.error_code == "network_error"
     assert isinstance(invalid, TerminalOperationalError)
     assert invalid.error_code == "invalid_response"
+
+
+def test_rejects_an_answer_set_that_does_not_match_the_requested_questions() -> None:
+    prompt = build_prompt_release().versions[0]
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Remote in Europe"},
+        api_key="secret",
+        sender=lambda _url, _headers, _body, _timeout: JevHttpResponse(
+            status_code=200, body=_response_body(0.75, "unrequested-question")
+        ),
+    )
+
+    assert result == TerminalOperationalError(
+        prompt_name=prompt.definition.name,
+        error_code="invalid_response",
+        reason="Jev response did not contain exactly the requested answers",
+    )
 
 
 def test_persists_each_retry_and_the_accepted_jev_result() -> None:
@@ -297,6 +422,9 @@ def test_persists_each_retry_and_the_accepted_jev_result() -> None:
     assert attempts[1].input_tokens == 100
     assert attempts[1].output_tokens == 4
     assert attempts[1].observed_at == observed_at
+    assert attempts[1].raw_response == json.loads(
+        _multi_response_body(dict.fromkeys(ATOMIC_QUESTIONS["remote-europe-eligible"], 0.75))
+    )
 
 
 def test_reuses_a_persisted_jev_result_without_calling_the_provider() -> None:

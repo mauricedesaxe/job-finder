@@ -1174,6 +1174,13 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
             """,
             (raw_url,),
         ).fetchone()
+        jev_provenance = connection.execute(
+            """
+            SELECT raw_response, input_tokens, output_tokens, cost_usd, response_model
+            FROM model_call_attempts
+            WHERE status = 'accepted' AND provider = 'typesafe'
+            """
+        ).fetchall()
 
     assert summary.terminal_count == 1
     assert stored == (
@@ -1187,6 +1194,77 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
     )
     assert counts == (7, 8)
     assert review_item == ("qualified", now.date(), True)
+    assert len(jev_provenance) == 6
+    for raw_response, input_tokens, output_tokens, cost_usd, response_model in jev_provenance:
+        assert raw_response is not None
+        assert cast(dict[str, object], raw_response)["answers"]
+        assert cast(int, input_tokens) > 0
+        assert cast(int, output_tokens) > 0
+        assert cost_usd is not None
+        assert response_model == JEV_MODEL
+
+
+def test_profile_stage_rejection_runs_every_criterion_before_rejecting(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://jobs.lever.co/acme/profile-reject"
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-profile-reject", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        summary = process_claimed_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
+                model_sender=_unexpected_model_call,
+                jev_sender=_signal_free_jev_call,
+            ),
+            openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
+            owner_token=uuid4(),
+            observed_at=now,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=False,
+        )
+        stored = connection.execute(
+            """
+            SELECT d.outcome, d.decision_stage, d.matched_profile, w.state,
+                   w.terminal_decision_id = d.id, d.reason LIKE %s
+            FROM evaluation_decisions d
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            JOIN job_work_items w ON w.job_id = s.job_id
+            WHERE s.raw_url = %s
+            """,
+            ("Jev atomic policy failed:%", raw_url),
+        ).fetchone()
+        model_attempts = connection.execute(
+            """
+            SELECT provider, status, count(*)
+            FROM model_call_attempts
+            GROUP BY provider, status
+            """
+        ).fetchall()
+        evaluated_criteria = connection.execute(
+            "SELECT count(DISTINCT operation_key) FROM model_call_attempts"
+        ).fetchone()
+
+    assert summary.terminal_count == 1
+    assert stored == ("rejected", "evaluation", None, "completed", True, True)
+    assert model_attempts == [("typesafe", "accepted", 6)]
+    assert evaluated_criteria == (6,)
 
 
 def _prepare_run(connection: psycopg.Connection[tuple[object, ...]], key: str, now: datetime):
@@ -1282,6 +1360,15 @@ def _qualifying_jev_call(
             }
         ),
     )
+
+
+def _signal_free_jev_call(
+    _url: str,
+    _headers: Mapping[str, str],
+    body: dict[str, object],
+    _timeout: float,
+) -> JevHttpResponse:
+    return _jev_response(body, 0.0)
 
 
 def _retryable_jev_call(

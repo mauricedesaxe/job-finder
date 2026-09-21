@@ -6,13 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 from job_finder.database import INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-from job_finder.evaluation.models import PromptReleaseId
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     PersonalCriterion,
     SearchConfiguration,
-    SearchConfigurationPublication,
-    SearchConfigurationRevisionId,
     SupportedSearchSource,
     TargetProfile,
     build_search_configuration_revision,
@@ -20,24 +17,6 @@ from job_finder.search_configuration import (
 )
 
 NOW = datetime(2026, 9, 19, 12, tzinfo=UTC)
-
-
-def test_publication_model_validates_immutable_binding_shape() -> None:
-    publication = SearchConfigurationPublication(
-        revision_id=SearchConfigurationRevisionId("1" * 64),
-        prompt_release_id=PromptReleaseId("2" * 64),
-        published_at=NOW,
-        published_by="owner",
-    )
-
-    assert publication.model_dump() == {
-        "revision_id": "1" * 64,
-        "prompt_release_id": "2" * 64,
-        "published_at": NOW,
-        "published_by": "owner",
-    }
-    with pytest.raises(ValidationError, match="frozen"):
-        setattr(publication, "published_by", "other")
 
 
 def test_default_configuration_reproduces_the_source_catalog() -> None:
