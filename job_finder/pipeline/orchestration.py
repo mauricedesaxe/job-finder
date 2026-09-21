@@ -74,9 +74,10 @@ from job_finder.pipeline.state import (
     register_discoveries,
     terminally_fail_job_claim,
 )
-from job_finder.review import enqueue_qualified_review_item
+from job_finder.review.postgres import enqueue_qualified_review_item
 from job_finder.search_configuration import (
-    SEARCH_SOURCE_DOMAINS,
+    SearchQuery,
+    build_search_queries,
     load_search_configuration_revision,
 )
 
@@ -159,29 +160,25 @@ def discover_jobs(
     configuration = load_search_configuration_revision(
         connection, run.configuration_revision_id
     ).configuration
-    queries = tuple(
-        (keyword, SEARCH_SOURCE_DOMAINS[source])
-        for keyword in configuration.search_keywords
-        for source in configuration.enabled_sources
-    )
+    queries = build_search_queries(configuration)
 
-    def run_search(query: tuple[str, str]) -> SearchResult:
-        return boundaries.search(*query)
+    def run_search(query: SearchQuery) -> SearchResult:
+        return boundaries.search(query.keyword, query.domain)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = tuple(executor.map(run_search, queries))
     unavailable_count = 0
     discovered_count = 0
     new_work_count = 0
-    for (keyword, domain), result in zip(queries, results, strict=True):
+    for query, result in zip(queries, results, strict=True):
         if isinstance(result, JinaUnavailable):
             unavailable_count += 1
             continue
         registration = register_discoveries(
             connection,
             run_id=run.id,
-            keyword=keyword,
-            domain=domain,
+            keyword=query.keyword,
+            domain=query.domain,
             raw_urls=result.urls,
             discovered_at=discovered_at,
         )
