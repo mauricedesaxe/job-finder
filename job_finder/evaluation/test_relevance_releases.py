@@ -52,6 +52,30 @@ def test_exchange_rates_are_not_part_of_relevance_release_identity() -> None:
     assert "rates" not in first.policy.model_dump(mode="json")
 
 
+def test_model_development_question_creates_a_policy_only_candidate_release() -> None:
+    candidate_policy = build_jev_atomic_policy()
+    training_question = candidate_policy.questions["role-quality"]["primary_model_training"]
+    research_question = candidate_policy.questions["role-quality"]["model_architecture_research"]
+    baseline_questions = {
+        criterion: dict(questions) for criterion, questions in candidate_policy.questions.items()
+    }
+    del baseline_questions["role-quality"]["primary_model_training"]
+    del baseline_questions["role-quality"]["model_architecture_research"]
+    baseline_policy = candidate_policy.model_copy(update={"questions": baseline_questions})
+
+    baseline = build_relevance_release(baseline_policy)
+    candidate = build_relevance_release(candidate_policy)
+
+    assert "Treat fine-tuning an existing model as false" in training_question.instructions
+    assert "pretraining strategies" in research_question.instructions
+    assert "optimizes fine-tuning methods" in research_question.instructions
+    assert training_question.true.startswith("Training new base or foundation models")
+    assert baseline.id != candidate.id
+    assert baseline_policy.input_serialization == candidate_policy.input_serialization
+    assert baseline_policy.provider_adapter == candidate_policy.provider_adapter
+    assert baseline_policy.decision_composition == candidate_policy.decision_composition
+
+
 def test_policies_identify_the_actual_checked_in_execution_sources() -> None:
     prompt_release = build_prompt_release()
     evaluation_directory = Path(__file__).parent
