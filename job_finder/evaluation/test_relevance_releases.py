@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from job_finder.evaluation.models import ReleaseTarget
-from job_finder.evaluation.prompt_releases import build_prompt_release
+from job_finder.evaluation.prompt_releases import (
+    build_prompt_release,
+    build_work_culture_candidate_release,
+)
 from job_finder.evaluation.relevance_releases import (
     CodeArtifactIdentity,
     GeminiExecutionPolicy,
@@ -18,6 +21,7 @@ from job_finder.evaluation.relevance_releases import (
     build_jev_atomic_policy,
     build_jev_faithful_policy,
     build_relevance_release,
+    build_work_culture_candidate_policy,
     source_artifact_identity,
     validate_release_target,
 )
@@ -74,6 +78,36 @@ def test_model_development_question_creates_a_policy_only_candidate_release() ->
     assert baseline_policy.input_serialization == candidate_policy.input_serialization
     assert baseline_policy.provider_adapter == candidate_policy.provider_adapter
     assert baseline_policy.decision_composition == candidate_policy.decision_composition
+
+
+def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
+    baseline = build_jev_atomic_policy()
+    policy = build_work_culture_candidate_policy(baseline)
+    prompt_release = build_work_culture_candidate_release(build_prompt_release())
+    relevance_release = build_relevance_release(policy)
+    work_culture = policy.questions["work-culture"]
+
+    assert set(work_culture) == {
+        "extreme_intensity_culture",
+        "permanent_personal_availability",
+    }
+    assert policy.composition.criteria["work-culture"].model_dump() == {
+        "kind": "fewer_than_active_signals",
+        "count": 2,
+    }
+    assert policy.provider_adapter == baseline.provider_adapter
+    assert policy.decision_composition == baseline.decision_composition
+    assert relevance_release.id == (
+        "9e5135438df963af663db714da5138cd52c08e7b4f9b50f8cff2944859abfba1"
+    )
+    validate_release_target(
+        ReleaseTarget(
+            prompt_release_id=prompt_release.id,
+            relevance_release_id=relevance_release.id,
+        ),
+        prompt_release,
+        relevance_release,
+    )
 
 
 def test_policies_identify_the_actual_checked_in_execution_sources() -> None:

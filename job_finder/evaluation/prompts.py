@@ -196,6 +196,19 @@ FAIL: "Data engineer. Own Snowflake, dbt, Airflow, and CDC pipelines. AI tooling
 FAIL: "MLOps engineer. Manage GPU clusters, model deployments, monitoring, and on-call." -> operational platform work lacks product responsibility.""",
 )
 
+WORK_CULTURE = PromptDefinition(
+    name="job-finder-filter-work-culture",
+    criterion="work-culture",
+    phase="filter",
+    system_message="""You are a work-culture filter. Evaluate only whether the listing combines hype-heavy culture expectations with permanent personal availability.
+
+PASS unless both of these facts are explicit:
+1. The expected working culture is described with multiple extreme-intensity commitments such as elite-only builders, maximum intensity, relentless hustle, total or 100% commitment, obsession with winning, or rejecting ordinary working hours.
+2. Each engineer must remain personally available seven days a week, 24/7, at all times, or without protected off-call periods as a continuing expectation.
+
+PASS ordinary startup ambition, a fast pace, high ownership, or isolated marketing superlatives. PASS services that operate 24/7. PASS shared or rotating on-call, incident response, runbooks, postmortems, observability, and owning production services. FAIL only when both extreme-intensity culture expectations and permanent individual availability are present.""",
+)
+
 EVALUATION_PROMPTS = (
     LOCATION,
     COMPENSATION,
