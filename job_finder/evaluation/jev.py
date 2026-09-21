@@ -227,6 +227,9 @@ ATOMIC_QUESTIONS: Mapping[str, Mapping[str, JevNoulQuestionTemplate]] = MappingP
                 "core_blockchain_protocol": _atomic_question(
                     "Is the primary work blockchain consensus, cryptography, peer-to-peer networking, validator infrastructure, or core protocol development?"
                 ),
+                "mobile_specialist": _atomic_question(
+                    "Is this role primarily hands-on specialist mobile application engineering in Flutter/Dart, native iOS/Swift, or Android/Kotlin? Treat mobile as false when it is only the product domain, an integration target, an optional skill, or peripheral to a broader backend or full-stack TypeScript, Python, Go, or Rust role."
+                ),
             }
         ),
         "cheap-shop-placement": MappingProxyType(
