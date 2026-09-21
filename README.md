@@ -79,6 +79,7 @@ Open `.env` and replace these values:
 - `TYPESAFE_API_KEY`
 - `JOB_FINDER_REVIEW_PASSWORD`, with at least 12 characters
 - `JOB_FINDER_REVIEW_SESSION_SECRET`, with at least 32 random characters
+- `JOB_FINDER_DAGSTER_GRAPHQL_URL`, the review app's server-side Dagster GraphQL URL
 
 Generate a session secret with:
 
@@ -123,6 +124,9 @@ Open:
 - Search setup: <http://localhost:8080/configuration>
 
 Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
+The authenticated home reads and controls the four Job Finder schedules through
+Dagster's public GraphQL API. In deployment, set `JOB_FINDER_DAGSTER_GRAPHQL_URL`
+to the Dagster webserver's internal `/graphql` URL.
 
 ### 5. Set your job criteria
 

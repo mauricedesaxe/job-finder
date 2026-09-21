@@ -8,11 +8,28 @@ from typing import Never, cast
 from uuid import UUID
 
 import psycopg
+import pytest
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import ConfigurationEditorService
+from job_finder.review.control_plane import (
+    CONTROL_DEFINITIONS,
+    ControlConflict,
+    ControlPlaneService,
+    ControlPlaneSnapshot,
+    RunLaunchUncertain,
+    RunNowCommand,
+    RunNowResult,
+    RunStarted,
+    ScheduleChangeCommand,
+    ScheduleChangeResult,
+    ScheduleChanged,
+    ScheduleStateConflict,
+    ScheduleStatus,
+    ScheduleView,
+)
 from job_finder.review.models import (
     Compensation,
     ReviewConflict,
@@ -88,7 +105,8 @@ def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None
     assert "$1.2345" in response.text
     assert "4 attempts have no recorded cost" in response.text
     assert "OpenRouter did not respond" in response.text
-    assert "Dagster schedule status is not available here yet." in response.text
+    assert "Dagster could not be reached." in response.text
+    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
     assert 'aria-current="page">Operations' in response.text
     assert 'href="/review"' in response.text
     assert 'href="/configuration"' in response.text
@@ -118,6 +136,193 @@ def test_the_operations_home_reports_database_unavailability() -> None:
 
     assert response.status_code == 503
     assert "Operations status is unavailable" in response.text
+
+
+def test_the_operations_home_renders_all_live_schedule_controls() -> None:
+    client = _client(_queue(), controls=_control_service())
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    for definition in CONTROL_DEFINITIONS:
+        assert definition.label in response.text
+        assert definition.cadence in response.text
+        assert f'value="{definition.job_name}"' in response.text
+        assert f'value="{definition.schedule_name}"' in response.text
+    assert "Next: 2026-09-21 13:00 UTC" in response.text
+    assert response.text.count('action="/operations/run"') == 4
+    assert response.text.count('action="/operations/schedule"') == 4
+
+
+def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
+    calls: list[RunNowCommand] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False)
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/run",
+        data={"job_name": "job_finder", "idempotency_key": "private-key"},
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+@pytest.mark.parametrize("path", ["/operations/run", "/operations/schedule"])
+def test_operations_actions_require_the_owner_session_before_service_calls(path: str) -> None:
+    calls: list[object] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False),
+        change_schedule=lambda command: calls.append(command)
+        or ScheduleChanged(ScheduleStatus.STOPPED, False),
+    )
+    app = create_review_app(
+        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        _configuration_service(),
+        SETTINGS,
+        control_service=controls,
+        now=lambda: NOW,
+    )
+
+    response = TestClient(app).post(path, data={}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login?next=")
+    assert calls == []
+
+
+def test_run_now_rejects_a_malformed_form_without_calling_the_service() -> None:
+    calls: list[RunNowCommand] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False)
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/run",
+        data={"csrf_token": _csrf(client), "idempotency_key": "private-key"},
+    )
+
+    assert response.status_code == 400
+    assert "Malformed operations form" in response.text
+    assert calls == []
+
+
+def test_run_now_uses_actor_and_clock_then_redirects_with_an_allowlisted_notice() -> None:
+    calls: list[RunNowCommand] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("run-1", False)
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/run",
+        data={
+            "csrf_token": _csrf(client),
+            "job_name": "job_finder",
+            "idempotency_key": "private-key",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?notice=run-started"
+    assert calls == [
+        RunNowCommand(
+            job_name="job_finder",
+            idempotency_key="private-key",
+            actor="owner",
+            timestamp=NOW,
+        )
+    ]
+
+
+def test_uncertain_run_renders_an_exact_retry_form_with_the_same_private_key() -> None:
+    controls = _control_service(run_now=lambda _command: RunLaunchUncertain("No confirmation"))
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/run",
+        data={
+            "csrf_token": _csrf(client),
+            "job_name": "job_finder",
+            "idempotency_key": "the-same-private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert 'action="/operations/run"' in response.text
+    assert response.text.count('name="idempotency_key" value="the-same-private-key"') == 1
+    assert 'name="job_name" value="job_finder"' in response.text
+
+
+def test_run_now_integrity_conflict_is_reported_as_conflict() -> None:
+    controls = _control_service(run_now=lambda _command: ControlConflict("Duplicate runs"))
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/run",
+        data={
+            "csrf_token": _csrf(client),
+            "job_name": "job_finder",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "Duplicate runs" in response.text
+
+
+def test_schedule_change_reports_stale_state_without_redirecting() -> None:
+    calls: list[ScheduleChangeCommand] = []
+    controls = _control_service(
+        change_schedule=lambda command: calls.append(command)
+        or ScheduleStateConflict(
+            expected=ScheduleStatus.RUNNING,
+            observed=ScheduleStatus.STOPPED,
+        )
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/schedule",
+        data={
+            "csrf_token": _csrf(client),
+            "schedule_name": "job_finder_schedule",
+            "expected_state": "RUNNING",
+            "desired_state": "STOPPED",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "Expected RUNNING; observed STOPPED" in response.text
+    assert calls[0].actor == "owner"
+    assert calls[0].timestamp == NOW
+
+
+def test_schedule_change_redirects_after_a_verified_pause() -> None:
+    controls = _control_service(
+        change_schedule=lambda _command: ScheduleChanged(
+            status=ScheduleStatus.STOPPED, replayed=False
+        )
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/schedule",
+        data={
+            "csrf_token": _csrf(client),
+            "schedule_name": "job_finder_schedule",
+            "expected_state": "RUNNING",
+            "desired_state": "STOPPED",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?notice=schedule-paused"
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
@@ -723,6 +928,7 @@ def _client(
     submit: Submitter = _saved,
     *,
     operations: OperationsService | None = None,
+    controls: ControlPlaneService | None = None,
 ) -> TestClient:
     service = ReviewService(review_queue=lambda: queue, submit=submit)
     client = TestClient(
@@ -731,6 +937,7 @@ def _client(
             _configuration_service(),
             SETTINGS,
             operations_service=operations,
+            control_service=controls,
             now=lambda: NOW,
         )
     )
@@ -816,4 +1023,32 @@ def _configuration_service() -> ConfigurationEditorService:
         save=never,
         publish=never,
         activate=never,
+    )
+
+
+def _control_service(
+    *,
+    run_now: Callable[[RunNowCommand], RunNowResult] | None = None,
+    change_schedule: Callable[[ScheduleChangeCommand], ScheduleChangeResult] | None = None,
+) -> ControlPlaneService:
+    snapshot = ControlPlaneSnapshot(
+        schedules=tuple(
+            ScheduleView(
+                definition=definition,
+                status=ScheduleStatus.RUNNING,
+                next_tick=datetime(2026, 9, 21, 13, tzinfo=UTC),
+            )
+            for definition in CONTROL_DEFINITIONS
+        )
+    )
+
+    def unexpected(*_args: object) -> Never:
+        raise AssertionError("control operation was not expected")
+
+    return ControlPlaneService(
+        load=lambda: snapshot,
+        run_now=cast(Callable[..., Never], unexpected) if run_now is None else run_now,
+        change_schedule=cast(Callable[..., Never], unexpected)
+        if change_schedule is None
+        else change_schedule,
     )

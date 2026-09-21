@@ -36,6 +36,30 @@ class ReviewAppSettings(BaseModel):
         )
 
 
+class DagsterControlSettings(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    graphql_url: AnyHttpUrl
+    repository_location_name: str = Field(default="job_finder.dagster", min_length=1)
+    repository_name: str = Field(default="__repository__", min_length=1)
+    timeout_seconds: int = Field(default=5, gt=0, le=30)
+
+    @classmethod
+    def from_environment(cls) -> DagsterControlSettings:
+        return cls.model_validate(
+            {
+                "graphql_url": os.environ.get("JOB_FINDER_DAGSTER_GRAPHQL_URL"),
+                "repository_location_name": os.environ.get(
+                    "JOB_FINDER_DAGSTER_REPOSITORY_LOCATION", "job_finder.dagster"
+                ),
+                "repository_name": os.environ.get(
+                    "JOB_FINDER_DAGSTER_REPOSITORY_NAME", "__repository__"
+                ),
+                "timeout_seconds": os.environ.get("JOB_FINDER_DAGSTER_TIMEOUT_SECONDS", "5"),
+            }
+        )
+
+
 class LangfuseSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(
         frozen=True, extra="forbid", strict=True, validate_default=True
