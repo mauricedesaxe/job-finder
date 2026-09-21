@@ -37,6 +37,8 @@ _OUT_OF_SCOPE_TITLE_PATTERNS = (
     re.compile(r"\bagent platform\b", re.I),
     re.compile(r"\bdecentrali[sz]ed messaging engineer\b", re.I),
 )
+GENERIC_TITLE_REASON = "Generic / talent-pool title"
+NON_ROLE_TITLE_REASON = "Title does not identify a role"
 
 
 def structural_filter(job: JobListing) -> StructuralDecision:
@@ -49,9 +51,9 @@ def structural_filter(job: JobListing) -> StructuralDecision:
     if _is_careers_index(parsed.hostname, segments):
         return StructuralRejection(reason=f"Careers-index page, not a specific role ({job.url})")
     if any(pattern.search(job.title) for pattern in _GENERIC_TITLE_PATTERNS):
-        return StructuralRejection(reason=f"Generic / talent-pool title ({job.title})")
+        return StructuralRejection(reason=f"{GENERIC_TITLE_REASON} ({job.title})")
     if _ROLE_TITLE.search(job.title) is None:
-        return StructuralRejection(reason=f"Title does not identify a role ({job.title})")
+        return StructuralRejection(reason=f"{NON_ROLE_TITLE_REASON} ({job.title})")
     if any(pattern.search(job.title) for pattern in _OUT_OF_SCOPE_TITLE_PATTERNS):
         return StructuralRejection(reason=f"Out-of-scope role title ({job.title})")
     return StructuralPass()
