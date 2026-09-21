@@ -130,6 +130,26 @@ Build customer-facing AI features."""
     assert "Build customer-facing AI features." in inputs["early-stage-product-engineer"]
 
 
+def test_uses_structured_location_for_location_relevance() -> None:
+    release = build_prompt_release()
+    job = JOB.model_copy(
+        update={
+            "description": "Build customer-facing software.",
+            "location": "Hybrid (Vancouver, Canada)",
+        }
+    )
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        if version.definition.criterion == "remote-europe-eligible":
+            assert "Location: Hybrid (Vancouver, Canada)" in values["job"]
+            return _accepted(version, passed=False)
+        return _accepted(version, passed=True)
+
+    result = evaluate_job(job, release, evaluate, rates=RATES)
+
+    assert result == Rejected(reason="remote-europe-eligible")
+
+
 def test_returns_the_first_filter_result_in_catalog_order() -> None:
     release = build_prompt_release()
     calls: list[str] = []

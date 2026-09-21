@@ -53,9 +53,10 @@ def evaluate_job(
 
 
 def job_message(job: JobListing) -> str:
+    location = f"Location: {job.location}\n" if job.location else ""
     return f"""Job Title: {job.title}
 Company: {job.company}
-Source: {job.source}
+{location}Source: {job.source}
 URL: {job.url}
 
 Description:
