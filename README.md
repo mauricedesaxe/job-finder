@@ -20,8 +20,8 @@ This README has two setup paths:
 
 The steps below run the full application on your computer. The default search
 and evaluation criteria target senior product engineering and applied AI roles
-that can be worked remotely from Europe. Change those defaults before your
-first search if they do not fit you.
+that can be worked remotely from Europe. After starting the review app, replace
+these defaults from **Search setup** before launching your first search.
 
 ### 1. Install the requirements
 
@@ -99,36 +99,9 @@ source .env
 set +a
 ```
 
-### 4. Set your job criteria
+### 4. Start the review app
 
-The repository includes the original author's criteria. Review these files
-before spending API credit:
-
-- `job_finder/discovery/catalog.py` defines search terms and job-board domains.
-- `job_finder/evaluation/prompts.py` defines location, compensation, role, and
-  target-profile criteria.
-- `job_finder/jobs/structural_filter.py` rejects titles that are outside the
-  search scope before model evaluation.
-
-Edit the plain-text lists and prompts in those files. Then initialize the
-database and save the current prompt release:
-
-```sh
-uv run python -m scripts.bootstrap_postgres_prompts
-```
-
-The command prints the prompt release name and ID when setup succeeds.
-
-### 5. Start Job Finder
-
-Start Dagster in one terminal:
-
-```sh
-set -a; source .env; set +a
-DAGSTER_HOME="$PWD" uv run dagster dev -w workspace.yaml
-```
-
-Start the review app in a second terminal:
+Start the review app:
 
 ```sh
 set -a; source .env; set +a
@@ -136,12 +109,20 @@ uv run uvicorn scripts.serve_review:create_app --factory \
   --host 127.0.0.1 --port 8080
 ```
 
-Open:
+Open <http://localhost:8080> and log in with
+`JOB_FINDER_REVIEW_PASSWORD`.
 
-- Dagster: <http://localhost:3000>
-- Review queue: <http://localhost:8080>
+### 5. Set your job criteria
 
-Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
+Open **Search setup** at <http://localhost:8080/configuration>. Edit the search
+keywords, enabled job boards, personal criteria, and target profiles. Preview
+the changes, then select **Save draft**, **Publish saved draft**, and **Activate
+published draft** before launching your first search.
+
+The review app applies pending database migrations and seeds the initial
+configuration automatically. Criteria and profile changes also produce a new
+prompt candidate. Use the MCP release workflow to evaluate and approve that
+candidate before relying on it in production runs.
 
 ### Connect an MCP client
 
@@ -158,11 +139,26 @@ manifests, search configuration validation, preview, publication, history and
 activation, and Langfuse projection status. It applies pending database
 migrations before accepting requests.
 
+For immutable revision history, activation concurrency, prompt promotion, and
+rollback, see [Advanced search configuration](docs/search-configuration.md).
+
 ### 6. Run your first search
 
-Open Dagster, select **Jobs**, select **job_finder**, and launch a run. The run
-discovers listings, evaluates new work, and adds qualified jobs to the review
-queue. Refresh <http://localhost:8080> after the run completes.
+Start Dagster in another terminal:
+
+```sh
+set -a; source .env; set +a
+DAGSTER_HOME="$PWD" uv run dagster dev -w workspace.yaml
+```
+
+Open <http://localhost:3000>, select **Jobs**, select **job_finder**, and launch
+a run. The run discovers listings, evaluates new work, and adds qualified jobs
+to the review queue. Refresh <http://localhost:8080> after the run completes.
+
+When changing criteria or profiles later, stop Dagster while you publish and
+activate the configuration and complete the release approval flow. Restart it
+after both active identities are ready so a scheduled run cannot start between
+the two activations.
 
 Dagster starts these schedules automatically while `dagster dev` is running:
 
@@ -240,6 +236,7 @@ for example `fix: preserve the review decision after refresh`.
 | `job_finder/migrations/` | Ordered PostgreSQL schema migrations |
 | `contracts/` | PostgreSQL and Dagster integration tests |
 | `docs/architecture-rewrite.md` | Architecture decisions and system boundaries |
+| `docs/search-configuration.md` | Configuration publication, activation, provenance, and rollback |
 
 Keep pull requests focused, include tests for behavior changes, and explain how
 you verified the change.

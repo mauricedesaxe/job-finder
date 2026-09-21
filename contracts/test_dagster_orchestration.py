@@ -17,8 +17,14 @@ from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
     ActivateConfigurationCommand,
     ConfigurationActivated,
+    ConfigurationPublished,
+    DraftSaved,
+    PublishConfigurationCommand,
+    SaveDraftCommand,
     activate_search_configuration,
     load_published_active_search_configuration,
+    publish_search_configuration,
+    save_search_configuration_draft,
 )
 from job_finder.database import apply_migrations
 from job_finder.dagster import defs
@@ -27,7 +33,7 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
 from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse, JevRetryPolicy
-from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.prompt_releases import load_prompt_release
 from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
@@ -45,8 +51,7 @@ from job_finder.pipeline.state import (
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     SupportedSearchSource,
-    build_search_configuration_revision,
-    store_search_configuration_revision,
+    search_configuration_revision_id,
 )
 
 _LONG_MARKDOWN = (
@@ -141,40 +146,43 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
                 "enabled_sources": (SupportedSearchSource.LEVER,),
                 "personal_criteria": (
                     DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
-                        update={"instructions": "Use the newly activated criterion."}
+                        update={"instructions": "Use the newly published criterion."}
                     ),
                     *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
                 ),
             }
         )
-        revision = build_search_configuration_revision(
-            changed_configuration,
-            created_at=now + timedelta(minutes=1),
-            created_by="owner",
-        )
-        _ = store_search_configuration_revision(connection, revision)
-        release = store_prompt_release(
+        saved = save_search_configuration_draft(
             connection,
-            build_prompt_release(changed_configuration),
-            created_at=now + timedelta(minutes=1),
-            created_by="owner",
+            SaveDraftCommand(
+                expected_version=0,
+                configuration=changed_configuration,
+                actor="owner",
+                timestamp=now + timedelta(minutes=1),
+            ),
         )
-        connection.execute(
-            """
-            INSERT INTO search_configuration_publications (
-              revision_id, prompt_release_id, published_at, published_by
-            ) VALUES (%s, %s, %s, 'owner')
-            """,
-            (revision.id, release.id, now + timedelta(minutes=1)),
+        assert isinstance(saved, DraftSaved)
+        published = publish_search_configuration(
+            connection,
+            PublishConfigurationCommand(
+                idempotency_key="dagster:configuration-publication",
+                expected_draft_version=saved.draft.version,
+                expected_configuration_revision_id=search_configuration_revision_id(
+                    changed_configuration
+                ),
+                actor="owner",
+                timestamp=now + timedelta(minutes=2),
+            ),
         )
+        assert isinstance(published, ConfigurationPublished)
         activated = activate_search_configuration(
             connection,
             ActivateConfigurationCommand(
-                target_revision_id=revision.id,
+                target_revision_id=published.publication.revision_id,
                 expected_active_revision_id=initial.active.revision.id,
                 expected_generation=initial.active.generation,
                 actor="owner",
-                timestamp=now + timedelta(minutes=2),
+                timestamp=now + timedelta(minutes=3),
             ),
         )
         assert isinstance(activated, ConfigurationActivated)
@@ -183,7 +191,7 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
             connection,
             idempotency_key="dagster:configuration-pair-1",
             implementation_ref="commit-1",
-            started_at=now + timedelta(minutes=3),
+            started_at=now + timedelta(minutes=4),
             load_active_configuration=lambda _connection: pytest.fail(
                 "active configuration was reloaded"
             ),
@@ -193,7 +201,7 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
             connection,
             idempotency_key="dagster:configuration-pair-2",
             implementation_ref="commit-1",
-            started_at=now + timedelta(minutes=3),
+            started_at=now + timedelta(minutes=4),
             load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
@@ -205,17 +213,32 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
                 scrape=lambda _url: pytest.fail("scrape was called"),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
             ),
-            discovered_at=now + timedelta(minutes=3),
+            discovered_at=now + timedelta(minutes=4),
             max_workers=1,
         )
+        active_target = get_active_release_target(connection)
+        prompt_release = load_prompt_release(connection, second.prompt_release_id)
+        stored_provenance = connection.execute(
+            """
+            SELECT configuration_revision_id, prompt_release_id, relevance_release_id
+            FROM pipeline_runs WHERE id = %s
+            """,
+            (second.id,),
+        ).fetchone()
 
     assert first.configuration_revision_id == initial.publication.revision_id
     assert first.prompt_release_id == initial.publication.prompt_release_id
     assert resumed.configuration_revision_id == first.configuration_revision_id
     assert resumed.prompt_release_id == first.prompt_release_id
-    assert second.configuration_revision_id == revision.id
-    assert second.prompt_release_id == first.prompt_release_id
-    assert second.target == first.target
+    assert second.configuration_revision_id == published.publication.revision_id
+    assert published.publication.prompt_release_id != second.prompt_release_id
+    assert second.target == active_target.target == first.target
+    assert prompt_release.id == second.prompt_release_id
+    assert stored_provenance == (
+        second.configuration_revision_id,
+        second.prompt_release_id,
+        second.target.relevance_release_id,
+    )
     assert discovery.query_count == 1
     assert searches == [("configured search", "jobs.lever.co")]
 
