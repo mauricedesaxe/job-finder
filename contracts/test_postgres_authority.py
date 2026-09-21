@@ -3764,7 +3764,7 @@ def test_evaluation_execution_sql_enforces_insert_linkage_and_json_shapes(
                     ),
                 )
 
-        invalid_snapshots = (
+        invalid_snapshots: tuple[dict[str, object], ...] = (
             {"rates": [], "source": "fallback", "observed_at": now.isoformat()},
             {"rates": {"EUR": True}, "source": "fallback", "observed_at": now.isoformat()},
             {"rates": {"EUR": "1.1"}, "source": "other", "observed_at": now.isoformat()},
@@ -3802,7 +3802,7 @@ def test_evaluation_execution_sql_enforces_insert_linkage_and_json_shapes(
                     ),
                 )
 
-        invalid_failures = (
+        invalid_failures: tuple[dict[str, object], ...] = (
             {},
             {"code": "", "message": "message"},
             {"code": "code", "message": ""},
