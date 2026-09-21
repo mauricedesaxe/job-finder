@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from job_finder.discovery.catalog import (
     SEARCH_KEYWORDS,
     SEARCH_SOURCE_DOMAINS,
-    SupportedSearchSource,
+    SupportedSearchSource as SupportedSearchSource,
 )
 from job_finder.evaluation.models import PromptReleaseId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
