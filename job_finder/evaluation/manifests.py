@@ -286,17 +286,60 @@ EvaluationExecutionState = Annotated[
 _EXECUTION_ADAPTER: TypeAdapter[EvaluationExecutionState] = TypeAdapter(EvaluationExecutionState)
 
 
+class EvaluationTrialTransition(ManifestModel):
+    case_position: int = Field(ge=0)
+    trial_index: int = Field(ge=0)
+    baseline: EvaluationTrialResult
+    candidate: EvaluationTrialResult
+    transition: Literal["unchanged", "improvement", "regression", "changed_failure"]
+
+
+class EvaluationCaseTransition(ManifestModel):
+    case_position: int = Field(ge=0)
+    critical: bool
+    trials: tuple[EvaluationTrialTransition, ...]
+
+
+class EvaluationRunComparison(ManifestModel):
+    id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_target: ReleaseTarget
+    candidate_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_target: ReleaseTarget
+    cases: tuple[EvaluationCaseTransition, ...]
+    improvement_count: int = Field(ge=0)
+    regression_count: int = Field(ge=0)
+    eligible: bool
+    eligibility_failures: tuple[str, ...]
+
+
 class PromptPromotionDecision(ManifestModel):
     id: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_prompt_release_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_target: ReleaseTarget | None = None
     candidate_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     candidate_prompt_release_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_target: ReleaseTarget | None = None
+    comparison_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    eligible: bool | None = None
+    eligibility_failures: tuple[str, ...] = ()
     decision: Literal["approved", "rejected"]
     reason: str
     actor: str
     created_at: datetime
+
+    @model_validator(mode="after")
+    def targets_match_prompt_provenance(self) -> Self:
+        for prompt_release_id, target in (
+            (self.baseline_prompt_release_id, self.baseline_target),
+            (self.candidate_prompt_release_id, self.candidate_target),
+        ):
+            if target is not None and target.prompt_release_id != prompt_release_id:
+                raise ValueError("Promotion target must match prompt provenance")
+        return self
 
 
 CaseEvaluator = Callable[
@@ -780,66 +823,171 @@ def score_results(
     )
 
 
-def decide_prompt_promotion(
+def compare_runs(
+    manifest: EvaluationManifest,
+    baseline: EvaluationRun,
+    candidate: EvaluationRun,
+) -> EvaluationRunComparison:
+    if baseline.manifest_id != manifest.id or candidate.manifest_id != manifest.id:
+        raise ValueError("Baseline and candidate runs must use the supplied manifest")
+    if baseline.target is None or candidate.target is None:
+        raise ValueError("Run comparison requires exact release targets")
+    if baseline.target == candidate.target:
+        raise ValueError("Baseline and candidate release targets must differ")
+    baseline_results = _indexed_results(manifest, baseline)
+    candidate_results = _indexed_results(manifest, candidate)
+    baseline_metrics = score_results(manifest, baseline.results)
+    candidate_metrics = score_results(manifest, candidate.results)
+    if baseline.metrics != baseline_metrics or candidate.metrics != candidate_metrics:
+        raise ValueError("Run metrics must match case-level evidence")
+    cases: list[EvaluationCaseTransition] = []
+    improvements = 0
+    regressions = 0
+    for case in manifest.cases:
+        trials: list[EvaluationTrialTransition] = []
+        for trial_index in range(case.trial_count):
+            key = (case.position, trial_index)
+            baseline_result = baseline_results[key]
+            candidate_result = candidate_results[key]
+            transition = _transition(baseline_result, candidate_result)
+            improvements += transition == "improvement"
+            regressions += transition == "regression"
+            trials.append(
+                EvaluationTrialTransition(
+                    case_position=case.position,
+                    trial_index=trial_index,
+                    baseline=baseline_result,
+                    candidate=candidate_result,
+                    transition=transition,
+                )
+            )
+        cases.append(
+            EvaluationCaseTransition(
+                case_position=case.position,
+                critical=case.critical,
+                trials=tuple(trials),
+            )
+        )
+    failures = _promotion_failures(manifest.policy, baseline_metrics, candidate_metrics)
+    comparison_id = hashlib.sha256(
+        (f"evaluation_run_comparison_v1:{manifest.id}:" f"{baseline.id}:{candidate.id}").encode()
+    ).hexdigest()
+    return EvaluationRunComparison(
+        id=comparison_id,
+        manifest_id=manifest.id,
+        baseline_run_id=baseline.id,
+        baseline_target=baseline.target,
+        candidate_run_id=candidate.id,
+        candidate_target=candidate.target,
+        cases=tuple(cases),
+        improvement_count=improvements,
+        regression_count=regressions,
+        eligible=not failures,
+        eligibility_failures=failures,
+    )
+
+
+def preview_run_comparison(
+    connection: Connection, baseline_run_id: Digest, candidate_run_id: Digest
+) -> EvaluationRunComparison:
+    baseline = load_run(connection, baseline_run_id)
+    candidate = load_run(connection, candidate_run_id)
+    if baseline.manifest_id != candidate.manifest_id:
+        raise ValueError("Baseline and candidate runs must use the same manifest")
+    return compare_runs(load_manifest(connection, baseline.manifest_id), baseline, candidate)
+
+
+def record_prompt_promotion_decision(
     connection: Connection,
     *,
     baseline_run_id: Digest,
     candidate_run_id: Digest,
+    expected_comparison_id: Digest,
+    decision: Literal["approved", "rejected"],
+    reason: str,
     actor: str,
     created_at: datetime,
     idempotency_key: str,
 ) -> PromptPromotionDecision:
     _require_autocommit(connection)
-    existing = load_promotion_decision(connection, idempotency_key)
-    if existing is not None:
-        if (
-            existing.baseline_run_id != baseline_run_id
-            or existing.candidate_run_id != candidate_run_id
-            or existing.actor != actor
-        ):
-            raise ValueError("Idempotency key belongs to a different promotion decision")
-        return existing
-    baseline = load_run(connection, baseline_run_id)
-    candidate = load_run(connection, candidate_run_id)
-    if baseline.manifest_id != candidate.manifest_id:
-        raise ValueError("Baseline and candidate runs must use the same manifest")
-    if baseline.prompt_release_id == candidate.prompt_release_id:
-        raise ValueError("Baseline and candidate prompt releases must differ")
-    manifest = load_manifest(connection, candidate.manifest_id)
-    failures = _promotion_failures(manifest.policy, baseline.metrics, candidate.metrics)
-    decision: Literal["approved", "rejected"] = "approved" if not failures else "rejected"
-    reason = "Candidate clears every promotion check." if not failures else "; ".join(failures)
-    promotion_id = _digest({"kind": "prompt_promotion", "idempotency_key": idempotency_key})
-    promotion = PromptPromotionDecision(
-        id=promotion_id,
-        manifest_id=manifest.id,
-        baseline_run_id=baseline.id,
-        baseline_prompt_release_id=baseline.prompt_release_id,
-        candidate_run_id=candidate.id,
-        candidate_prompt_release_id=candidate.prompt_release_id,
-        decision=decision,
-        reason=reason,
-        actor=actor,
-        created_at=created_at,
-    )
+    if not reason.strip():
+        raise ValueError("Promotion decision reason must not be blank")
     with connection.transaction():
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (f"prompt_promotion:{idempotency_key}",),
+        )
+        existing = load_promotion_decision(connection, idempotency_key)
+        if existing is not None:
+            if (
+                existing.baseline_run_id != baseline_run_id
+                or existing.candidate_run_id != candidate_run_id
+                or existing.comparison_id != expected_comparison_id
+                or existing.decision != decision
+                or existing.reason != reason
+                or existing.actor != actor
+            ):
+                raise ValueError("Idempotency key belongs to a different promotion decision")
+            return existing
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"prompt_promotion_pair:{baseline_run_id}:{candidate_run_id}",),
+        )
+        comparison = preview_run_comparison(connection, baseline_run_id, candidate_run_id)
+        if comparison.id != expected_comparison_id:
+            raise ValueError("Promotion decision evidence is stale")
+        if decision == "approved" and not comparison.eligible:
+            raise ValueError("Ineligible release target cannot be approved")
+        duplicate = connection.execute(
+            """
+            SELECT 1 FROM prompt_promotion_decisions
+            WHERE baseline_run_id = %s AND candidate_run_id = %s
+            """,
+            (baseline_run_id, candidate_run_id),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("This run comparison already has a promotion decision")
+        baseline = load_run(connection, baseline_run_id)
+        candidate = load_run(connection, candidate_run_id)
+        promotion_id = _digest({"kind": "prompt_promotion", "idempotency_key": idempotency_key})
+        promotion = PromptPromotionDecision(
+            id=promotion_id,
+            manifest_id=comparison.manifest_id,
+            baseline_run_id=baseline.id,
+            baseline_prompt_release_id=comparison.baseline_target.prompt_release_id,
+            baseline_target=comparison.baseline_target,
+            candidate_run_id=candidate.id,
+            candidate_prompt_release_id=comparison.candidate_target.prompt_release_id,
+            candidate_target=comparison.candidate_target,
+            comparison_id=comparison.id,
+            eligible=comparison.eligible,
+            eligibility_failures=comparison.eligibility_failures,
+            decision=decision,
+            reason=reason,
+            actor=actor,
+            created_at=created_at,
+        )
         _ = connection.execute(
             """
             INSERT INTO prompt_promotion_decisions (
               id, idempotency_key, manifest_id, baseline_run_id,
               baseline_prompt_release_id, candidate_run_id,
-              candidate_prompt_release_id, decision, reason, baseline_metrics,
-              candidate_metrics, actor, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+              candidate_prompt_release_id, baseline_relevance_release_id,
+              candidate_relevance_release_id, comparison_id, decision, reason,
+              baseline_metrics, candidate_metrics, actor, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 promotion.id,
                 idempotency_key,
                 promotion.manifest_id,
                 promotion.baseline_run_id,
-                promotion.baseline_prompt_release_id,
+                comparison.baseline_target.prompt_release_id,
                 promotion.candidate_run_id,
-                promotion.candidate_prompt_release_id,
+                comparison.candidate_target.prompt_release_id,
+                comparison.baseline_target.relevance_release_id,
+                comparison.candidate_target.relevance_release_id,
+                promotion.comparison_id,
                 promotion.decision,
                 promotion.reason,
                 Jsonb(baseline.metrics.model_dump(mode="json")),
@@ -850,6 +998,35 @@ def decide_prompt_promotion(
         )
         enqueue_projection(connection, "prompt_promotion", promotion.id, promotion, created_at)
     return promotion
+
+
+def _indexed_results(
+    manifest: EvaluationManifest, run: EvaluationRun
+) -> dict[tuple[int, int], EvaluationTrialResult]:
+    indexed = {(result.case_position, result.trial_index): result for result in run.results}
+    required = {
+        (case.position, trial_index)
+        for case in manifest.cases
+        for trial_index in range(case.trial_count)
+    }
+    if len(indexed) != len(run.results) or set(indexed) != required:
+        raise ValueError("Run results must cover every manifest trial exactly once")
+    expected = {case.position: case.expected_outcome for case in manifest.cases}
+    if any(result.expected_outcome != expected[result.case_position] for result in run.results):
+        raise ValueError("Run results must match manifest expectations")
+    return indexed
+
+
+def _transition(
+    baseline: EvaluationTrialResult, candidate: EvaluationTrialResult
+) -> Literal["unchanged", "improvement", "regression", "changed_failure"]:
+    if baseline.failure_kind == candidate.failure_kind:
+        return "unchanged"
+    if baseline.failure_kind is not None and candidate.failure_kind is None:
+        return "improvement"
+    if baseline.failure_kind is None and candidate.failure_kind is not None:
+        return "regression"
+    return "changed_failure"
 
 
 def _load_current_cases(
@@ -1346,7 +1523,9 @@ def load_promotion_decision(
     row = connection.execute(
         """
         SELECT id, manifest_id, baseline_run_id, baseline_prompt_release_id,
-               candidate_run_id, candidate_prompt_release_id, decision, reason,
+               baseline_relevance_release_id, candidate_run_id,
+               candidate_prompt_release_id, candidate_relevance_release_id,
+               comparison_id, decision, reason, baseline_metrics, candidate_metrics,
                actor, created_at
         FROM prompt_promotion_decisions WHERE idempotency_key = %s
         """,
@@ -1360,12 +1539,29 @@ def load_promotion_decision(
             "manifest_id": row[1],
             "baseline_run_id": row[2],
             "baseline_prompt_release_id": row[3],
-            "candidate_run_id": row[4],
-            "candidate_prompt_release_id": row[5],
-            "decision": row[6],
-            "reason": row[7],
-            "actor": row[8],
-            "created_at": row[9],
+            "baseline_target": None
+            if row[4] is None
+            else {"prompt_release_id": row[3], "relevance_release_id": row[4]},
+            "candidate_run_id": row[5],
+            "candidate_prompt_release_id": row[6],
+            "candidate_target": None
+            if row[7] is None
+            else {"prompt_release_id": row[6], "relevance_release_id": row[7]},
+            "comparison_id": row[8],
+            "decision": row[9],
+            "reason": row[10],
+            "eligible": not _promotion_failures(
+                load_manifest(connection, str(row[1])).policy,
+                EvaluationMetrics.model_validate(row[11]),
+                EvaluationMetrics.model_validate(row[12]),
+            ),
+            "eligibility_failures": _promotion_failures(
+                load_manifest(connection, str(row[1])).policy,
+                EvaluationMetrics.model_validate(row[11]),
+                EvaluationMetrics.model_validate(row[12]),
+            ),
+            "actor": row[13],
+            "created_at": row[14],
         }
     )
 

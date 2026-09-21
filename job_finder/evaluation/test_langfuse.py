@@ -14,6 +14,8 @@ from job_finder.evaluation.models import (
     ModelRequestId,
     PromptReleaseId,
     PromptVersionId,
+    ReleaseTarget,
+    RelevanceReleaseId,
 )
 from job_finder.evaluation.langfuse import (
     LangfuseGateway,
@@ -64,6 +66,11 @@ def test_projects_manifest_run_and_promotion_with_stable_remote_identities() -> 
     assert promotion_response.remote_id == observations[1].trace_id
     assert repeated_run_response.remote_id == run_response.remote_id
     assert observations[0].observation_type == "EVALUATOR"
+    assert observations[0].input["run_id"] == "4" * 64
+    assert observations[0].input["target"] == {
+        "prompt_release_id": "5" * 64,
+        "relevance_release_id": "e" * 64,
+    }
     assert observations[1].observation_type == "EVENT"
     assert observations[2].observation_type == "GENERATION"
     assert observations[2].usage is not None
@@ -228,6 +235,10 @@ def _run() -> EvaluationRun:
         idempotency_key="run-1",
         manifest_id="1" * 64,
         prompt_release_id=PromptReleaseId("5" * 64),
+        target=ReleaseTarget(
+            prompt_release_id=PromptReleaseId("5" * 64),
+            relevance_release_id=RelevanceReleaseId("e" * 64),
+        ),
         implementation_ref="commit-1",
         metrics=EvaluationMetrics(
             result_count=1,
@@ -249,10 +260,43 @@ def _promotion() -> PromptPromotionDecision:
         manifest_id="1" * 64,
         baseline_run_id="7" * 64,
         baseline_prompt_release_id="8" * 64,
+        baseline_target=ReleaseTarget(
+            prompt_release_id=PromptReleaseId("8" * 64),
+            relevance_release_id=RelevanceReleaseId("b" * 64),
+        ),
         candidate_run_id="9" * 64,
         candidate_prompt_release_id="a" * 64,
+        candidate_target=ReleaseTarget(
+            prompt_release_id=PromptReleaseId("a" * 64),
+            relevance_release_id=RelevanceReleaseId("c" * 64),
+        ),
+        comparison_id="d" * 64,
+        eligible=True,
+        eligibility_failures=(),
         decision="approved",
         reason="Candidate clears every promotion check.",
         actor="owner",
         created_at=NOW,
     )
+
+
+def test_legacy_promotion_payload_preserves_unknown_release_targets() -> None:
+    promotion = PromptPromotionDecision.model_validate(
+        {
+            "id": "6" * 64,
+            "manifest_id": "1" * 64,
+            "baseline_run_id": "7" * 64,
+            "baseline_prompt_release_id": "8" * 64,
+            "candidate_run_id": "9" * 64,
+            "candidate_prompt_release_id": "a" * 64,
+            "decision": "rejected",
+            "reason": "Historical aggregate checks failed.",
+            "actor": "owner",
+            "created_at": NOW,
+        }
+    )
+
+    assert promotion.baseline_target is None
+    assert promotion.candidate_target is None
+    assert promotion.comparison_id is None
+    assert promotion.eligible is None

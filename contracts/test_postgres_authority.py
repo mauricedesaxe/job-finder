@@ -68,7 +68,8 @@ from job_finder.evaluation import (
     ProjectionFailed,
     bootstrap_prompt_release,
     create_manifest,
-    decide_prompt_promotion,
+    preview_run_comparison,
+    record_prompt_promotion_decision,
     deliver_next_projection,
     exclude_review_event,
     include_review_event,
@@ -194,6 +195,7 @@ EXPECTED_MIGRATIONS = (
     "0022_relevance_releases.sql",
     "0023_unbounded_review_event_notes.sql",
     "0024_evaluation_run_executions.sql",
+    "0025_release_target_promotion_decisions.sql",
 )
 
 
@@ -241,9 +243,10 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-2:] == (
+        assert apply_migrations(connection)[-3:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
+            "0025_release_target_promotion_decisions.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
@@ -3877,7 +3880,6 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
     with _connection(authority_schema) as connection:
         _apply_migrations_through(connection, "0021_typesafe_model_provider.sql")
         baseline_release = bootstrap_prompt_release(connection)
-        candidate_release_id = _insert_candidate_release(connection, baseline_release.id, now)
         _insert_prompt_run(connection, run_id, baseline_release.id, now)
         qualified_decision = _insert_review_decision(
             connection, run_id, baseline_release.id, now, 31, "qualified"
@@ -4058,8 +4060,8 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
             relevance_release_id=relevance_release.id,
         )
         candidate_target = ReleaseTarget(
-            prompt_release_id=PromptReleaseId(candidate_release_id),
-            relevance_release_id=relevance_release.id,
+            prompt_release_id=baseline_release.id,
+            relevance_release_id=faithful_release.id,
         )
         baseline_calls = 0
 
@@ -4181,10 +4183,14 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         )
         assert isinstance(candidate_execution, CompletedEvaluationExecution)
         candidate = candidate_execution.run
-        promotion = decide_prompt_promotion(
+        comparison = preview_run_comparison(connection, baseline.id, candidate.id)
+        promotion = record_prompt_promotion_decision(
             connection,
             baseline_run_id=baseline.id,
             candidate_run_id=candidate.id,
+            expected_comparison_id=comparison.id,
+            decision="rejected",
+            reason="Operational and critical regressions require rejection.",
             actor="owner",
             created_at=now,
             idempotency_key="promotion:candidate",
@@ -4194,9 +4200,50 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         assert candidate.metrics.false_negative_count == 0
         assert candidate.metrics.operational_failure_count == 1
         assert candidate.metrics.critical_false_positive_count == 1
+        assert not comparison.eligible
+        assert comparison.regression_count == 2
         assert promotion.decision == "rejected"
-        assert promotion.baseline_prompt_release_id == baseline_release.id
-        assert promotion.candidate_prompt_release_id == candidate_release_id
+        assert promotion.baseline_target == baseline_target
+        assert promotion.candidate_target == candidate_target
+        assert promotion.comparison_id == comparison.id
+        assert (
+            record_prompt_promotion_decision(
+                connection,
+                baseline_run_id=baseline.id,
+                candidate_run_id=candidate.id,
+                expected_comparison_id=comparison.id,
+                decision="rejected",
+                reason="Operational and critical regressions require rejection.",
+                actor="owner",
+                created_at=now,
+                idempotency_key="promotion:candidate",
+            )
+            == promotion
+        )
+        with pytest.raises(ValueError, match="stale"):
+            record_prompt_promotion_decision(
+                connection,
+                baseline_run_id=baseline.id,
+                candidate_run_id=candidate.id,
+                expected_comparison_id="0" * 64,
+                decision="rejected",
+                reason="Different evidence.",
+                actor="owner",
+                created_at=now,
+                idempotency_key="promotion:stale",
+            )
+        with pytest.raises(ValueError, match="cannot be approved"):
+            record_prompt_promotion_decision(
+                connection,
+                baseline_run_id=baseline.id,
+                candidate_run_id=candidate.id,
+                expected_comparison_id=comparison.id,
+                decision="approved",
+                reason="Approve anyway.",
+                actor="owner",
+                created_at=now,
+                idempotency_key="promotion:invalid-approval",
+            )
         authoritative_counts = connection.execute(
             """
             SELECT (SELECT count(*) FROM evaluation_manifests),
@@ -4302,31 +4349,6 @@ def _seed_evaluation_execution_context(
     )
     rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now)
     return manifest.id, target, rates
-
-
-def _insert_candidate_release(
-    connection: psycopg.Connection[tuple[object, ...]],
-    _baseline_release_id: str,
-    now: datetime,
-) -> str:
-    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={
-            "personal_criteria": (
-                DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
-                    update={"instructions": "Candidate location instructions."}
-                ),
-                *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
-            )
-        }
-    )
-    return str(
-        store_prompt_release(
-            connection,
-            build_prompt_release(configuration),
-            created_at=now,
-            created_by="contract",
-        ).id
-    )
 
 
 def _insert_review_decision(
