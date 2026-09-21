@@ -1,3 +1,21 @@
+from enum import StrEnum
+
+
+class SupportedSearchSource(StrEnum):
+    ASHBY = "ashby"
+    LEVER = "lever"
+    GREENHOUSE = "greenhouse"
+    WORKABLE = "workable"
+
+
+SEARCH_SOURCE_DOMAINS: dict[SupportedSearchSource, str] = {
+    SupportedSearchSource.ASHBY: "jobs.ashbyhq.com",
+    SupportedSearchSource.LEVER: "jobs.lever.co",
+    SupportedSearchSource.GREENHOUSE: "boards.greenhouse.io",
+    SupportedSearchSource.WORKABLE: "apply.workable.com",
+}
+SEARCH_DOMAINS = tuple(SEARCH_SOURCE_DOMAINS.values())
+
 SEARCH_KEYWORDS = (
     "senior product engineer",
     "staff product engineer",
@@ -31,10 +49,4 @@ SEARCH_KEYWORDS = (
     "senior engineer agentic workflows",
     "AI engineer node.js",
     "senior engineer LLM products",
-)
-SEARCH_DOMAINS = (
-    "jobs.ashbyhq.com",
-    "jobs.lever.co",
-    "boards.greenhouse.io",
-    "apply.workable.com",
 )

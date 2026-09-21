@@ -22,7 +22,6 @@ from job_finder.evaluation.prompt_releases import (
 )
 from job_finder.evaluation.prompts import PromptPhase
 from job_finder.search_configuration import (
-    SEARCH_SOURCE_DOMAINS,
     ActiveSearchConfiguration,
     Connection,
     SearchConfiguration,
@@ -33,6 +32,7 @@ from job_finder.search_configuration import (
     SearchConfigurationRevision,
     SearchConfigurationRevisionId,
     SearchConfigurationRevisionNotFound,
+    build_search_queries,
     build_search_configuration_revision,
     compare_and_swap_active_search_configuration,
     load_active_search_configuration,
@@ -355,17 +355,13 @@ def _configuration_preview(
     search_sample_limit: int,
     prompt_summary_limit: int,
 ) -> ConfigurationPreview:
-    searches = tuple(
-        f"site:{SEARCH_SOURCE_DOMAINS[source]} {keyword}"
-        for keyword in configuration.search_keywords
-        for source in configuration.enabled_sources
-    )
+    searches = build_search_queries(configuration)
     return ConfigurationPreview(
         configuration_revision_id=search_configuration_revision_id(configuration),
         prompt_release_id=release.id,
         prompt_release_name=release.name,
         total_generated_search_count=len(searches),
-        search_samples=searches[:search_sample_limit],
+        search_samples=tuple(query.text for query in searches[:search_sample_limit]),
         total_compiled_prompt_count=len(release.versions),
         prompt_summaries=tuple(
             PromptSummary(

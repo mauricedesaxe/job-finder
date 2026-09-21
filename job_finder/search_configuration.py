@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, NewType
 
 import psycopg
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
+from job_finder.discovery.catalog import (
+    SEARCH_KEYWORDS,
+    SEARCH_SOURCE_DOMAINS,
+    SupportedSearchSource,
+)
 from job_finder.evaluation.models import PromptReleaseId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 
@@ -26,19 +30,22 @@ ConfigurationKey = Annotated[
 ]
 
 
-class SupportedSearchSource(StrEnum):
-    ASHBY = "ashby"
-    LEVER = "lever"
-    GREENHOUSE = "greenhouse"
-    WORKABLE = "workable"
+@dataclass(frozen=True, slots=True)
+class SearchQuery:
+    keyword: str
+    domain: str
+
+    @property
+    def text(self) -> str:
+        return f"site:{self.domain} {self.keyword}"
 
 
-SEARCH_SOURCE_DOMAINS: dict[SupportedSearchSource, str] = {
-    SupportedSearchSource.ASHBY: "jobs.ashbyhq.com",
-    SupportedSearchSource.LEVER: "jobs.lever.co",
-    SupportedSearchSource.GREENHOUSE: "boards.greenhouse.io",
-    SupportedSearchSource.WORKABLE: "apply.workable.com",
-}
+def build_search_queries(configuration: SearchConfiguration) -> tuple[SearchQuery, ...]:
+    return tuple(
+        SearchQuery(keyword=keyword, domain=SEARCH_SOURCE_DOMAINS[source])
+        for keyword in configuration.search_keywords
+        for source in configuration.enabled_sources
+    )
 
 
 def _require_database_safe_text(value: str) -> None:
@@ -170,7 +177,6 @@ class ActiveSearchConfiguration(SearchConfigurationModel):
     activated_by: str = Field(min_length=1)
 
 
-_SOURCE_BY_DOMAIN = {domain: source for source, domain in SEARCH_SOURCE_DOMAINS.items()}
 _CRITERION_NAMES = {
     "remote-europe-eligible": "Location eligibility",
     "compensation-minimum": "Compensation minimum",
@@ -186,7 +192,7 @@ _DEFAULT_PROFILES = tuple(prompt for prompt in EVALUATION_PROMPTS if prompt.phas
 
 DEFAULT_SEARCH_CONFIGURATION = SearchConfiguration(
     search_keywords=SEARCH_KEYWORDS,
-    enabled_sources=tuple(_SOURCE_BY_DOMAIN[domain] for domain in SEARCH_DOMAINS),
+    enabled_sources=tuple(SEARCH_SOURCE_DOMAINS),
     personal_criteria=tuple(
         PersonalCriterion(
             key=prompt.criterion,
