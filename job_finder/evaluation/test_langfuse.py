@@ -227,7 +227,7 @@ def _run() -> EvaluationRun:
         id="4" * 64,
         idempotency_key="run-1",
         manifest_id="1" * 64,
-        prompt_release_id="5" * 64,
+        prompt_release_id=PromptReleaseId("5" * 64),
         implementation_ref="commit-1",
         metrics=EvaluationMetrics(
             result_count=1,
