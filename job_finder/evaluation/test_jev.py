@@ -42,6 +42,7 @@ from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 from job_finder.evaluation.relevance_releases import (
     RelevanceQuestion,
     ThresholdComposition,
+    build_jev_atomic_policy,
     build_jev_faithful_policy,
 )
 
@@ -243,6 +244,65 @@ def test_atomic_policy_rejects_mobile_specialists() -> None:
     assert not result.result.passed
     assert abs(result.pass_probability - 0.1) < 1e-9
     assert "mobile_specialist=0.900" in result.result.reason
+
+
+def test_release_atomic_policy_rejects_primary_model_work_but_not_fine_tuning() -> None:
+    prompt = next(
+        version
+        for version in build_prompt_release().versions
+        if version.definition.criterion == "role-quality"
+    )
+    policy = build_jev_atomic_policy()
+
+    def send(probabilities: Mapping[str, float]) -> JevSender:
+        def sender(
+            _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+        ) -> JevHttpResponse:
+            questions = JevSystemOneRequest.model_validate(body).questions
+            assert (
+                "Treat fine-tuning an existing model as false"
+                in questions["primary_model_training"].instructions
+            )
+            assert "pretraining strategies" in questions["model_architecture_research"].instructions
+            return JevHttpResponse(
+                status_code=200,
+                body=_multi_response_body({**dict.fromkeys(questions, 0.1), **probabilities}),
+            )
+
+        return sender
+
+    disqualified = tuple(
+        evaluate_prompt(
+            prompt,
+            {"job": description},
+            api_key="secret",
+            sender=send({signal: 0.9}),
+            execution_policy=policy,
+            clock=iter((0.0, 0.1)).__next__,
+        )
+        for signal, description in (
+            ("primary_model_training", "Train and distill new language models."),
+            ("model_architecture_research", "Research new model architectures."),
+        )
+    )
+    fine_tuning = evaluate_prompt(
+        prompt,
+        {"job": "Ship a customer product and fine-tune an existing model."},
+        api_key="secret",
+        sender=send({}),
+        execution_policy=policy,
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    training, research = disqualified
+    assert isinstance(training, JevCriterionObservation)
+    assert not training.result.passed
+    assert "primary_model_training=0.900" in training.result.reason
+    assert isinstance(research, JevCriterionObservation)
+    assert not research.result.passed
+    assert "model_architecture_research=0.900" in research.result.reason
+    assert isinstance(fine_tuning, JevCriterionObservation)
+    assert fine_tuning.result.passed
 
 
 def test_atomic_policy_fails_disqualified_criteria_with_one_minus_the_max_signal() -> None:

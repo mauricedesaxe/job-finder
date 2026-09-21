@@ -148,6 +148,27 @@ RelevanceExecutionPolicy = Annotated[
     Field(discriminator="kind"),
 ]
 _POLICY_ADAPTER: TypeAdapter[RelevanceExecutionPolicy] = TypeAdapter(RelevanceExecutionPolicy)
+_PRIMARY_MODEL_TRAINING_QUESTION = RelevanceQuestion(
+    instructions=(
+        "Is training new models, distilling models, or quantizing models a primary part "
+        "of this role's work? Treat fine-tuning an existing model as false, even when it "
+        "is substantial. Answer true even when the listing also mentions secondary RAG, "
+        "agent, evaluation, production-inference, or customer-product responsibilities."
+    ),
+    true="Training new base or foundation models, distillation, or quantization is primary work.",
+    false="Model training is absent, secondary, or limited to fine-tuning an existing model.",
+)
+_MODEL_ARCHITECTURE_RESEARCH_QUESTION = RelevanceQuestion(
+    instructions=(
+        "Is researching or inventing new model architectures, or developing pretraining "
+        "strategies for new base or foundation models, a primary part of this role's work? "
+        "Treat applying, integrating, or fine-tuning existing models as false, including "
+        "work that develops or optimizes fine-tuning methods. Answer true even when the "
+        "listing also mentions shipping the resulting model to customers."
+    ),
+    true="New base-model architecture or pretraining research is primary work.",
+    false="The role applies or fine-tunes existing models, or model research is only secondary.",
+)
 
 
 class RelevanceRelease(RelevanceModel):
@@ -195,6 +216,8 @@ def build_jev_atomic_policy() -> JevAtomicExecutionPolicy:
         criterion: {name: _relevance_question(template) for name, template in templates.items()}
         for criterion, templates in registry.items()
     }
+    questions["role-quality"]["primary_model_training"] = _PRIMARY_MODEL_TRAINING_QUESTION
+    questions["role-quality"]["model_architecture_research"] = _MODEL_ARCHITECTURE_RESEARCH_QUESTION
     compositions: dict[str, AtomicCriterionComposition] = {
         "remote-europe-eligible": NoActiveSignals(),
         "compensation-minimum": NoActiveSignals(),

@@ -23,10 +23,10 @@ from job_finder.evaluation.models import Qualified
 def test_loads_only_direct_evaluation_fixtures_by_default() -> None:
     cases = load_evaluation_corpus()
 
-    assert len(cases) == 121
-    assert sum(case.expected_outcome == "qualified" for case in cases) == 56
+    assert len(cases) == 122
+    assert sum(case.expected_outcome == "qualified" for case in cases) == 57
     assert sum(case.expected_outcome == "rejected" for case in cases) == 65
-    assert len({case.relative_path for case in cases}) == 121
+    assert len({case.relative_path for case in cases}) == 122
     assert all("/ats/" not in case.relative_path for case in cases)
     assert all(case.job.description for case in cases)
 
