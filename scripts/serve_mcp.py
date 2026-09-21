@@ -6,6 +6,7 @@ from fastmcp import FastMCP
 from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
 from job_finder.mcp_server import McpDependencies, create_mcp_server
+from scripts.evaluate_manifest import run_stored_manifest
 
 
 def create_server() -> FastMCP:
@@ -16,7 +17,7 @@ def create_server() -> FastMCP:
 
     with connect() as connection:
         _ = apply_migrations(connection)
-    return create_mcp_server(McpDependencies(connect=connect))
+    return create_mcp_server(McpDependencies(connect=connect, run_evaluation=run_stored_manifest))
 
 
 if __name__ == "__main__":

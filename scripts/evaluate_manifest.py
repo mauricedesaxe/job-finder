@@ -10,7 +10,11 @@ from uuid import uuid4
 
 import psycopg
 
-from job_finder.discovery.exchange_rates import fetch_exchange_rates, format_compensation_rates
+from job_finder.discovery.exchange_rates import (
+    ExchangeRateSnapshot,
+    fetch_exchange_rates,
+    format_compensation_rates,
+)
 from job_finder.evaluation.evaluate import evaluate_job
 from job_finder.evaluation.jev import (
     JevCriterionObservation,
@@ -21,6 +25,7 @@ from job_finder.evaluation.manifests import (
     CompletedEvaluationExecution,
     EvaluateManifestCommand,
     EvaluationManifestCase,
+    EvaluationExecutionState,
     FailedEvaluationExecution,
     run_manifest,
 )
@@ -42,6 +47,7 @@ from job_finder.evaluation.prompt_releases import (
     PromptVersion,
     bootstrap_prompt_release,
 )
+from job_finder.evaluation.release_targets import load_release_target
 from job_finder.evaluation.relevance_releases import (
     GeminiExecutionPolicy,
     JevAtomicExecutionPolicy,
@@ -90,23 +96,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             prompt_release_id=release.id,
             relevance_release_id=relevance_release.id,
         )
-        execution = run_manifest(
+        execution = run_stored_manifest(
             connection,
-            command=EvaluateManifestCommand(
+            EvaluateManifestCommand(
                 idempotency_key=arguments.idempotency_key,
                 manifest_id=arguments.manifest_id,
                 target=target,
                 implementation_ref=arguments.implementation_ref,
-            ),
-            create_exchange_rates=lambda: fetch_exchange_rates(observed_at=datetime.now(UTC)),
-            create_evaluator=lambda rates, record: _case_evaluator(
-                release=release,
-                target=target,
-                relevance_policy=relevance_release.policy,
-                rates=format_compensation_rates(rates.rates),
-                openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
-                typesafe_api_key=os.environ.get("TYPESAFE_API_KEY"),
-                record_request=record,
             ),
         )
 
@@ -124,6 +120,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["telemetry"] = execution.telemetry.model_dump(mode="json")
     print(json.dumps(payload, indent=2, default=str))
     return 1 if isinstance(execution, FailedEvaluationExecution) else 0
+
+
+def run_stored_manifest(
+    connection: psycopg.Connection[tuple[object, ...]],
+    command: EvaluateManifestCommand,
+) -> EvaluationExecutionState:
+    def create_evaluator(
+        rates: ExchangeRateSnapshot,
+        record: Callable[[ProviderRequestObservation], None],
+    ) -> CaseEvaluator:
+        release, relevance_release = load_release_target(connection, command.target)
+        return _case_evaluator(
+            release=release,
+            target=command.target,
+            relevance_policy=relevance_release.policy,
+            rates=format_compensation_rates(rates.rates),
+            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
+            typesafe_api_key=os.environ.get("TYPESAFE_API_KEY"),
+            record_request=record,
+        )
+
+    return run_manifest(
+        connection,
+        command=command,
+        create_exchange_rates=lambda: fetch_exchange_rates(observed_at=datetime.now(UTC)),
+        create_evaluator=create_evaluator,
+    )
 
 
 def _case_evaluator(

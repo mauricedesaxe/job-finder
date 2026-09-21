@@ -22,6 +22,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 import job_finder.configuration_service as configuration_service_module
+import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
@@ -57,6 +58,8 @@ from job_finder.database import (
     apply_migrations,
 )
 from job_finder.evaluation import (
+    ActivateReleaseTargetCommand,
+    ActiveReleaseTargetChanged,
     CompletedEvaluationExecution,
     EvaluateManifestCommand,
     FailedEvaluationExecution,
@@ -66,6 +69,9 @@ from job_finder.evaluation import (
     ManifestPolicy,
     ProjectionDelivered,
     ProjectionFailed,
+    ReleaseTargetActivated,
+    ReleaseTargetLifecycleError,
+    activate_release_target,
     bootstrap_prompt_release,
     create_manifest,
     preview_run_comparison,
@@ -81,6 +87,7 @@ from job_finder.evaluation import (
     preview_manifest,
     run_manifest,
     exchange_rate_snapshot_digest,
+    get_active_release_target,
 )
 from job_finder.evaluation.models import (
     CriterionAccepted,
@@ -144,12 +151,14 @@ from job_finder.evaluation.prompt_releases import (
     store_prompt_release,
 )
 from job_finder.evaluation.relevance_releases import (
+    JevFaithfulExecutionPolicy,
     RelevanceReleaseError,
     build_gemini_policy,
     build_jev_faithful_policy,
     build_relevance_release,
     load_relevance_release,
     store_relevance_release,
+    validate_release_target,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.mcp_server import McpDependencies, create_mcp_server
@@ -196,6 +205,7 @@ EXPECTED_MIGRATIONS = (
     "0023_unbounded_review_event_notes.sql",
     "0024_evaluation_run_executions.sql",
     "0025_release_target_promotion_decisions.sql",
+    "0026_release_target_lifecycle.sql",
 )
 
 
@@ -210,6 +220,203 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
         ).fetchone() == (len(EXPECTED_MIGRATIONS),)
+
+
+def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
+    authority_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, _, rates = _seed_evaluation_execution_context(connection, now)
+        active = get_active_release_target(connection)
+        prompt_release = load_prompt_release(connection, active.target.prompt_release_id)
+        candidate_relevance = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_faithful_policy(prompt_release)),
+            created_at=now,
+            created_by="contract",
+        )
+        candidate_target = ReleaseTarget(
+            prompt_release_id=prompt_release.id,
+            relevance_release_id=candidate_relevance.id,
+        )
+
+        def expected_result(
+            case: EvaluationManifestCase, _target: ReleaseTarget, _trial: int
+        ) -> EvaluationResult:
+            if case.expected_outcome == "qualified":
+                return Qualified(reason="Expected positive.", profile_name="profile")
+            return Rejected(reason="Expected negative.")
+
+        baseline_execution = run_manifest(
+            connection,
+            command=EvaluateManifestCommand(
+                idempotency_key="release-target:baseline",
+                manifest_id=manifest_id,
+                target=active.target,
+                implementation_ref="baseline",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: expected_result,
+            now=lambda: now,
+        )
+        candidate_execution = run_manifest(
+            connection,
+            command=EvaluateManifestCommand(
+                idempotency_key="release-target:candidate",
+                manifest_id=manifest_id,
+                target=candidate_target,
+                implementation_ref="candidate",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: expected_result,
+            now=lambda: now,
+        )
+        assert isinstance(baseline_execution, CompletedEvaluationExecution)
+        assert isinstance(candidate_execution, CompletedEvaluationExecution)
+        comparison = preview_run_comparison(
+            connection, baseline_execution.run.id, candidate_execution.run.id
+        )
+        decision = record_prompt_promotion_decision(
+            connection,
+            baseline_run_id=baseline_execution.run.id,
+            candidate_run_id=candidate_execution.run.id,
+            expected_comparison_id=comparison.id,
+            decision="approved",
+            reason="Exact target passed the frozen manifest.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="release-target:decision",
+        )
+        command = ActivateReleaseTargetCommand(
+            idempotency_key="release-target:activate",
+            promotion_decision_id=decision.id,
+            expected_active_target=active.target,
+            expected_generation=active.generation,
+            actor="owner",
+            timestamp=now + timedelta(minutes=1),
+        )
+        source_artifact_identity = relevance_releases_module.source_artifact_identity
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                relevance_releases_module,
+                "source_artifact_identity",
+                lambda entrypoint, source_path: source_artifact_identity(
+                    entrypoint, source_path
+                ).model_copy(update={"content_digest": "0" * 64}),
+            )
+            with pytest.raises(
+                ReleaseTargetLifecycleError,
+                match="implementation artifacts do not match",
+            ):
+                activate_release_target(
+                    connection,
+                    command.model_copy(update={"idempotency_key": "release-target:drifted"}),
+                )
+        assert get_active_release_target(connection) == active
+        activated = activate_release_target(connection, command)
+        replayed = activate_release_target(connection, command)
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                relevance_releases_module,
+                "source_artifact_identity",
+                lambda entrypoint, source_path: source_artifact_identity(
+                    entrypoint, source_path
+                ).model_copy(update={"content_digest": "0" * 64}),
+            )
+            stale = activate_release_target(
+                connection,
+                command.model_copy(
+                    update={
+                        "idempotency_key": "release-target:stale",
+                        "timestamp": now + timedelta(minutes=2),
+                    }
+                ),
+            )
+        orchestration_run = prepare_orchestration_run(
+            connection,
+            idempotency_key="release-target:orchestration",
+            implementation_ref="candidate",
+            started_at=now + timedelta(minutes=3),
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: rates,
+        )
+
+        assert isinstance(activated, ReleaseTargetActivated)
+        assert activated.replayed is False
+        assert activated.active.target == candidate_target
+        assert activated.active.generation == active.generation + 1
+        assert isinstance(replayed, ReleaseTargetActivated)
+        assert replayed.replayed is True
+        assert replayed.active == activated.active
+        assert isinstance(stale, ActiveReleaseTargetChanged)
+        assert stale.active == activated.active
+        assert orchestration_run.target == candidate_target
+        assert connection.execute(
+            "SELECT count(*) FROM release_target_activation_receipts"
+        ).fetchone() == (2,)
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute("UPDATE release_target_activation_receipts SET actor = 'tampered'")
+        with pytest.raises(psycopg.errors.CheckViolation, match="approved activation receipt"):
+            connection.execute(
+                "UPDATE active_release_target SET generation = generation + 1 WHERE singleton_id = 1"
+            )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute("DELETE FROM active_release_target")
+
+
+def test_release_target_migration_bootstraps_configurable_prompt_criteria(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    criterion = DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+        update={"key": "custom-criterion"}
+    )
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "personal_criteria": (
+                criterion,
+                *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
+            )
+        }
+    )
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0025_release_target_promotion_decisions.sql")
+        revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                configuration, created_at=now, created_by="contract"
+            ),
+        )
+        prompt_release = store_prompt_release(
+            connection,
+            build_prompt_release(configuration),
+            created_at=now,
+            created_by="contract",
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, %s)
+            """,
+            (revision.id, prompt_release.id, now, "contract"),
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 0, %s, %s)
+            """,
+            (revision.id, now, "contract"),
+        )
+
+        apply_migrations(connection)
+
+        active = get_active_release_target(connection)
+        relevance_release = load_relevance_release(connection, active.target.relevance_release_id)
+        validate_release_target(active.target, prompt_release, relevance_release)
+        assert isinstance(relevance_release.policy, JevFaithfulExecutionPolicy)
 
 
 def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_notes(
@@ -243,10 +450,11 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-3:] == (
+        assert apply_migrations(connection)[-4:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
+            "0026_release_target_lifecycle.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
@@ -323,7 +531,7 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         expected = dict(before)
         expected["pipeline_runs"] = [
-            {**row, "configuration_revision_id": None}
+            {**row, "configuration_revision_id": None, "relevance_release_id": None}
             for row in cast(list[dict[str, object]], before["pipeline_runs"])
         ]
         assert _table_contents(connection, legacy_tables) == expected
@@ -454,7 +662,7 @@ def test_configuration_revision_migration_repairs_missing_initial_publication(
         assert repaired.prompt_release_id == release.id
 
 
-def test_pipeline_run_rejects_mismatched_configuration_publication_pair(
+def test_pipeline_run_rejects_incomplete_release_target(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 19, 12, tzinfo=UTC)
@@ -478,7 +686,7 @@ def test_pipeline_run_rejects_mismatched_configuration_publication_pair(
             created_by="test",
         )
 
-        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(
                 """
                 INSERT INTO pipeline_runs (
@@ -498,7 +706,7 @@ def test_pipeline_run_rejects_mismatched_configuration_publication_pair(
             )
 
 
-def test_pipeline_run_configuration_shape_supports_legacy_orchestration_writers(
+def test_pipeline_run_configuration_shape_rejects_legacy_orchestration_writers(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 19, 12, tzinfo=UTC)
@@ -510,12 +718,8 @@ def test_pipeline_run_configuration_shape_supports_legacy_orchestration_writers(
             SearchConfigurationRevisionId(INITIAL_SEARCH_CONFIGURATION_REVISION_ID),
         )
 
-        _insert_legacy_orchestration_run(connection, run_id, publication.prompt_release_id, now)
-
-        assert connection.execute(
-            "SELECT configuration_revision_id FROM pipeline_runs WHERE id = %s",
-            (run_id,),
-        ).fetchone() == (INITIAL_SEARCH_CONFIGURATION_REVISION_ID,)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _insert_legacy_orchestration_run(connection, run_id, publication.prompt_release_id, now)
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(
                 """

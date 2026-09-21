@@ -41,6 +41,14 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
                 "manifest_create",
                 "manifest_get",
                 "manifest_list",
+                "release_target_candidate_create",
+                "release_target_active_get",
+                "evaluation_execution_get",
+                "evaluation_run",
+                "evaluation_run_get",
+                "release_target_compare",
+                "release_target_decide",
+                "release_target_activate",
                 "langfuse_projection_status",
                 "configuration_active_get",
                 "configuration_draft_get",
@@ -67,6 +75,14 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
             projection = tools["langfuse_projection_status"]
             assert projection.output_schema is not None
             assert projection.output_schema["properties"]["failures"]["maxItems"] == 100
+            assert tools["release_target_active_get"].annotations is not None
+            assert tools["release_target_active_get"].annotations.read_only_hint is True
+            assert tools["release_target_activate"].annotations is not None
+            assert tools["release_target_activate"].annotations.destructive_hint is True
+            assert tools["evaluation_run"].annotations is not None
+            assert tools["evaluation_run"].annotations.open_world_hint is True
+            candidate_schema = tools["release_target_candidate_create"].input_schema
+            assert "relevance_policy" in candidate_schema["properties"]
             configuration_tools = {
                 name: tool for name, tool in tools.items() if name.startswith("configuration_")
             }

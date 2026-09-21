@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, assert_never
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
@@ -21,7 +21,11 @@ from job_finder.discovery.jina import (
     search_jobs,
 )
 from job_finder.evaluation.evaluate import evaluate_job
-from job_finder.evaluation.jev import JevRetryPolicy, JevSender, evaluate_persisted_prompt
+from job_finder.evaluation.jev import (
+    JevRetryPolicy,
+    JevSender,
+    evaluate_persisted_prompt as evaluate_persisted_jev_prompt,
+)
 from job_finder.evaluation.models import (
     CriterionResult,
     OperationalError,
@@ -34,10 +38,18 @@ from job_finder.evaluation.models import (
 from job_finder.evaluation.openrouter import (
     ChatCompletionSender,
     RetryPolicy,
+    evaluate_prompt as evaluate_persisted_openrouter_prompt,
     postgres_model_call_persistence,
     prompt_input_digest,
 )
-from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion, load_prompt_release
+from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion
+from job_finder.evaluation.release_targets import load_release_target
+from job_finder.evaluation.relevance_releases import (
+    GeminiExecutionPolicy,
+    JevAtomicExecutionPolicy,
+    JevFaithfulExecutionPolicy,
+    RelevanceExecutionPolicy,
+)
 from job_finder.jobs.decision_pipeline import (
     THIN_BODY_THRESHOLD,
     THIN_SCRAPE_ATTEMPT_LIMIT,
@@ -211,7 +223,7 @@ def process_claimed_jobs(
         raise ValueError("Processing requires a running orchestration run")
     if max_items < 1:
         raise ValueError("Processing requires at least one work item")
-    release = load_prompt_release(connection, run.prompt_release_id)
+    release, relevance_release = load_release_target(connection, run.target)
     counts: dict[Literal["terminal", "terminal_error", "retry", "lease_lost"], int] = {
         "terminal": 0,
         "terminal_error": 0,
@@ -234,6 +246,7 @@ def process_claimed_jobs(
                 connection,
                 run,
                 release,
+                relevance_release.policy,
                 claim,
                 boundaries,
                 openrouter_api_key=openrouter_api_key,
@@ -267,6 +280,7 @@ def _process_claim(
     connection: Connection,
     run: OrchestrationRun,
     release: PromptRelease,
+    relevance_policy: RelevanceExecutionPolicy,
     claim: JobWorkClaim,
     boundaries: PipelineBoundaries,
     *,
@@ -355,9 +369,12 @@ def _process_claim(
 
     if len(body.strip()) < THIN_BODY_THRESHOLD:
         return _fail_thin_scrape(connection, claim, now(), retry_after)
-    if not typesafe_api_key:
-        raise ValueError("TYPESAFE_API_KEY is required for relevance evaluation")
-
+    if isinstance(relevance_policy, GeminiExecutionPolicy):
+        relevance_api_key = openrouter_api_key
+    else:
+        if not typesafe_api_key:
+            raise ValueError("TYPESAFE_API_KEY is required for relevance evaluation")
+        relevance_api_key = typesafe_api_key
     evaluation = evaluate_job(
         listing,
         release,
@@ -367,8 +384,9 @@ def _process_claim(
             claim,
             prompt,
             values,
+            relevance_policy,
             boundaries,
-            typesafe_api_key,
+            relevance_api_key,
             now,
         ),
         rates=format_compensation_rates(run.exchange_rates.rates),
@@ -442,6 +460,7 @@ def _evaluate_criterion(
     claim: JobWorkClaim,
     prompt: PromptVersion,
     values: Mapping[str, str],
+    relevance_policy: RelevanceExecutionPolicy,
     boundaries: PipelineBoundaries,
     api_key: str,
     now: Now,
@@ -455,16 +474,32 @@ def _evaluate_criterion(
         started_at=now(),
         prompt_release_id=run.prompt_release_id,
     )
-    result = evaluate_persisted_prompt(
-        prompt,
-        values,
-        context,
-        postgres_model_call_persistence(connection, provider="typesafe"),
-        api_key=api_key,
-        sender=boundaries.jev_sender,
-        retry_policy=boundaries.jev_retry_policy,
-        now=now,
-    )
+    match relevance_policy:
+        case GeminiExecutionPolicy():
+            result = evaluate_persisted_openrouter_prompt(
+                prompt,
+                values,
+                context,
+                postgres_model_call_persistence(connection),
+                api_key=api_key,
+                sender=boundaries.model_sender,
+                retry_policy=boundaries.model_retry_policy,
+                now=now,
+            )
+        case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
+            result = evaluate_persisted_jev_prompt(
+                prompt,
+                values,
+                context,
+                postgres_model_call_persistence(connection, provider="typesafe"),
+                api_key=api_key,
+                execution_policy=relevance_policy,
+                sender=boundaries.jev_sender,
+                retry_policy=boundaries.jev_retry_policy,
+                now=now,
+            )
+        case _:
+            assert_never(relevance_policy)
     if isinstance(result, OperationalError):
         fail_model_call_context(connection, context, result, completed_at=now())
     else:

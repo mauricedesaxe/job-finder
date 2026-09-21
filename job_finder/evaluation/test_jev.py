@@ -545,6 +545,53 @@ def test_persists_each_retry_and_the_accepted_jev_result() -> None:
     )
 
 
+def test_persisted_execution_uses_the_stored_relevance_policy() -> None:
+    release = build_prompt_release()
+    prompt = release.versions[0]
+    values = {"job": "Remote in Europe"}
+    policy = build_jev_faithful_policy(release)
+    questions = dict(policy.questions)
+    questions[prompt.definition.criterion] = RelevanceQuestion(
+        instructions="Frozen production question.",
+        true="Stored pass.",
+        false="Stored fail.",
+    )
+    policy = policy.model_copy(update={"questions": questions})
+
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        body: dict[str, object],
+        _timeout: float,
+    ) -> JevHttpResponse:
+        request = JevSystemOneRequest.model_validate(body)
+        assert request.questions[prompt.definition.criterion].instructions == (
+            "Frozen production question."
+        )
+        return JevHttpResponse(
+            status_code=200,
+            body=_response_body(0.75, prompt.definition.criterion),
+        )
+
+    result = evaluate_persisted_prompt(
+        prompt,
+        values,
+        _context(values),
+        ModelCallPersistence(
+            find_completed=lambda _request_id: None,
+            next_attempt_number=lambda _request_id: 0,
+            record=lambda _attempt: None,
+        ),
+        api_key="secret",
+        execution_policy=policy,
+        sender=send,
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(result, CriterionAccepted)
+    assert result.passed
+
+
 def test_reuses_a_persisted_jev_result_without_calling_the_provider() -> None:
     prompt = build_prompt_release().versions[0]
     values = {"job": "Remote in Europe"}

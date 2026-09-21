@@ -13,6 +13,7 @@ MIGRATIONS_PATH = Path(__file__).with_name("migrations")
 SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"
 SEARCH_CONFIGURATION_PUBLICATION_MIGRATION = "0017_search_configuration_publications.sql"
 PIPELINE_RUN_CONFIGURATION_MIGRATION = "0020_pipeline_run_configuration_revisions.sql"
+RELEASE_TARGET_LIFECYCLE_MIGRATION = "0026_release_target_lifecycle.sql"
 INITIAL_SEARCH_CONFIGURATION_REVISION_ID = (
     "621346c249608e7d8766902c2cd9fbcfb83ac687f58de8a8fdb7f81980a14099"
 )
@@ -63,6 +64,8 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
             _seed_initial_search_configuration(connection)
         if path.name == SEARCH_CONFIGURATION_PUBLICATION_MIGRATION:
             _backfill_search_configuration_publications(connection)
+        if path.name == RELEASE_TARGET_LIFECYCLE_MIGRATION:
+            _seed_initial_release_target(connection)
         _ = connection.execute(
             "INSERT INTO job_finder_schema_migrations (name, sha256) VALUES (%s, %s)",
             (path.name, digest),
@@ -167,3 +170,75 @@ def _backfill_search_configuration_publications(
             raise SchemaMigrationError(
                 f"Published search configuration differs from revision {revision.id}"
             )
+
+
+def _seed_initial_release_target(
+    connection: psycopg.Connection[tuple[object, ...]],
+) -> None:
+    from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget  # noqa: PLC0415
+    from job_finder.evaluation.prompt_releases import load_prompt_release  # noqa: PLC0415
+    from job_finder.evaluation.relevance_releases import (  # noqa: PLC0415
+        RelevanceReleaseError,
+        build_jev_atomic_policy,
+        build_jev_faithful_policy,
+        build_relevance_release,
+        store_relevance_release,
+        validate_release_target,
+    )
+
+    actor = f"migration:{RELEASE_TARGET_LIFECYCLE_MIGRATION}"
+    row = connection.execute(
+        """
+        SELECT publication.prompt_release_id, active.activated_at
+        FROM active_search_configuration active
+        JOIN search_configuration_publications publication
+          ON publication.revision_id = active.revision_id
+        WHERE active.singleton_id = 1
+        """
+    ).fetchone()
+    if row is None:
+        row = connection.execute(
+            """
+            SELECT id, created_at
+            FROM prompt_releases
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        raise SchemaMigrationError("Release-target bootstrap requires a prompt release")
+    prompt_release = load_prompt_release(connection, PromptReleaseId(str(row[0])))
+    relevance_data = build_relevance_release(build_jev_atomic_policy())
+    target = ReleaseTarget(
+        prompt_release_id=prompt_release.id,
+        relevance_release_id=relevance_data.id,
+    )
+    try:
+        validate_release_target(target, prompt_release, relevance_data)
+    except RelevanceReleaseError:
+        relevance_data = build_relevance_release(build_jev_faithful_policy(prompt_release))
+        target = ReleaseTarget(
+            prompt_release_id=prompt_release.id,
+            relevance_release_id=relevance_data.id,
+        )
+        validate_release_target(target, prompt_release, relevance_data)
+    relevance = store_relevance_release(
+        connection,
+        relevance_data,
+        created_at=cast(datetime, row[1]),
+        created_by=actor,
+    )
+    if relevance.id != target.relevance_release_id:
+        raise SchemaMigrationError("Stored bootstrap relevance release changed identity")
+    _ = connection.execute(
+        """
+        INSERT INTO active_release_target (
+          singleton_id, prompt_release_id, relevance_release_id,
+          generation, activated_at, activated_by
+        ) VALUES (1, %s, %s, 0, %s, %s)
+        """,
+        (target.prompt_release_id, target.relevance_release_id, row[1], actor),
+    )
+    _ = connection.execute(
+        "ALTER TABLE pipeline_runs VALIDATE CONSTRAINT pipeline_runs_configuration_revision_fk"
+    )
