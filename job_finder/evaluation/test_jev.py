@@ -20,6 +20,7 @@ from job_finder.evaluation.jev import (
     JevRunMetrics,
     JevRetryPolicy,
     JevSender,
+    JevSystemOneRequest,
     JevSystemOneResponse,
     evaluate_prompt,
     evaluate_persisted_prompt,
@@ -37,6 +38,11 @@ from job_finder.evaluation.models import (
 from job_finder.evaluation.openrouter import ModelCallPersistence, prompt_input_digest
 from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
+from job_finder.evaluation.relevance_releases import (
+    RelevanceQuestion,
+    ThresholdComposition,
+    build_jev_faithful_policy,
+)
 
 
 def test_validates_the_frozen_noul_response_boundary() -> None:
@@ -95,10 +101,10 @@ def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result()
         assert timeout == 30.0
         assert body["model"] == "jev-1.13.0"
         assert body["state"] == "Salary is EUR 150,000."
-        questions = cast(dict[str, dict[str, object]], body["questions"])
-        question = questions["compensation-minimum"]
-        assert question["type"] == "noul"
-        assert "1 EUR ~= 1.10 USD" in cast(str, question["instructions"])
+        request = JevSystemOneRequest.model_validate(body)
+        question = request.questions["compensation-minimum"]
+        assert question.type == "noul"
+        assert "1 EUR ~= 1.10 USD" in question.instructions
         return JevHttpResponse(status_code=200, body=_response_body(0.5, "compensation-minimum"))
 
     result = evaluate_prompt(
@@ -127,6 +133,49 @@ def test_sends_the_pinned_model_and_maps_probability_to_a_deterministic_result()
     )
 
 
+def test_executes_the_questions_and_threshold_from_a_relevance_release() -> None:
+    release = build_prompt_release()
+    prompt = release.versions[1]
+    policy = build_jev_faithful_policy(release)
+    questions = dict(policy.questions)
+    questions[prompt.definition.criterion] = RelevanceQuestion(
+        instructions="Stored release question using {rates}.",
+        true="Stored pass.",
+        false="Stored fail.",
+    )
+    policy = policy.model_copy(
+        update={
+            "questions": questions,
+            "composition": ThresholdComposition(pass_threshold=0.75),
+        }
+    )
+
+    def send(
+        _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+    ) -> JevHttpResponse:
+        request = JevSystemOneRequest.model_validate(body)
+        assert request.questions[prompt.definition.criterion].instructions == (
+            "Stored release question using 1 EUR ~= 1.10 USD."
+        )
+        return JevHttpResponse(
+            status_code=200,
+            body=_response_body(0.6, prompt.definition.criterion),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Salary is EUR 150,000.", "rates": "1 EUR ~= 1.10 USD"},
+        api_key="secret",
+        sender=send,
+        execution_policy=policy,
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(result, JevCriterionObservation)
+    assert not result.result.passed
+    assert result.result.reason == "Jev pass probability 0.600 was below threshold 0.750."
+
+
 def test_atomic_policy_counts_staffing_signals_in_code() -> None:
     prompt = next(
         version
@@ -137,7 +186,7 @@ def test_atomic_policy_counts_staffing_signals_in_code() -> None:
     def send(
         _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
     ) -> JevHttpResponse:
-        questions = cast(dict[str, object], body["questions"])
+        questions = JevSystemOneRequest.model_validate(body).questions
         assert set(questions) == set(ATOMIC_QUESTIONS["cheap-shop-placement"])
         probabilities = dict.fromkeys(questions, 0.1)
         probabilities["recruiter_for_client"] = 0.9
@@ -172,7 +221,7 @@ def test_atomic_policy_rejects_mobile_specialists() -> None:
     def send(
         _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
     ) -> JevHttpResponse:
-        questions = cast(dict[str, object], body["questions"])
+        questions = JevSystemOneRequest.model_validate(body).questions
         probabilities = dict.fromkeys(questions, 0.1)
         probabilities["mobile_specialist"] = 0.9
         return JevHttpResponse(
@@ -423,7 +472,7 @@ def test_persists_each_retry_and_the_accepted_jev_result() -> None:
         response = next(responses, None)
         if response is not None:
             return response
-        questions = cast(dict[str, object], body["questions"])
+        questions = JevSystemOneRequest.model_validate(body).questions
         return JevHttpResponse(
             status_code=200,
             body=_multi_response_body(dict.fromkeys(questions, 0.75)),

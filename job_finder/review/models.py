@@ -156,7 +156,7 @@ class ReviewSubmission(ReviewModel):
     decision: ReviewDecision
     target_profile: TargetProfile | None = None
     primary_reason: PrimaryReason | None = None
-    note: str | None = Field(default=None, max_length=2000)
+    note: str | None = None
     block_company: bool = False
     actor: str = Field(min_length=1)
     created_at: datetime

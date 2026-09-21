@@ -3,14 +3,22 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from job_finder.evaluation.manifests import (
     EvaluationCaseInput,
     EvaluationManifest,
     EvaluationManifestCase,
+    EvaluationMetrics,
+    EvaluationRun,
     EvaluationTrialResult,
     ManifestPolicy,
     score_results,
+)
+from job_finder.evaluation.models import (
+    PromptReleaseId,
+    ReleaseTarget,
+    RelevanceReleaseId,
 )
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -43,6 +51,47 @@ def test_rejects_results_that_do_not_cover_each_trial_once() -> None:
 
     with pytest.raises(ValueError, match="configured trial"):
         score_results(manifest, incomplete)
+
+
+def test_evaluation_run_exposes_only_complete_release_targets() -> None:
+    prompt_release_id = PromptReleaseId("b" * 64)
+    target = ReleaseTarget(
+        prompt_release_id=prompt_release_id,
+        relevance_release_id=RelevanceReleaseId("c" * 64),
+    )
+    run = EvaluationRun(
+        id="d" * 64,
+        idempotency_key="run",
+        manifest_id="a" * 64,
+        prompt_release_id=prompt_release_id,
+        target=target,
+        implementation_ref="test",
+        metrics=EvaluationMetrics(
+            result_count=1,
+            false_positive_count=0,
+            false_negative_count=0,
+            operational_failure_count=0,
+            critical_false_positive_count=0,
+            false_positive_rate=Decimal(0),
+            false_negative_rate=Decimal(0),
+        ),
+        results=(_result(0, 0, "qualified", "qualified", None),),
+        completed_at=NOW,
+    )
+
+    assert run.target == target
+    assert run.model_dump(mode="json")["target"] == target.model_dump(mode="json")
+    assert run.model_copy(update={"target": None}).target is None
+    with pytest.raises(ValidationError, match="match prompt provenance"):
+        EvaluationRun.model_validate(
+            {
+                **run.model_dump(mode="json"),
+                "target": {
+                    "prompt_release_id": "e" * 64,
+                    "relevance_release_id": "c" * 64,
+                },
+            }
+        )
 
 
 def _manifest() -> EvaluationManifest:

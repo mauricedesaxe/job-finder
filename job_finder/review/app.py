@@ -856,7 +856,6 @@ def _decision_form(item: ReviewItem, csrf_token: str) -> object:
             Textarea(
                 item.note or "",
                 name="note",
-                maxlength="2000",
                 rows="3",
                 placeholder="Why this decision? Salary signals, location, language, anything.",
             ),

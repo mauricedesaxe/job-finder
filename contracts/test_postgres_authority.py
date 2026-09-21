@@ -71,6 +71,7 @@ from job_finder.evaluation import (
     list_manifests,
     load_projection_queue_status,
     load_prompt_release,
+    load_run,
     preview_manifest,
     run_manifest,
 )
@@ -84,6 +85,7 @@ from job_finder.evaluation.models import (
     PromptReleaseId,
     Qualified,
     Rejected,
+    ReleaseTarget,
 )
 from job_finder.jobs.decision_pipeline import (
     DecisionContext,
@@ -133,6 +135,14 @@ from job_finder.evaluation.prompt_releases import (
     build_prompt_release,
     store_prompt_release,
 )
+from job_finder.evaluation.relevance_releases import (
+    RelevanceReleaseError,
+    build_gemini_policy,
+    build_jev_faithful_policy,
+    build_relevance_release,
+    load_relevance_release,
+    store_relevance_release,
+)
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.mcp_server import McpDependencies, create_mcp_server
 from job_finder.pipeline.state import prepare_orchestration_run
@@ -174,6 +184,8 @@ EXPECTED_MIGRATIONS = (
     "0019_configuration_publication_receipts.sql",
     "0020_pipeline_run_configuration_revisions.sql",
     "0021_typesafe_model_provider.sql",
+    "0022_relevance_releases.sql",
+    "0023_unbounded_review_event_notes.sql",
 )
 
 
@@ -188,6 +200,49 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
         ).fetchone() == (len(EXPECTED_MIGRATIONS),)
+
+
+def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_notes(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    note = " " + "x" * 1999 + " "
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0022_relevance_releases.sql")
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        evaluation_id = _insert_review_decision(connection, run_id, release.id, now, 1, "qualified")
+        assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+        item = load_review_queue(connection).items[0]
+        ordinary = ReviewSubmission(
+            review_item_id=item.id,
+            evaluation_id=item.evaluation_id,
+            snapshot_id=item.snapshot_id,
+            decision="unsure",
+            note="Need more detail.",
+            actor="owner",
+            created_at=now,
+        )
+        saved_ordinary = record_review(connection, ordinary)
+        assert isinstance(saved_ordinary, ReviewSaved)
+
+        long_note = ordinary.model_copy(
+            update={"note": note, "created_at": now + timedelta(seconds=1)}
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
+            record_review(connection, long_note)
+
+        assert apply_migrations(connection)[-1] == "0023_unbounded_review_event_notes.sql"
+        saved_long = record_review(connection, long_note)
+        assert isinstance(saved_long, ReviewSaved)
+        assert len(note) == 2001
+        assert connection.execute(
+            "SELECT id, note FROM review_events ORDER BY created_at"
+        ).fetchall() == [
+            (saved_ordinary.review_event_id, ordinary.note),
+            (saved_long.review_event_id, note),
+        ]
 
 
 def test_concurrent_migration_startup_serializes_schema_writes(
@@ -1776,6 +1831,67 @@ def test_stores_a_custom_prompt_release_exactly_and_idempotently(
         ).fetchone() == (1,)
 
 
+def test_stores_an_immutable_relevance_release_exactly_and_idempotently(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    prompt_release = build_prompt_release()
+    release = build_relevance_release(build_jev_faithful_policy(prompt_release))
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        first = store_relevance_release(connection, release, created_at=now, created_by="contract")
+        second = store_relevance_release(
+            connection,
+            release,
+            created_at=now + timedelta(minutes=1),
+            created_by="retry",
+        )
+
+        assert first == release
+        assert second == release
+        assert load_relevance_release(connection, release.id) == release
+        assert connection.execute(
+            "SELECT created_at, created_by FROM relevance_releases WHERE id = %s",
+            (release.id,),
+        ).fetchone() == (now, "contract")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                """
+                INSERT INTO relevance_releases (
+                  id, content_digest, content, created_at, created_by
+                ) VALUES (%s, %s, '{}'::jsonb, %s, 'contract')
+                """,
+                ("1" * 64, "1" * 64, now),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                "UPDATE relevance_releases SET created_by = 'other' WHERE id = %s",
+                (release.id,),
+            )
+
+
+def test_relevance_release_load_rejects_corrupt_content(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    release = build_relevance_release(build_gemini_policy(build_prompt_release()))
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        store_relevance_release(connection, release, created_at=now, created_by="contract")
+        connection.execute(
+            "ALTER TABLE relevance_releases DISABLE TRIGGER relevance_releases_are_immutable"
+        )
+        connection.execute(
+            "ALTER TABLE relevance_releases DROP CONSTRAINT relevance_release_digest_matches_content"
+        )
+        connection.execute(
+            'UPDATE relevance_releases SET content = content || \'{"model": "corrupt"}\'::jsonb WHERE id = %s',
+            (release.id,),
+        )
+
+        with pytest.raises(RelevanceReleaseError, match="identity is corrupt"):
+            load_relevance_release(connection, release.id)
+
+
 def test_stores_a_prompt_release_inside_a_committed_outer_transaction(
     authority_schema: str,
 ) -> None:
@@ -3156,7 +3272,7 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     run_id = uuid4()
     with _connection(authority_schema) as connection:
-        apply_migrations(connection)
+        _apply_migrations_through(connection, "0021_typesafe_model_provider.sql")
         baseline_release = bootstrap_prompt_release(connection)
         candidate_release_id = _insert_candidate_release(connection, baseline_release.id, now)
         _insert_prompt_run(connection, run_id, baseline_release.id, now)
@@ -3220,14 +3336,130 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
             created_by="owner",
             idempotency_key="manifest:run",
         )
+        historical_run_id = "f" * 64
+        historical_result_count = sum(case.trial_count for case in manifest.cases)
+        with connection.transaction():
+            connection.execute(
+                """
+                INSERT INTO evaluation_runs (
+                  id, idempotency_key, manifest_id, prompt_release_id,
+                  expected_result_count, result_count, false_positive_count,
+                  false_negative_count, operational_failure_count,
+                  critical_false_positive_count, false_positive_rate,
+                  false_negative_rate, implementation_ref, completed_at
+                ) VALUES (%s, 'evaluation:historical', %s, %s, %s, %s, 0, 0, 0, 0, 0, 0,
+                          'historical-ref', %s)
+                """,
+                (
+                    historical_run_id,
+                    manifest.id,
+                    baseline_release.id,
+                    historical_result_count,
+                    historical_result_count,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO evaluation_case_results (
+                  id, run_id, manifest_id, prompt_release_id, case_position,
+                  trial_index, expected_outcome, actual_outcome, failure_kind, reason
+                )
+                SELECT encode(sha256(convert_to(
+                         %s::TEXT || ':' || c.position || ':' || trial.index, 'UTF8'
+                       )), 'hex'),
+                       %s, c.manifest_id, %s, c.position, trial.index,
+                       c.expected_outcome, c.expected_outcome, NULL, 'Historical result.'
+                FROM evaluation_manifest_cases c
+                CROSS JOIN LATERAL generate_series(0, c.trial_count - 1) AS trial(index)
+                WHERE c.manifest_id = %s
+                """,
+                (
+                    historical_run_id,
+                    historical_run_id,
+                    baseline_release.id,
+                    manifest.id,
+                ),
+            )
+
+        apply_migrations(connection)
+        historical = load_run(connection, historical_run_id)
+        assert historical.target is None
+        assert connection.execute(
+            "SELECT bool_and(relevance_release_id IS NULL) FROM evaluation_case_results WHERE run_id = %s",
+            (historical_run_id,),
+        ).fetchone() == (True,)
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="evaluation_runs_require_relevance_release",
+        ):
+            connection.execute(
+                """
+                INSERT INTO evaluation_runs (
+                  id, idempotency_key, manifest_id, prompt_release_id,
+                  relevance_release_id, expected_result_count, result_count,
+                  false_positive_count, false_negative_count,
+                  operational_failure_count, critical_false_positive_count,
+                  false_positive_rate, false_negative_rate, implementation_ref,
+                  completed_at
+                )
+                SELECT %s, 'evaluation:new-null', manifest_id, prompt_release_id,
+                       NULL, expected_result_count, result_count,
+                       false_positive_count, false_negative_count,
+                       operational_failure_count, critical_false_positive_count,
+                       false_positive_rate, false_negative_rate, implementation_ref,
+                       completed_at
+                FROM evaluation_runs WHERE id = %s
+                """,
+                ("0" * 64, historical_run_id),
+            )
+        with pytest.raises(
+            psycopg.errors.CheckViolation,
+            match="evaluation_case_results_require_relevance_release",
+        ):
+            connection.execute(
+                """
+                INSERT INTO evaluation_case_results (
+                  id, run_id, manifest_id, prompt_release_id,
+                  relevance_release_id, case_position, trial_index,
+                  expected_outcome, actual_outcome, failure_kind, reason
+                )
+                SELECT %s, run_id, manifest_id, prompt_release_id, NULL,
+                       case_position, trial_index + 100, expected_outcome,
+                       actual_outcome, failure_kind, reason
+                FROM evaluation_case_results WHERE run_id = %s LIMIT 1
+                """,
+                ("1" * 64, historical_run_id),
+            )
+
+        relevance_release = store_relevance_release(
+            connection,
+            build_relevance_release(build_gemini_policy(baseline_release)),
+            created_at=now,
+            created_by="contract",
+        )
+        faithful_release = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_faithful_policy(baseline_release)),
+            created_at=now,
+            created_by="contract",
+        )
+        baseline_target = ReleaseTarget(
+            prompt_release_id=baseline_release.id,
+            relevance_release_id=relevance_release.id,
+        )
+        candidate_target = ReleaseTarget(
+            prompt_release_id=PromptReleaseId(candidate_release_id),
+            relevance_release_id=relevance_release.id,
+        )
         baseline_calls = 0
 
         def baseline_evaluator(
-            case: EvaluationManifestCase, release_id: PromptReleaseId, trial: int
+            case: EvaluationManifestCase, target: ReleaseTarget, trial: int
         ) -> EvaluationResult:
             nonlocal baseline_calls
             baseline_calls += 1
-            assert release_id == baseline_release.id
+            assert target == baseline_target
             assert trial >= 0
             if case.expected_outcome == "qualified":
                 return Qualified(reason="Expected positive.", profile_name="profile")
@@ -3236,7 +3468,7 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         baseline = run_manifest(
             connection,
             manifest_id=manifest.id,
-            prompt_release_id=baseline_release.id,
+            target=baseline_target,
             evaluator=baseline_evaluator,
             implementation_ref="baseline-ref",
             completed_at=now,
@@ -3245,19 +3477,63 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         repeated = run_manifest(
             connection,
             manifest_id=manifest.id,
-            prompt_release_id=baseline_release.id,
+            target=baseline_target,
             evaluator=baseline_evaluator,
             implementation_ref="baseline-ref",
             completed_at=now,
             idempotency_key="evaluation:baseline",
         )
         assert repeated == baseline
+        assert baseline.target == baseline_target
         assert baseline_calls == 4
+        assert connection.execute(
+            """
+            SELECT r.relevance_release_id,
+                   bool_and(c.relevance_release_id = r.relevance_release_id)
+            FROM evaluation_runs r
+            JOIN evaluation_case_results c ON c.run_id = r.id
+            WHERE r.id = %s
+            GROUP BY r.relevance_release_id
+            """,
+            (baseline.id,),
+        ).fetchone() == (relevance_release.id, True)
+        with pytest.raises(
+            psycopg.errors.ForeignKeyViolation,
+            match="evaluation_case_results_exact_release_target",
+        ):
+            connection.execute(
+                """
+                INSERT INTO evaluation_case_results (
+                  id, run_id, manifest_id, prompt_release_id,
+                  relevance_release_id, case_position, trial_index,
+                  expected_outcome, actual_outcome, failure_kind, reason
+                )
+                SELECT %s, run_id, manifest_id, prompt_release_id, %s,
+                       case_position, trial_index + 100, expected_outcome,
+                       actual_outcome, failure_kind, reason
+                FROM evaluation_case_results WHERE run_id = %s LIMIT 1
+                """,
+                ("2" * 64, faithful_release.id, baseline.id),
+            )
+
+        with pytest.raises(ValueError, match="different evaluation run"):
+            run_manifest(
+                connection,
+                manifest_id=manifest.id,
+                target=ReleaseTarget(
+                    prompt_release_id=baseline_release.id,
+                    relevance_release_id=faithful_release.id,
+                ),
+                evaluator=baseline_evaluator,
+                implementation_ref="baseline-ref",
+                completed_at=now,
+                idempotency_key="evaluation:baseline",
+            )
 
         def candidate_evaluator(
-            case: EvaluationManifestCase, release_id: PromptReleaseId, trial: int
+            case: EvaluationManifestCase, target: ReleaseTarget, trial: int
         ) -> EvaluationResult:
-            assert release_id == candidate_release_id
+            assert target == candidate_target
             if case.expected_outcome == "qualified":
                 return RetryableOperationalError(
                     prompt_name="profile",
@@ -3271,7 +3547,7 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         candidate = run_manifest(
             connection,
             manifest_id=manifest.id,
-            prompt_release_id=PromptReleaseId(candidate_release_id),
+            target=candidate_target,
             evaluator=candidate_evaluator,
             implementation_ref="candidate-ref",
             completed_at=now,
@@ -3345,32 +3621,27 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
 
 def _insert_candidate_release(
     connection: psycopg.Connection[tuple[object, ...]],
-    baseline_release_id: str,
+    _baseline_release_id: str,
     now: datetime,
 ) -> str:
-    candidate_release_id = "f" * 64
-    with connection.transaction():
-        connection.execute(
-            """
-            INSERT INTO prompt_releases (
-              id, name, content_digest, expected_member_count, created_at, created_by
+    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={
+            "personal_criteria": (
+                DEFAULT_SEARCH_CONFIGURATION.personal_criteria[0].model_copy(
+                    update={"instructions": "Candidate location instructions."}
+                ),
+                *DEFAULT_SEARCH_CONFIGURATION.personal_criteria[1:],
             )
-            SELECT %s, 'candidate', %s, expected_member_count, %s, 'contract'
-            FROM prompt_releases WHERE id = %s
-            """,
-            (candidate_release_id, "e" * 64, now, baseline_release_id),
-        )
-        connection.execute(
-            """
-            INSERT INTO prompt_release_members (
-              release_id, prompt_name, prompt_version_id, position
-            )
-            SELECT %s, prompt_name, prompt_version_id, position
-            FROM prompt_release_members WHERE release_id = %s
-            """,
-            (candidate_release_id, baseline_release_id),
-        )
-    return candidate_release_id
+        }
+    )
+    return str(
+        store_prompt_release(
+            connection,
+            build_prompt_release(configuration),
+            created_at=now,
+            created_by="contract",
+        ).id
+    )
 
 
 def _insert_review_decision(

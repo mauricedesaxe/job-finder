@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, assert_never
 from uuid import uuid4
 
 import psycopg
@@ -15,9 +15,7 @@ from job_finder.discovery.exchange_rates import fetch_exchange_rates, format_com
 from job_finder.evaluation.evaluate import evaluate_job
 from job_finder.evaluation.jev import (
     JevCriterionObservation,
-    JevPolicy,
     evaluate_prompt as evaluate_jev_prompt,
-    jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.manifests import CaseEvaluator, EvaluationManifestCase, run_manifest
@@ -27,7 +25,7 @@ from job_finder.evaluation.models import (
     InputDigest,
     ModelCallAttempt,
     ModelCallContext,
-    PromptReleaseId,
+    ReleaseTarget,
 )
 from job_finder.evaluation.openrouter import (
     ModelCallPersistence,
@@ -38,6 +36,17 @@ from job_finder.evaluation.prompt_releases import (
     PromptRelease,
     PromptVersion,
     bootstrap_prompt_release,
+)
+from job_finder.evaluation.relevance_releases import (
+    GeminiExecutionPolicy,
+    JevAtomicExecutionPolicy,
+    JevFaithfulExecutionPolicy,
+    RelevanceExecutionPolicy,
+    build_gemini_policy,
+    build_jev_atomic_policy,
+    build_jev_faithful_policy,
+    build_relevance_release,
+    store_relevance_release,
 )
 from job_finder.jobs.models import JobListing
 
@@ -62,9 +71,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with psycopg.connect(postgres_dsn, autocommit=True) as connection:
         release = bootstrap_prompt_release(connection)
+        relevance_release = store_relevance_release(
+            connection,
+            build_relevance_release(
+                build_gemini_policy(release)
+                if arguments.provider == "gemini"
+                else (
+                    build_jev_atomic_policy()
+                    if arguments.provider == "jev-atomic"
+                    else build_jev_faithful_policy(release)
+                )
+            ),
+            created_at=observed_at,
+            created_by="evaluate_manifest",
+        )
+        target = ReleaseTarget(
+            prompt_release_id=release.id,
+            relevance_release_id=relevance_release.id,
+        )
         evaluator = _case_evaluator(
-            provider=arguments.provider,
             release=release,
+            target=target,
+            relevance_policy=relevance_release.policy,
             rates=rates,
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
             typesafe_api_key=os.environ.get("TYPESAFE_API_KEY"),
@@ -75,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run = run_manifest(
             connection,
             manifest_id=arguments.manifest_id,
-            prompt_release_id=release.id,
+            target=target,
             evaluator=evaluator,
             implementation_ref=arguments.implementation_ref,
             completed_at=datetime.now(UTC),
@@ -87,10 +115,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         telemetry = _openrouter_telemetry(model_attempts)
     else:
         metrics = summarize_observations(jev_observations, jev_latencies)
-        policy: JevPolicy = "atomic" if arguments.provider == "jev-atomic" else "faithful"
         telemetry = {
             **metrics.model_dump(mode="json"),
-            "policy_digest": jev_policy_digest(rates, policy),
+            "relevance_release_id": relevance_release.id,
         }
     print(
         json.dumps(
@@ -108,8 +135,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _case_evaluator(
     *,
-    provider: Provider,
     release: PromptRelease,
+    target: ReleaseTarget,
+    relevance_policy: RelevanceExecutionPolicy,
     rates: str,
     openrouter_api_key: str | None,
     typesafe_api_key: str | None,
@@ -117,18 +145,25 @@ def _case_evaluator(
     jev_observations: list[JevCriterionObservation],
     jev_latencies: list[int],
 ) -> CaseEvaluator:
-    if provider == "gemini" and not openrouter_api_key:
-        raise ValueError("OPENROUTER_API_KEY is required for the Gemini benchmark")
-    if provider != "gemini" and not typesafe_api_key:
-        raise ValueError("TYPESAFE_API_KEY is required for the Jev benchmark")
+    match relevance_policy:
+        case GeminiExecutionPolicy():
+            if not openrouter_api_key:
+                raise ValueError("OPENROUTER_API_KEY is required for the Gemini benchmark")
+            api_key = openrouter_api_key
+        case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
+            if not typesafe_api_key:
+                raise ValueError("TYPESAFE_API_KEY is required for the Jev benchmark")
+            api_key = typesafe_api_key
+        case _:
+            assert_never(relevance_policy)
 
     def evaluate_case(
         case: EvaluationManifestCase,
-        prompt_release_id: PromptReleaseId,
+        case_target: ReleaseTarget,
         trial_index: int,
     ) -> EvaluationResult:
-        if prompt_release_id != release.id:
-            raise ValueError("Benchmark prompt release changed")
+        if case_target != target:
+            raise ValueError("Benchmark release target changed")
         job = JobListing.model_validate(
             {
                 "title": case.input.title,
@@ -147,38 +182,38 @@ def _case_evaluator(
             prompt: PromptVersion,
             values: Mapping[str, str],
         ) -> CriterionResult:
-            if provider == "gemini":
-                assert openrouter_api_key is not None
-                context = ModelCallContext(
-                    processing_attempt_id=uuid4(),
-                    pipeline_run_id=uuid4(),
-                    prompt_release_id=release.id,
-                    operation_key=(
-                        f"manifest:{case.position}:{trial_index}:{prompt.definition.name}"
-                    ),
-                    input_digest=InputDigest(prompt_input_digest(values)),
-                )
-                return evaluate_openrouter_prompt(
-                    prompt,
-                    values,
-                    context,
-                    ModelCallPersistence(
-                        find_completed=lambda _request_id: None,
-                        next_attempt_number=lambda _request_id: 0,
-                        record=model_attempts.append,
-                    ),
-                    api_key=openrouter_api_key,
-                )
-
-            assert typesafe_api_key is not None
-            policy: JevPolicy = "atomic" if provider == "jev-atomic" else "faithful"
-            result = evaluate_jev_prompt(
-                prompt,
-                values,
-                api_key=typesafe_api_key,
-                policy=policy,
-                observe_request=jev_latencies.append,
-            )
+            match relevance_policy:
+                case GeminiExecutionPolicy():
+                    context = ModelCallContext(
+                        processing_attempt_id=uuid4(),
+                        pipeline_run_id=uuid4(),
+                        prompt_release_id=release.id,
+                        operation_key=(
+                            f"manifest:{case.position}:{trial_index}:{prompt.definition.name}"
+                        ),
+                        input_digest=InputDigest(prompt_input_digest(values)),
+                    )
+                    return evaluate_openrouter_prompt(
+                        prompt,
+                        values,
+                        context,
+                        ModelCallPersistence(
+                            find_completed=lambda _request_id: None,
+                            next_attempt_number=lambda _request_id: 0,
+                            record=model_attempts.append,
+                        ),
+                        api_key=api_key,
+                    )
+                case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
+                    result = evaluate_jev_prompt(
+                        prompt,
+                        values,
+                        api_key=api_key,
+                        execution_policy=relevance_policy,
+                        observe_request=jev_latencies.append,
+                    )
+                case _:
+                    assert_never(relevance_policy)
             if isinstance(result, JevCriterionObservation):
                 jev_observations.append(result)
                 return result.result

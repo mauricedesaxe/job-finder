@@ -9,12 +9,11 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from job_finder.pipeline import (
-    claim_next_job,
-    find_terminal_decision_id,
+from job_finder.pipeline.reprocess import (
     reset_mis_titled_jobs,
     select_mis_titled_jobs,
 )
+from job_finder.pipeline.state import claim_next_job, find_terminal_decision_id
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 

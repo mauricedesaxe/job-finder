@@ -6,8 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from job_finder.database import INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
+from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
+    SEARCH_SOURCE_DOMAINS,
     PersonalCriterion,
     SearchConfiguration,
     SupportedSearchSource,
@@ -19,25 +22,18 @@ from job_finder.search_configuration import (
 NOW = datetime(2026, 9, 19, 12, tzinfo=UTC)
 
 
-def test_default_configuration_reproduces_the_source_catalog() -> None:
+def test_default_configuration_tracks_the_prompt_and_search_catalog() -> None:
     configuration = DEFAULT_SEARCH_CONFIGURATION
 
-    assert len(configuration.search_keywords) == 32
-    assert configuration.enabled_sources == (
-        SupportedSearchSource.ASHBY,
-        SupportedSearchSource.LEVER,
-        SupportedSearchSource.GREENHOUSE,
-        SupportedSearchSource.WORKABLE,
+    assert configuration.search_keywords == SEARCH_KEYWORDS
+    assert tuple(SEARCH_SOURCE_DOMAINS[source] for source in configuration.enabled_sources) == (
+        SEARCH_DOMAINS
     )
-    assert tuple(item.key for item in configuration.personal_criteria) == (
-        "remote-europe-eligible",
-        "compensation-minimum",
-        "role-quality",
-        "cheap-shop-placement",
+    assert tuple(item.key for item in configuration.personal_criteria) == tuple(
+        prompt.criterion for prompt in EVALUATION_PROMPTS if prompt.phase == "filter"
     )
-    assert tuple(item.key for item in configuration.target_profiles) == (
-        "early-stage-product-engineer",
-        "applied-ai-product-engineer",
+    assert tuple(item.key for item in configuration.target_profiles) == tuple(
+        prompt.criterion for prompt in EVALUATION_PROMPTS if prompt.phase == "profile"
     )
     assert (
         search_configuration_revision_id(configuration) == INITIAL_SEARCH_CONFIGURATION_REVISION_ID
