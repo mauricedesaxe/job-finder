@@ -75,7 +75,10 @@ def test_registry_covers_exactly_the_six_evaluation_criteria_and_is_immutable() 
 
 def test_atomic_registry_covers_the_same_criteria_with_independent_questions() -> None:
     assert set(ATOMIC_QUESTIONS) == set(JEV_QUESTIONS)
-    assert len(ATOMIC_QUESTIONS["role-quality"]) == 8
+    assert len(ATOMIC_QUESTIONS["role-quality"]) == 9
+    mobile_question = ATOMIC_QUESTIONS["role-quality"]["mobile_specialist"]
+    assert "primarily" in mobile_question.instructions
+    assert "peripheral" in mobile_question.instructions
     assert len(ATOMIC_QUESTIONS["cheap-shop-placement"]) == 8
 
 
@@ -156,6 +159,39 @@ def test_atomic_policy_counts_staffing_signals_in_code() -> None:
     assert not result.result.passed
     assert abs(result.pass_probability - 0.2) < 1e-9
     assert "recruiter_for_client=0.900" in result.result.reason
+
+
+def test_atomic_policy_rejects_mobile_specialists() -> None:
+    prompt = next(
+        version
+        for version in build_prompt_release().versions
+        if version.definition.criterion == "role-quality"
+    )
+
+    def send(
+        _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+    ) -> JevHttpResponse:
+        questions = cast(dict[str, object], body["questions"])
+        probabilities = dict.fromkeys(questions, 0.1)
+        probabilities["mobile_specialist"] = 0.9
+        return JevHttpResponse(
+            status_code=200,
+            body=_multi_response_body(probabilities),
+        )
+
+    result = evaluate_prompt(
+        prompt,
+        {"job": "Senior Flutter engineer building native mobile applications."},
+        api_key="secret",
+        sender=send,
+        policy="atomic",
+        clock=iter((0.0, 0.1)).__next__,
+    )
+
+    assert isinstance(result, JevCriterionObservation)
+    assert not result.result.passed
+    assert abs(result.pass_probability - 0.1) < 1e-9
+    assert "mobile_specialist=0.900" in result.result.reason
 
 
 @pytest.mark.parametrize("status", (408, 429, 500, 529, 599))
