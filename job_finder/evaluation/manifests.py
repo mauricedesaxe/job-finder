@@ -16,7 +16,14 @@ from job_finder.evaluation.models import (
     EvaluationOutcome,
     EvaluationResult,
     PromptReleaseId,
+    ReleaseTarget,
+    RelevanceReleaseId,
     evaluation_outcome,
+)
+from job_finder.evaluation.prompt_releases import load_prompt_release
+from job_finder.evaluation.relevance_releases import (
+    load_relevance_release,
+    validate_release_target,
 )
 
 Digest = str
@@ -160,11 +167,18 @@ class EvaluationRun(ManifestModel):
     id: str = Field(pattern=r"^[0-9a-f]{64}$")
     idempotency_key: str
     manifest_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    prompt_release_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_release_id: PromptReleaseId = Field(pattern=r"^[0-9a-f]{64}$")
+    target: ReleaseTarget | None = None
     implementation_ref: str
     metrics: EvaluationMetrics
     results: tuple[EvaluationTrialResult, ...]
     completed_at: datetime
+
+    @model_validator(mode="after")
+    def target_matches_prompt_provenance(self) -> Self:
+        if self.target is not None and self.target.prompt_release_id != self.prompt_release_id:
+            raise ValueError("Evaluation run target must match prompt provenance")
+        return self
 
 
 class PromptPromotionDecision(ManifestModel):
@@ -181,7 +195,7 @@ class PromptPromotionDecision(ManifestModel):
 
 
 CaseEvaluator = Callable[
-    [EvaluationManifestCase, PromptReleaseId, int],
+    [EvaluationManifestCase, ReleaseTarget, int],
     EvaluationResult,
 ]
 
@@ -468,7 +482,7 @@ def run_manifest(
     connection: Connection,
     *,
     manifest_id: Digest,
-    prompt_release_id: PromptReleaseId,
+    target: ReleaseTarget,
     evaluator: CaseEvaluator,
     implementation_ref: str,
     completed_at: datetime,
@@ -479,22 +493,18 @@ def run_manifest(
     if existing is not None:
         if (
             existing.manifest_id != manifest_id
-            or existing.prompt_release_id != prompt_release_id
+            or existing.target != target
             or existing.implementation_ref != implementation_ref
         ):
             raise ValueError("Idempotency key belongs to a different evaluation run")
         return existing
-    if (
-        connection.execute(
-            "SELECT 1 FROM prompt_releases WHERE id = %s", (prompt_release_id,)
-        ).fetchone()
-        is None
-    ):
-        raise ValueError("Prompt release does not exist")
+    prompt_release = load_prompt_release(connection, target.prompt_release_id)
+    relevance_release = load_relevance_release(connection, target.relevance_release_id)
+    validate_release_target(target, prompt_release, relevance_release)
     manifest = load_manifest(connection, manifest_id)
     run_id = _digest({"kind": "evaluation_run", "idempotency_key": idempotency_key})
     results = tuple(
-        _trial_result(run_id, case, trial_index, evaluator(case, prompt_release_id, trial_index))
+        _trial_result(run_id, case, trial_index, evaluator(case, target, trial_index))
         for case in manifest.cases
         for trial_index in range(case.trial_count)
     )
@@ -503,7 +513,8 @@ def run_manifest(
         id=run_id,
         idempotency_key=idempotency_key,
         manifest_id=manifest_id,
-        prompt_release_id=prompt_release_id,
+        prompt_release_id=target.prompt_release_id,
+        target=target,
         implementation_ref=implementation_ref,
         metrics=metrics,
         results=results,
@@ -791,22 +802,25 @@ def _promotion_failures(
 
 
 def _insert_run(connection: Connection, run: EvaluationRun) -> None:
+    if run.target is None:
+        raise ValueError("New evaluation runs require a complete release target")
     metrics = run.metrics
     _ = connection.execute(
         """
         INSERT INTO evaluation_runs (
-          id, idempotency_key, manifest_id, prompt_release_id,
+          id, idempotency_key, manifest_id, prompt_release_id, relevance_release_id,
           expected_result_count, result_count, false_positive_count,
           false_negative_count, operational_failure_count,
           critical_false_positive_count, false_positive_rate,
           false_negative_rate, implementation_ref, completed_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             run.id,
             run.idempotency_key,
             run.manifest_id,
             run.prompt_release_id,
+            run.target.relevance_release_id,
             metrics.result_count,
             metrics.result_count,
             metrics.false_positive_count,
@@ -823,15 +837,16 @@ def _insert_run(connection: Connection, run: EvaluationRun) -> None:
         _ = connection.execute(
             """
             INSERT INTO evaluation_case_results (
-              id, run_id, manifest_id, prompt_release_id, case_position,
+              id, run_id, manifest_id, prompt_release_id, relevance_release_id, case_position,
               trial_index, expected_outcome, actual_outcome, failure_kind, reason
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 result.id,
                 run.id,
                 run.manifest_id,
                 run.prompt_release_id,
+                run.target.relevance_release_id,
                 result.case_position,
                 result.trial_index,
                 result.expected_outcome,
@@ -852,7 +867,7 @@ def load_run_by_key(connection: Connection, idempotency_key: str) -> EvaluationR
 def load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
     row = connection.execute(
         """
-        SELECT idempotency_key, manifest_id, prompt_release_id, result_count,
+        SELECT idempotency_key, manifest_id, prompt_release_id, relevance_release_id, result_count,
                false_positive_count, false_negative_count, operational_failure_count,
                critical_false_positive_count, false_positive_rate,
                false_negative_rate, implementation_ref, completed_at
@@ -875,17 +890,25 @@ def load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
         id=run_id,
         idempotency_key=str(row[0]),
         manifest_id=str(row[1]),
-        prompt_release_id=str(row[2]),
-        metrics=EvaluationMetrics(
-            result_count=int(str(row[3])),
-            false_positive_count=int(str(row[4])),
-            false_negative_count=int(str(row[5])),
-            operational_failure_count=int(str(row[6])),
-            critical_false_positive_count=int(str(row[7])),
-            false_positive_rate=Decimal(str(row[8])),
-            false_negative_rate=Decimal(str(row[9])),
+        prompt_release_id=PromptReleaseId(str(row[2])),
+        target=(
+            None
+            if row[3] is None
+            else ReleaseTarget(
+                prompt_release_id=PromptReleaseId(str(row[2])),
+                relevance_release_id=RelevanceReleaseId(str(row[3])),
+            )
         ),
-        implementation_ref=str(row[10]),
+        metrics=EvaluationMetrics(
+            result_count=int(str(row[4])),
+            false_positive_count=int(str(row[5])),
+            false_negative_count=int(str(row[6])),
+            operational_failure_count=int(str(row[7])),
+            critical_false_positive_count=int(str(row[8])),
+            false_positive_rate=Decimal(str(row[9])),
+            false_negative_rate=Decimal(str(row[10])),
+        ),
+        implementation_ref=str(row[11]),
         results=tuple(
             EvaluationTrialResult.model_validate(
                 {
@@ -900,7 +923,7 @@ def load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
             )
             for result in result_rows
         ),
-        completed_at=datetime.fromisoformat(str(row[11])),
+        completed_at=datetime.fromisoformat(str(row[12])),
     )
 
 

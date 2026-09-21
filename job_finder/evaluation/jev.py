@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import MappingProxyType
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, assert_never
 from uuid import uuid4
 
 import requests
@@ -31,6 +31,15 @@ from job_finder.evaluation.openrouter import (
 )
 from job_finder.evaluation.prompt_releases import PromptVersion
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
+from job_finder.evaluation.relevance_releases import (
+    AtomicComposition,
+    FewerThanActiveSignals,
+    JevAtomicExecutionPolicy,
+    JevFaithfulExecutionPolicy,
+    NoActiveSignals,
+    PositiveWithoutExclusion,
+    RelevanceQuestion,
+)
 
 JEV_SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
@@ -145,6 +154,14 @@ Sleeper = Callable[[float], None]
 RequestObserver = Callable[[int], None]
 RetryObserver = Callable[[RetryableOperationalError, int], None]
 JevPolicy = Literal["faithful", "atomic"]
+
+
+@dataclass(frozen=True)
+class _ResolvedExecutionPolicy:
+    questions: dict[str, JevNoulQuestion]
+    pass_threshold: float
+    atomic_composition: AtomicComposition | None
+    faithful: bool
 
 
 def _question_template(rubric: str) -> JevNoulQuestionTemplate:
@@ -307,6 +324,56 @@ def jev_policy_digest(rates: str, policy: JevPolicy = "faithful") -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _resolve_execution_policy(
+    criterion: str,
+    values: Mapping[str, str],
+    legacy_policy: JevPolicy,
+    execution_policy: JevFaithfulExecutionPolicy | JevAtomicExecutionPolicy | None,
+) -> _ResolvedExecutionPolicy:
+    if criterion not in JEV_QUESTIONS and execution_policy is None:
+        raise ValueError(f"No Jev question registered for {criterion}")
+    match execution_policy:
+        case JevFaithfulExecutionPolicy():
+            return _ResolvedExecutionPolicy(
+                questions={
+                    criterion: _render_release_question(
+                        execution_policy.questions[criterion], values
+                    )
+                },
+                pass_threshold=execution_policy.composition.pass_threshold,
+                atomic_composition=None,
+                faithful=True,
+            )
+        case JevAtomicExecutionPolicy():
+            return _ResolvedExecutionPolicy(
+                questions={
+                    name: _render_release_question(question, values)
+                    for name, question in execution_policy.questions[criterion].items()
+                },
+                pass_threshold=execution_policy.composition.pass_threshold,
+                atomic_composition=execution_policy.composition,
+                faithful=False,
+            )
+        case None:
+            faithful = legacy_policy == "faithful"
+            questions = (
+                {criterion: JEV_QUESTIONS[criterion].render(values)}
+                if faithful
+                else {
+                    name: template.render(values)
+                    for name, template in ATOMIC_QUESTIONS[criterion].items()
+                }
+            )
+            return _ResolvedExecutionPolicy(
+                questions=questions,
+                pass_threshold=JEV_PASS_THRESHOLD,
+                atomic_composition=None,
+                faithful=faithful,
+            )
+        case _:
+            assert_never(execution_policy)
+
+
 def evaluate_prompt(
     prompt: PromptVersion,
     values: Mapping[str, str],
@@ -319,6 +386,7 @@ def evaluate_prompt(
     observe_request: RequestObserver | None = None,
     observe_retry: RetryObserver | None = None,
     policy: JevPolicy = "faithful",
+    execution_policy: JevFaithfulExecutionPolicy | JevAtomicExecutionPolicy | None = None,
 ) -> JevCriterionResult:
     expected_inputs = set(prompt.definition.inputs)
     if set(values) != expected_inputs:
@@ -326,18 +394,10 @@ def evaluate_prompt(
             f"Prompt {prompt.definition.name} requires inputs {sorted(expected_inputs)}"
         )
     criterion = prompt.definition.criterion
-    if criterion not in JEV_QUESTIONS:
-        raise ValueError(f"No Jev question registered for {prompt.definition.criterion}")
-    questions = (
-        {criterion: JEV_QUESTIONS[criterion].render(values)}
-        if policy == "faithful"
-        else {
-            name: template.render(values) for name, template in ATOMIC_QUESTIONS[criterion].items()
-        }
-    )
+    resolved = _resolve_execution_policy(criterion, values, policy, execution_policy)
     request = JevSystemOneRequest(
         state=values["job"],
-        questions=questions,
+        questions=resolved.questions,
     )
     headers = {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
     request_result = _send_with_retry(
@@ -362,23 +422,27 @@ def evaluate_prompt(
             error_code="invalid_response",
             reason=str(error),
         )
-    if set(parsed.answers) != set(questions):
+    if set(parsed.answers) != set(resolved.questions):
         return TerminalOperationalError(
             prompt_name=prompt.definition.name,
             error_code="invalid_response",
             reason="Jev response did not contain exactly the requested answers",
         )
     probabilities = {name: answer.noul for name, answer in parsed.answers.items()}
-    if policy == "faithful":
+    if resolved.faithful:
         probability = probabilities[criterion]
-        passed = probability >= JEV_PASS_THRESHOLD
+        passed = probability >= resolved.pass_threshold
         comparison = "met" if passed else "was below"
         reason = (
             f"Jev pass probability {probability:.3f} {comparison} "
-            f"threshold {JEV_PASS_THRESHOLD:.3f}."
+            f"threshold {resolved.pass_threshold:.3f}."
         )
     else:
-        passed, probability = _compose_atomic(criterion, probabilities)
+        passed, probability = (
+            _compose_release_atomic(criterion, probabilities, resolved.atomic_composition)
+            if resolved.atomic_composition is not None
+            else _compose_atomic(criterion, probabilities)
+        )
         signals = ", ".join(f"{name}={value:.3f}" for name, value in probabilities.items())
         reason = f"Jev atomic policy {'passed' if passed else 'failed'}: {signals}."
     accepted = CriterionAccepted(
@@ -597,6 +661,43 @@ def _compose_atomic(criterion: str, probabilities: Mapping[str, float]) -> tuple
     }[criterion]
     pass_probability = min(probabilities[positive], 1.0 - probabilities[exclusion])
     return positive in active and exclusion not in active, pass_probability
+
+
+def _compose_release_atomic(
+    criterion: str,
+    probabilities: Mapping[str, float],
+    composition: AtomicComposition,
+) -> tuple[bool, float]:
+    threshold = composition.pass_threshold
+    active = {name for name, probability in probabilities.items() if probability >= threshold}
+    rule = composition.criteria[criterion]
+    match rule:
+        case NoActiveSignals():
+            return not active, 1.0 - max(probabilities.values())
+        case FewerThanActiveSignals():
+            ordered = sorted(probabilities.values(), reverse=True)
+            boundary = ordered[rule.count - 1] if len(ordered) >= rule.count else 0.0
+            return len(active) < rule.count, 1.0 - boundary
+        case PositiveWithoutExclusion():
+            pass_probability = min(
+                probabilities[rule.positive_question],
+                1.0 - probabilities[rule.exclusion_question],
+            )
+            return (
+                rule.positive_question in active and rule.exclusion_question not in active,
+                pass_probability,
+            )
+        case _:
+            assert_never(rule)
+
+
+def _render_release_question(
+    question: RelevanceQuestion, values: Mapping[str, str]
+) -> JevNoulQuestion:
+    return JevNoulQuestion(
+        instructions=question.instructions.format_map(values),
+        criteria=JevNoulCriteria(true=question.true, false=question.false),
+    )
 
 
 def send_system_one(
