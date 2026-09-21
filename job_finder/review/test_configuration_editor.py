@@ -1,39 +1,16 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import UTC, datetime
-from collections.abc import Generator
-from typing import cast
-
 import pytest
 from starlette.datastructures import FormData, UploadFile
 
-import job_finder.review.configuration_editor as editor_module
-from job_finder.configuration_service import (
-    ConfigurationRevisionDetails,
-    PublishedActiveSearchConfiguration,
-)
-from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.review.configuration_editor import (
     MalformedConfigurationForm,
     RawConfigurationForm,
     RawNamedRow,
     apply_configuration_edit,
     parse_configuration_form,
-    postgres_configuration_editor_service,
     transform_rows,
 )
-from job_finder.search_configuration import (
-    ActiveSearchConfiguration,
-    Connection,
-    DEFAULT_SEARCH_CONFIGURATION,
-    SearchConfigurationDraft,
-    SearchConfigurationPublication,
-    SearchConfigurationRevision,
-    search_configuration_revision_id,
-)
-
-NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 
 
 def test_form_parser_preserves_order_whitespace_blanks_and_duplicates() -> None:
@@ -142,83 +119,3 @@ def test_named_and_source_row_actions_preserve_exact_values() -> None:
 def test_form_parser_rejects_malformed_transport(form: FormData) -> None:
     with pytest.raises(MalformedConfigurationForm):
         parse_configuration_form(form)
-
-
-def test_postgres_adapter_opens_one_connection_for_inspection_and_has_no_sql(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    connection = cast(Connection, object())
-    opens = 0
-    draft = _draft()
-    active = _active()
-    revision = ConfigurationRevisionDetails(
-        revision=active.active.revision,
-        publication=active.publication,
-    )
-
-    @contextmanager
-    def connect() -> Generator[Connection, None, None]:
-        nonlocal opens
-        opens += 1
-        yield connection
-
-    def get_draft(_connection: Connection) -> SearchConfigurationDraft:
-        return draft
-
-    def get_active(_connection: Connection) -> PublishedActiveSearchConfiguration:
-        return active
-
-    def get_revision(_connection: Connection, _revision_id: object) -> ConfigurationRevisionDetails:
-        return revision
-
-    monkeypatch.setattr(editor_module, "get_search_configuration_draft", get_draft)
-    monkeypatch.setattr(editor_module, "get_active_search_configuration", get_active)
-    monkeypatch.setattr(
-        editor_module,
-        "get_search_configuration_revision",
-        get_revision,
-    )
-
-    state = postgres_configuration_editor_service(connect).inspect()
-
-    assert opens == 1
-    assert state.draft == draft
-    assert state.active == active
-    assert state.saved_revision == revision
-
-
-def _draft() -> SearchConfigurationDraft:
-    revision_id = search_configuration_revision_id(DEFAULT_SEARCH_CONFIGURATION)
-    return SearchConfigurationDraft(
-        base_revision_id=revision_id,
-        version=4,
-        configuration=DEFAULT_SEARCH_CONFIGURATION,
-        updated_at=NOW,
-        updated_by="owner",
-    )
-
-
-def _active() -> PublishedActiveSearchConfiguration:
-    revision_id = search_configuration_revision_id(DEFAULT_SEARCH_CONFIGURATION)
-    release = build_prompt_release(DEFAULT_SEARCH_CONFIGURATION)
-    revision = SearchConfigurationRevision(
-        id=revision_id,
-        configuration=DEFAULT_SEARCH_CONFIGURATION,
-        created_at=NOW,
-        created_by="owner",
-    )
-    publication = SearchConfigurationPublication(
-        revision_id=revision_id,
-        prompt_release_id=release.id,
-        published_at=NOW,
-        published_by="owner",
-    )
-    return PublishedActiveSearchConfiguration(
-        active=ActiveSearchConfiguration(
-            generation=2,
-            revision=revision,
-            activated_at=NOW,
-            activated_by="owner",
-        ),
-        publication=publication,
-    )

@@ -9,6 +9,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from secrets import token_hex
 from threading import Barrier
 from typing import LiteralString, cast
 from uuid import UUID, uuid4
@@ -31,6 +32,7 @@ from job_finder.configuration_service import (
     ConfigurationPublished,
     ConfigurationRevisionCursor,
     ConfigurationRevisionDetails,
+    ConfigurationRevisionNotFound,
     ConfigurationRevisionPage,
     DraftChanged,
     DraftSaved,
@@ -94,6 +96,7 @@ from job_finder.jobs.decision_pipeline import (
 from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
+from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.models import ReviewSaved, ReviewSubmission
 from job_finder.review.postgres import (
     deterministic_rejected_sample,
@@ -159,40 +162,44 @@ def authority_schema() -> Iterator[str]:
             )
 
 
+EXPECTED_MIGRATIONS = (
+    "0001_authoritative_job_state.sql",
+    "0002_model_call_response_model.sql",
+    "0003_one_review_event_per_item.sql",
+    "0004_evaluation_manifests.sql",
+    "0005_dagster_orchestration.sql",
+    "0006_stored_prompt_execution.sql",
+    "0007_model_call_request_messages.sql",
+    "0008_pending_usage_response_model.sql",
+    "0009_frozen_daily_reviews.sql",
+    "0010_review_event_revisions.sql",
+    "0011_review_queue.sql",
+    "0012_company_application_cooldown.sql",
+    "0013_snapshot_compensation.sql",
+    "0014_snapshot_corrections.sql",
+    "0015_manifest_idempotency.sql",
+    "0016_search_configuration_revisions.sql",
+    "0017_search_configuration_publications.sql",
+    "0018_published_search_configuration_pointers.sql",
+    "0019_configuration_publication_receipts.sql",
+    "0020_pipeline_run_configuration_revisions.sql",
+    "0021_typesafe_model_provider.sql",
+    "0022_relevance_releases.sql",
+    "0023_unbounded_review_event_notes.sql",
+)
+
+
 def test_migrations_are_repeatable(authority_schema: str) -> None:
     with _connection(authority_schema) as connection:
         first = apply_migrations(connection)
         second = apply_migrations(connection)
 
-        assert first == (
-            "0001_authoritative_job_state.sql",
-            "0002_model_call_response_model.sql",
-            "0003_one_review_event_per_item.sql",
-            "0004_evaluation_manifests.sql",
-            "0005_dagster_orchestration.sql",
-            "0006_stored_prompt_execution.sql",
-            "0007_model_call_request_messages.sql",
-            "0008_pending_usage_response_model.sql",
-            "0009_frozen_daily_reviews.sql",
-            "0010_review_event_revisions.sql",
-            "0011_review_queue.sql",
-            "0012_company_application_cooldown.sql",
-            "0013_snapshot_compensation.sql",
-            "0014_snapshot_corrections.sql",
-            "0015_manifest_idempotency.sql",
-            "0016_search_configuration_revisions.sql",
-            "0017_search_configuration_publications.sql",
-            "0018_published_search_configuration_pointers.sql",
-            "0019_configuration_publication_receipts.sql",
-            "0020_pipeline_run_configuration_revisions.sql",
-            "0021_typesafe_model_provider.sql",
-            "0022_relevance_releases.sql",
-            "0023_unbounded_review_event_notes.sql",
-        )
+        assert first == EXPECTED_MIGRATIONS
+        assert list(first) == sorted(first)
         assert second == first
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
-        ).fetchone() == (23,)
+        ).fetchone() == (len(EXPECTED_MIGRATIONS),)
 
 
 def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_notes(
@@ -251,8 +258,7 @@ def test_concurrent_migration_startup_serializes_schema_writes(
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = tuple(executor.map(migrate_for_index, range(2)))
 
-    assert results[0] == results[1]
-    assert results[0][-1] == "0023_unbounded_review_event_notes.sql"
+    assert results[0] == results[1] == EXPECTED_MIGRATIONS
 
 
 def test_search_configuration_migration_preserves_every_legacy_row(
@@ -299,9 +305,8 @@ def test_search_configuration_migration_preserves_every_legacy_row(
         legacy_tables = _public_tables(connection)
         before = _table_contents(connection, legacy_tables)
 
-        migrations = apply_migrations(connection)
+        apply_migrations(connection)
 
-        assert migrations[-1] == "0023_unbounded_review_event_notes.sql"
         expected = dict(before)
         expected["pipeline_runs"] = [
             {**row, "configuration_revision_id": None}
@@ -616,6 +621,17 @@ def test_configuration_revision_reads_use_stable_compound_keyset_pagination(
         )
 
 
+def test_get_search_configuration_revision_reports_a_missing_revision(
+    authority_schema: str,
+) -> None:
+    missing_revision_id = SearchConfigurationRevisionId(token_hex(32))
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+        with pytest.raises(ConfigurationRevisionNotFound):
+            get_search_configuration_revision(connection, missing_revision_id)
+
+
 def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
     authority_schema: str,
 ) -> None:
@@ -725,6 +741,178 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
             ),
         )
         assert run.configuration_revision_id == expected_revision_id
+
+
+def test_configuration_editor_inspects_the_live_draft_active_and_saved_revisions(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+
+    service = postgres_configuration_editor_service(connect=lambda: _connection(authority_schema))
+    state = service.inspect()
+
+    assert state.draft.version == 0
+    assert state.draft.base_revision_id == SearchConfigurationRevisionId(
+        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    )
+    assert state.draft.configuration == DEFAULT_SEARCH_CONFIGURATION
+    assert state.active.active.generation == 0
+    assert state.active.active.revision.id == SearchConfigurationRevisionId(
+        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    )
+    assert state.active.publication.revision_id == SearchConfigurationRevisionId(
+        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    )
+    assert state.content_revision_id == SearchConfigurationRevisionId(
+        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    )
+    assert state.saved_revision is not None
+    assert state.saved_revision.revision.id == SearchConfigurationRevisionId(
+        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
+    )
+    assert state.saved_revision.publication is not None
+
+
+def test_mcp_configuration_conflicts_surface_as_structured_results(
+    authority_schema: str,
+) -> None:
+    unpublished_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={"search_keywords": ("mcp-never-published",)}
+    )
+    unpublished_revision = build_search_configuration_revision(
+        unpublished_configuration,
+        created_at=datetime(2030, 1, 2, tzinfo=UTC),
+        created_by="mcp-contract-owner",
+    )
+    first_publication_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={"search_keywords": ("mcp-conflict-first",)}
+    )
+    second_publication_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
+        update={"search_keywords": ("mcp-conflict-second",)}
+    )
+    idempotency_key = "mcp-contract-conflict-publish"
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        _ = store_search_configuration_revision(connection, unpublished_revision)
+
+    server = create_mcp_server(
+        McpDependencies(
+            connect=lambda: _connection(authority_schema),
+            actor="mcp-contract-owner",
+            now=lambda: datetime(2030, 1, 2, tzinfo=UTC),
+        )
+    )
+
+    async def conflict_flows() -> None:
+        async with Client(server) as client:
+            draft_result = await client.call_tool("configuration_draft_get", {})
+            draft = SearchConfigurationDraft.model_validate(draft_result.structured_content)
+
+            stale_result = await client.call_tool(
+                "configuration_draft_update",
+                {
+                    "expected_version": draft.version + 1,
+                    "configuration": first_publication_configuration.model_dump(mode="json"),
+                },
+            )
+            assert stale_result.structured_content is not None
+            stale = DraftChanged.model_validate(stale_result.structured_content["result"])
+            assert stale.current_draft == draft
+
+            saved_result = await client.call_tool(
+                "configuration_draft_update",
+                {
+                    "expected_version": draft.version,
+                    "configuration": first_publication_configuration.model_dump(mode="json"),
+                },
+            )
+            assert saved_result.structured_content is not None
+            saved = DraftSaved.model_validate(saved_result.structured_content["result"])
+            assert saved.draft.version == draft.version + 1
+
+            published_result = await client.call_tool(
+                "configuration_publish",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_draft_version": saved.draft.version,
+                    "expected_configuration_revision_id": search_configuration_revision_id(
+                        first_publication_configuration
+                    ),
+                },
+            )
+            assert published_result.structured_content is not None
+            published = ConfigurationPublished.model_validate(
+                published_result.structured_content["result"]
+            )
+            assert published.replayed is False
+            assert published.publication.revision_id == search_configuration_revision_id(
+                first_publication_configuration
+            )
+
+            rebased_result = await client.call_tool("configuration_draft_get", {})
+            rebased = SearchConfigurationDraft.model_validate(rebased_result.structured_content)
+            assert rebased.version == saved.draft.version + 1
+
+            resaved_result = await client.call_tool(
+                "configuration_draft_update",
+                {
+                    "expected_version": rebased.version,
+                    "configuration": second_publication_configuration.model_dump(mode="json"),
+                },
+            )
+            assert resaved_result.structured_content is not None
+            resaved = DraftSaved.model_validate(resaved_result.structured_content["result"])
+
+            conflict_result = await client.call_tool(
+                "configuration_publish",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_draft_version": resaved.draft.version,
+                    "expected_configuration_revision_id": search_configuration_revision_id(
+                        second_publication_configuration
+                    ),
+                },
+            )
+            assert conflict_result.structured_content is not None
+            conflict = PublicationIdempotencyKeyConflict.model_validate(
+                conflict_result.structured_content["result"]
+            )
+            assert conflict.idempotency_key == idempotency_key
+
+            active_result = await client.call_tool("configuration_active_get", {})
+            active = PublishedActiveSearchConfiguration.model_validate(
+                active_result.structured_content
+            )
+
+            unpublished_target_result = await client.call_tool(
+                "configuration_activate",
+                {
+                    "target_revision_id": unpublished_revision.id,
+                    "expected_active_revision_id": active.active.revision.id,
+                    "expected_generation": active.active.generation,
+                },
+            )
+            assert unpublished_target_result.structured_content is not None
+            unpublished_target = ActivationTargetUnpublished.model_validate(
+                unpublished_target_result.structured_content["result"]
+            )
+            assert unpublished_target.target_revision_id == unpublished_revision.id
+
+    asyncio.run(conflict_flows())
+
+    with _connection(authority_schema) as connection:
+        assert connection.execute(
+            """
+            SELECT outcome FROM search_configuration_publication_receipts
+            WHERE idempotency_key = %s
+            """,
+            (idempotency_key,),
+        ).fetchall() == [("published",)]
+        assert connection.execute(
+            "SELECT revision_id FROM active_search_configuration WHERE singleton_id = 1"
+        ).fetchone() == (INITIAL_SEARCH_CONFIGURATION_REVISION_ID,)
 
 
 def test_configuration_service_saves_a_draft_and_preserves_its_base(
@@ -2075,6 +2263,165 @@ def test_records_and_reuses_a_terminal_model_error(authority_schema: str) -> Non
     assert isinstance(first, TerminalOperationalError)
     assert second == first
     assert calls == 1
+
+
+def test_accepted_model_call_attempts_require_provider_provenance(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        version = release.versions[0]
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id, parameters,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'evaluation', 'provenance-ref', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"evaluation:{run_id}", release.id, now, now),
+        )
+
+        def insert_model_call_attempt(
+            *,
+            provider: str,
+            status: str,
+            provider_response_id: str | None,
+            raw_response: object,
+            parsed_output: object,
+            response_model: str | None,
+            error: object,
+            input_tokens: int | None,
+            output_tokens: int | None,
+            cost_usd: Decimal | None,
+        ) -> str:
+            request_id = token_hex(32)
+            processing_attempt_id = uuid4()
+            input_digest = token_hex(32)
+            connection.execute(
+                """
+                INSERT INTO processing_attempts (
+                  id, pipeline_run_id, operation_key, attempt_number, input_digest,
+                  status, started_at, completed_at
+                ) VALUES (%s, %s, %s, 0, %s, 'completed', %s, %s)
+                """,
+                (processing_attempt_id, run_id, request_id, input_digest, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO model_call_attempts (
+                  id, processing_attempt_id, pipeline_run_id, prompt_release_id, request_id,
+                  attempt_number, operation_key, prompt_name, prompt_version_id, input_digest,
+                  requested_model, provider, provider_response_id, status, parsed_output,
+                  raw_response, input_tokens, output_tokens, cost_usd, latency_ms, observed_at,
+                  request_messages, response_model, error
+                ) VALUES (
+                  %s, %s, %s, %s, %s, 0, %s, %s, %s, %s,
+                  'provenance-model', %s, %s, %s, %s, %s, %s, %s, %s, 1, %s,
+                  '[]'::jsonb, %s, %s
+                )
+                """,
+                (
+                    uuid4(),
+                    processing_attempt_id,
+                    run_id,
+                    release.id,
+                    request_id,
+                    request_id,
+                    version.definition.name,
+                    version.id,
+                    input_digest,
+                    provider,
+                    provider_response_id,
+                    status,
+                    None if parsed_output is None else Jsonb(parsed_output),
+                    None if raw_response is None else Jsonb(raw_response),
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                    now,
+                    response_model,
+                    None if error is None else Jsonb(error),
+                ),
+            )
+            return request_id
+
+        with pytest.raises(psycopg.errors.CheckViolation) as missing_raw_response:
+            insert_model_call_attempt(
+                provider="typesafe",
+                status="accepted",
+                provider_response_id=None,
+                raw_response=None,
+                parsed_output={"pass": True},
+                response_model="provenance-model",
+                error=None,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal("0.00000001"),
+            )
+        assert (
+            missing_raw_response.value.diag.constraint_name
+            == "model_call_attempts_accepted_provenance"
+        )
+
+        with pytest.raises(psycopg.errors.CheckViolation) as missing_provider_response:
+            insert_model_call_attempt(
+                provider="openrouter",
+                status="accepted",
+                provider_response_id=None,
+                raw_response={"id": "generation-1"},
+                parsed_output={"pass": True},
+                response_model="provenance-model",
+                error=None,
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal("0.00000001"),
+            )
+        assert (
+            missing_provider_response.value.diag.constraint_name
+            == "model_call_attempts_accepted_provenance"
+        )
+
+        with pytest.raises(psycopg.errors.CheckViolation) as unsupported_provider:
+            insert_model_call_attempt(
+                provider="anthropic",
+                status="terminal_error",
+                provider_response_id=None,
+                raw_response=None,
+                parsed_output=None,
+                response_model=None,
+                error={"code": "unauthorized"},
+                input_tokens=None,
+                output_tokens=None,
+                cost_usd=None,
+            )
+        assert (
+            unsupported_provider.value.diag.constraint_name == "model_call_attempts_provider_check"
+        )
+
+        relaxed_request_id = insert_model_call_attempt(
+            provider="typesafe",
+            status="accepted",
+            provider_response_id=None,
+            raw_response={"choices": []},
+            parsed_output={"pass": True},
+            response_model="provenance-model",
+            error=None,
+            input_tokens=1,
+            output_tokens=1,
+            cost_usd=Decimal("0.00000001"),
+        )
+        assert connection.execute(
+            """
+            SELECT provider, status, provider_response_id, raw_response IS NOT NULL
+            FROM model_call_attempts
+            WHERE request_id = %s
+            """,
+            (relaxed_request_id,),
+        ).fetchone() == ("typesafe", "accepted", None, True)
 
 
 def test_persists_a_terminal_decision_atomically_and_idempotently(
