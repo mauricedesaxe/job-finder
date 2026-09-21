@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
+from pathlib import Path
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -151,6 +152,7 @@ from job_finder.evaluation.prompt_releases import (
     store_prompt_release,
 )
 from job_finder.evaluation.relevance_releases import (
+    CodeArtifactIdentity,
     JevFaithfulExecutionPolicy,
     RelevanceReleaseError,
     build_gemini_policy,
@@ -297,13 +299,19 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             timestamp=now + timedelta(minutes=1),
         )
         source_artifact_identity = relevance_releases_module.source_artifact_identity
+
+        def drifted_source_artifact_identity(
+            entrypoint: str, source_path: Path
+        ) -> CodeArtifactIdentity:
+            return source_artifact_identity(entrypoint, source_path).model_copy(
+                update={"content_digest": "0" * 64}
+            )
+
         with monkeypatch.context() as patch:
             patch.setattr(
                 relevance_releases_module,
                 "source_artifact_identity",
-                lambda entrypoint, source_path: source_artifact_identity(
-                    entrypoint, source_path
-                ).model_copy(update={"content_digest": "0" * 64}),
+                drifted_source_artifact_identity,
             )
             with pytest.raises(
                 ReleaseTargetLifecycleError,
@@ -320,9 +328,7 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             patch.setattr(
                 relevance_releases_module,
                 "source_artifact_identity",
-                lambda entrypoint, source_path: source_artifact_identity(
-                    entrypoint, source_path
-                ).model_copy(update={"content_digest": "0" * 64}),
+                drifted_source_artifact_identity,
             )
             stale = activate_release_target(
                 connection,
