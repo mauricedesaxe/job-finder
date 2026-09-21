@@ -4,13 +4,14 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar, Literal, NewType, Self
+from typing import Annotated, ClassVar, Literal, NewType
 
 import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
+from job_finder.evaluation.models import PromptReleaseId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 
 Connection = psycopg.Connection[tuple[object, ...]]
@@ -46,6 +47,14 @@ def _require_database_safe_text(value: str) -> None:
 
 
 class SearchConfigurationError(RuntimeError):
+    pass
+
+
+class SearchConfigurationRevisionNotFound(SearchConfigurationError):
+    pass
+
+
+class SearchConfigurationPublicationNotFound(SearchConfigurationError):
     pass
 
 
@@ -104,17 +113,32 @@ class SearchConfiguration(SearchConfigurationModel):
             raise ValueError("Search keywords must be unique")
         return values
 
-    @model_validator(mode="after")
-    def members_are_unique(self) -> Self:
-        if len(set(self.enabled_sources)) != len(self.enabled_sources):
+    @field_validator("enabled_sources")
+    @classmethod
+    def sources_are_unique(
+        cls, values: tuple[SupportedSearchSource, ...]
+    ) -> tuple[SupportedSearchSource, ...]:
+        if len(set(values)) != len(values):
             raise ValueError("Enabled sources must be unique")
-        if len({criterion.key for criterion in self.personal_criteria}) != len(
-            self.personal_criteria
-        ):
+        return values
+
+    @field_validator("personal_criteria")
+    @classmethod
+    def criterion_keys_are_unique(
+        cls, values: tuple[PersonalCriterion, ...]
+    ) -> tuple[PersonalCriterion, ...]:
+        if len({criterion.key for criterion in values}) != len(values):
             raise ValueError("Personal criterion keys must be unique")
-        if len({profile.key for profile in self.target_profiles}) != len(self.target_profiles):
+        return values
+
+    @field_validator("target_profiles")
+    @classmethod
+    def profile_keys_are_unique(
+        cls, values: tuple[TargetProfile, ...]
+    ) -> tuple[TargetProfile, ...]:
+        if len({profile.key for profile in values}) != len(values):
             raise ValueError("Target profile keys must be unique")
-        return self
+        return values
 
 
 class SearchConfigurationRevision(SearchConfigurationModel):
@@ -122,6 +146,13 @@ class SearchConfigurationRevision(SearchConfigurationModel):
     configuration: SearchConfiguration
     created_at: datetime
     created_by: str = Field(min_length=1)
+
+
+class SearchConfigurationPublication(SearchConfigurationModel):
+    revision_id: Annotated[SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")]
+    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    published_at: datetime
+    published_by: str = Field(min_length=1)
 
 
 class SearchConfigurationDraft(SearchConfigurationModel):
@@ -210,7 +241,9 @@ def load_search_configuration_revision(
         (revision_id,),
     ).fetchone()
     if row is None:
-        raise SearchConfigurationError(f"Search configuration revision not found: {revision_id}")
+        raise SearchConfigurationRevisionNotFound(
+            f"Search configuration revision not found: {revision_id}"
+        )
     revision = SearchConfigurationRevision.model_validate(
         {
             "id": revision_id,
@@ -253,6 +286,32 @@ def store_search_configuration_revision(
             f"Stored search configuration differs from revision {revision.id}"
         )
     return stored
+
+
+def load_search_configuration_publication(
+    connection: Connection,
+    revision_id: SearchConfigurationRevisionId,
+) -> SearchConfigurationPublication:
+    row = connection.execute(
+        """
+        SELECT prompt_release_id, published_at, published_by
+        FROM search_configuration_publications
+        WHERE revision_id = %s
+        """,
+        (revision_id,),
+    ).fetchone()
+    if row is None:
+        raise SearchConfigurationPublicationNotFound(
+            f"Search configuration publication not found: {revision_id}"
+        )
+    return SearchConfigurationPublication.model_validate(
+        {
+            "revision_id": revision_id,
+            "prompt_release_id": row[0],
+            "published_at": row[1],
+            "published_by": row[2],
+        }
+    )
 
 
 def load_search_configuration_draft(connection: Connection) -> SearchConfigurationDraft:

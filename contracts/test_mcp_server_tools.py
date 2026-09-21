@@ -48,6 +48,15 @@ _TOOL_NAMES = {
     "manifest_get",
     "manifest_list",
     "langfuse_projection_status",
+    "configuration_active_get",
+    "configuration_draft_get",
+    "configuration_validate",
+    "configuration_preview",
+    "configuration_draft_update",
+    "configuration_publish",
+    "configuration_revision_list",
+    "configuration_revision_get",
+    "configuration_activate",
 }
 
 

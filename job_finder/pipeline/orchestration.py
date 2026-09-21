@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable
 from job_finder.ats.policy import ats_structural_filter, format_ats_block
-from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
 from job_finder.discovery.exchange_rates import format_compensation_rates
 from job_finder.discovery.jina import (
     JinaUnavailable,
@@ -22,6 +21,7 @@ from job_finder.discovery.jina import (
     search_jobs,
 )
 from job_finder.evaluation.evaluate import evaluate_job
+from job_finder.evaluation.jev import JevRetryPolicy, JevSender, evaluate_persisted_prompt
 from job_finder.evaluation.models import (
     CriterionResult,
     OperationalError,
@@ -34,7 +34,6 @@ from job_finder.evaluation.models import (
 from job_finder.evaluation.openrouter import (
     ChatCompletionSender,
     RetryPolicy,
-    evaluate_prompt,
     postgres_model_call_persistence,
     prompt_input_digest,
 )
@@ -76,6 +75,10 @@ from job_finder.pipeline.state import (
     terminally_fail_job_claim,
 )
 from job_finder.review import enqueue_qualified_review_item
+from job_finder.search_configuration import (
+    SEARCH_SOURCE_DOMAINS,
+    load_search_configuration_revision,
+)
 
 POLICY_VERSION = "orchestration-v1"
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -92,6 +95,8 @@ class PipelineBoundaries:
     fetch_ats: AtsBoundary
     model_sender: ChatCompletionSender | None = None
     model_retry_policy: RetryPolicy | None = None
+    jev_sender: JevSender | None = None
+    jev_retry_policy: JevRetryPolicy | None = None
 
 
 class PipelineServiceModel(BaseModel):
@@ -151,7 +156,14 @@ def discover_jobs(
         raise ValueError("Discovery requires a running orchestration run")
     if max_workers < 1:
         raise ValueError("Discovery requires at least one search worker")
-    queries = tuple((keyword, domain) for keyword in SEARCH_KEYWORDS for domain in SEARCH_DOMAINS)
+    configuration = load_search_configuration_revision(
+        connection, run.configuration_revision_id
+    ).configuration
+    queries = tuple(
+        (keyword, SEARCH_SOURCE_DOMAINS[source])
+        for keyword in configuration.search_keywords
+        for source in configuration.enabled_sources
+    )
 
     def run_search(query: tuple[str, str]) -> SearchResult:
         return boundaries.search(*query)
@@ -189,6 +201,7 @@ def process_claimed_jobs(
     boundaries: PipelineBoundaries,
     *,
     openrouter_api_key: str,
+    typesafe_api_key: str | None = None,
     owner_token: UUID,
     observed_at: datetime,
     max_items: int,
@@ -227,6 +240,7 @@ def process_claimed_jobs(
                 claim,
                 boundaries,
                 openrouter_api_key=openrouter_api_key,
+                typesafe_api_key=typesafe_api_key,
                 observed_at=observed_at,
                 retry_after=retry_after,
                 enable_ats_enrichment=enable_ats_enrichment,
@@ -260,6 +274,7 @@ def _process_claim(
     boundaries: PipelineBoundaries,
     *,
     openrouter_api_key: str,
+    typesafe_api_key: str | None,
     observed_at: datetime,
     retry_after: timedelta,
     enable_ats_enrichment: bool,
@@ -343,6 +358,8 @@ def _process_claim(
 
     if len(body.strip()) < THIN_BODY_THRESHOLD:
         return _fail_thin_scrape(connection, claim, now(), retry_after)
+    if not typesafe_api_key:
+        raise ValueError("TYPESAFE_API_KEY is required for relevance evaluation")
 
     evaluation = evaluate_job(
         listing,
@@ -354,7 +371,7 @@ def _process_claim(
             prompt,
             values,
             boundaries,
-            openrouter_api_key,
+            typesafe_api_key,
             now,
         ),
         rates=format_compensation_rates(run.exchange_rates.rates),
@@ -441,14 +458,14 @@ def _evaluate_criterion(
         started_at=now(),
         prompt_release_id=run.prompt_release_id,
     )
-    result = evaluate_prompt(
+    result = evaluate_persisted_prompt(
         prompt,
         values,
         context,
-        postgres_model_call_persistence(connection),
+        postgres_model_call_persistence(connection, provider="typesafe"),
         api_key=api_key,
-        sender=boundaries.model_sender,
-        retry_policy=boundaries.model_retry_policy,
+        sender=boundaries.jev_sender,
+        retry_policy=boundaries.jev_retry_policy,
         now=now,
     )
     if isinstance(result, OperationalError):
