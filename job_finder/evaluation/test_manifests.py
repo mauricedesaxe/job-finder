@@ -18,6 +18,7 @@ from job_finder.evaluation.manifests import (
     ManifestPolicy,
     RunningEvaluationExecution,
     aggregate_evaluation_telemetry,
+    compare_runs,
     exchange_rate_snapshot_digest,
     score_results,
 )
@@ -215,6 +216,52 @@ def test_aggregate_evaluation_telemetry_marks_incomplete_usage() -> None:
     assert recovered.usage_complete
 
 
+def test_compares_case_transitions_deterministically_for_distinct_release_targets() -> None:
+    manifest = _manifest()
+    baseline_results = (
+        _result(0, 0, "rejected", "qualified", "false_positive"),
+        _result(0, 1, "rejected", "rejected", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(1, 0, "qualified", None, "operational"),
+        _result(2, 0, "qualified", "qualified", None),
+    )
+    candidate_results = (
+        _result(2, 0, "qualified", "qualified", None),
+        _result(1, 0, "qualified", "qualified", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(0, 1, "rejected", "rejected", None),
+        _result(0, 0, "rejected", "rejected", None),
+    )
+    baseline = _run("b" * 64, "c" * 64, manifest, baseline_results)
+    candidate = _run("d" * 64, "e" * 64, manifest, candidate_results)
+
+    comparison = compare_runs(manifest, baseline, candidate)
+
+    assert baseline.target is not None
+    assert candidate.target is not None
+    assert baseline.target.prompt_release_id == candidate.target.prompt_release_id
+    assert comparison.baseline_target == baseline.target
+    assert comparison.candidate_target == candidate.target
+    assert comparison.improvement_count == 2
+    assert comparison.regression_count == 0
+    assert [trial.transition for case in comparison.cases for trial in case.trials] == [
+        "improvement",
+        "unchanged",
+        "unchanged",
+        "improvement",
+        "unchanged",
+    ]
+    assert compare_runs(manifest, baseline, candidate) == comparison
+    with pytest.raises(ValueError, match="metrics must match"):
+        compare_runs(
+            manifest,
+            baseline,
+            candidate.model_copy(update={"metrics": baseline.metrics}),
+        )
+    with pytest.raises(ValueError, match="release targets must differ"):
+        compare_runs(manifest, baseline, baseline.model_copy(update={"id": "f" * 64}))
+
+
 def _manifest() -> EvaluationManifest:
     return EvaluationManifest(
         id="a" * 64,
@@ -278,4 +325,27 @@ def _result(
             "failure_kind": failure,
             "reason": "Fixture result.",
         }
+    )
+
+
+def _run(
+    run_id: str,
+    relevance_release_id: str,
+    manifest: EvaluationManifest,
+    results: tuple[EvaluationTrialResult, ...],
+) -> EvaluationRun:
+    prompt_release_id = PromptReleaseId("9" * 64)
+    return EvaluationRun(
+        id=run_id,
+        idempotency_key=f"run:{run_id}",
+        manifest_id=manifest.id,
+        prompt_release_id=prompt_release_id,
+        target=ReleaseTarget(
+            prompt_release_id=prompt_release_id,
+            relevance_release_id=RelevanceReleaseId(relevance_release_id),
+        ),
+        implementation_ref="test",
+        metrics=score_results(manifest, results),
+        results=results,
+        completed_at=NOW,
     )

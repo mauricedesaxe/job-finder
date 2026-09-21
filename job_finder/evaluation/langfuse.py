@@ -316,8 +316,10 @@ def _run_observation(projection: LangfuseProjection, run: EvaluationRun) -> Obse
         "EVALUATOR",
         "job-finder-evaluation-run",
         {
+            "run_id": run.id,
             "manifest_id": run.manifest_id,
             "prompt_release_id": run.prompt_release_id,
+            "target": None if run.target is None else run.target.model_dump(mode="json"),
         },
         {
             "metrics": run.metrics.model_dump(mode="json"),
@@ -346,6 +348,19 @@ def _promotion_observation(
             "actor": promotion.actor,
             "baseline_prompt_release_id": promotion.baseline_prompt_release_id,
             "candidate_prompt_release_id": promotion.candidate_prompt_release_id,
+            "baseline_target": (
+                None
+                if promotion.baseline_target is None
+                else promotion.baseline_target.model_dump(mode="json")
+            ),
+            "candidate_target": (
+                None
+                if promotion.candidate_target is None
+                else promotion.candidate_target.model_dump(mode="json")
+            ),
+            "comparison_id": promotion.comparison_id,
+            "eligible": promotion.eligible,
+            "eligibility_failures": list(promotion.eligibility_failures),
         },
         promotion.created_at,
     )
