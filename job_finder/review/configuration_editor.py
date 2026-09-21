@@ -232,11 +232,12 @@ def transform_rows(raw: RawConfigurationForm, action: str) -> RawConfigurationFo
 
 
 def authenticated_masthead(
-    csrf_token: str, *, current: Literal["review", "configuration"]
+    csrf_token: str, *, current: Literal["operations", "review", "configuration"]
 ) -> object:
     return Div(
         Div(Strong("JF", cls="wordmark"), Small("Owner workbench", cls="masthead-label")),
         Nav(
+            A("Operations", href="/", aria_current="page" if current == "operations" else None),
             A("Review", href="/review", aria_current="page" if current == "review" else None),
             A(
                 "Search setup",

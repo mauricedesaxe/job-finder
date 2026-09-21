@@ -8,6 +8,7 @@ from job_finder.config import DatabaseSettings, ReviewAppSettings
 from job_finder.database import apply_migrations
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
+from job_finder.review.operations import postgres_operations_service
 from job_finder.review.postgres import postgres_review_service
 
 
@@ -30,4 +31,5 @@ def create_app() -> FastHTML:
         postgres_configuration_editor_service(connect),
         settings,
         readiness=readiness,
+        operations_service=postgres_operations_service(connect),
     )

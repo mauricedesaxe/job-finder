@@ -25,6 +25,15 @@ from job_finder.review.models import (
     ReviewSubmission,
     ReviewSubmitResult,
 )
+from job_finder.review.operations import (
+    FailureSample,
+    OperationsHealth,
+    OperationsService,
+    OperationsSnapshot,
+    PipelineRunSummary,
+    QueueCounts,
+    SpendSummary,
+)
 from job_finder.review.postgres import ReviewService
 
 TODAY = date(2026, 9, 10)
@@ -37,6 +46,78 @@ SETTINGS = ReviewAppSettings(
 )
 
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
+
+
+def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None:
+    snapshot = OperationsSnapshot(
+        health=OperationsHealth.ACTION_REQUIRED,
+        queues=QueueCounts(pending=2, leased=1, retrying=3, completed=20, terminal_error=1),
+        spend=SpendSummary(known_usd=Decimal("1.2345"), unknown_attempts=4),
+        recent_runs=(
+            PipelineRunSummary(
+                id=UUID(int=20),
+                kind="orchestration",
+                status="failed",
+                started_at=NOW,
+                completed_at=NOW,
+            ),
+        ),
+        failures=(
+            FailureSample(
+                source="job",
+                occurred_at=NOW,
+                summary="provider_timeout: OpenRouter did not respond",
+            ),
+        ),
+    )
+    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Action required" in response.text
+    assert "2 pending" in response.text
+    assert "1 leased" in response.text
+    assert "3 retrying" in response.text
+    assert "20 completed" in response.text
+    assert "1 terminal error" in response.text
+    assert "pendings" not in response.text
+    assert "leaseds" not in response.text
+    assert "retryings" not in response.text
+    assert "completeds" not in response.text
+    assert "$1.2345" in response.text
+    assert "4 attempts have no recorded cost" in response.text
+    assert "OpenRouter did not respond" in response.text
+    assert "Dagster schedule status is not available here yet." in response.text
+    assert 'aria-current="page">Operations' in response.text
+    assert 'href="/review"' in response.text
+    assert 'href="/configuration"' in response.text
+
+
+def test_the_operations_home_requires_the_existing_owner_session() -> None:
+    app = create_review_app(
+        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        _configuration_service(),
+        SETTINGS,
+        now=lambda: NOW,
+    )
+
+    response = TestClient(app).get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2F"
+
+
+def test_the_operations_home_reports_database_unavailability() -> None:
+    def unavailable() -> OperationsSnapshot:
+        raise psycopg.OperationalError("offline")
+
+    client = _client(_queue(), operations=OperationsService(load=unavailable))
+
+    response = client.get("/")
+
+    assert response.status_code == 503
+    assert "Operations status is unavailable" in response.text
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
@@ -637,10 +718,21 @@ def _saved(_review: ReviewSubmission) -> ReviewSaved:
     return ReviewSaved(review_event_id=UUID(int=9))
 
 
-def _client(queue: ReviewQueue, submit: Submitter = _saved) -> TestClient:
+def _client(
+    queue: ReviewQueue,
+    submit: Submitter = _saved,
+    *,
+    operations: OperationsService | None = None,
+) -> TestClient:
     service = ReviewService(review_queue=lambda: queue, submit=submit)
     client = TestClient(
-        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+        create_review_app(
+            service,
+            _configuration_service(),
+            SETTINGS,
+            operations_service=operations,
+            now=lambda: NOW,
+        )
     )
     _authenticate(client)
     return client
