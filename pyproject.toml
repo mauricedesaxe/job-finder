@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "dagster==1.13.21",
     "dagster-postgres==0.29.21",
+    "dagster-graphql==1.13.21",
     "dagster-webserver==1.13.21",
     "fastmcp==4.0.4",
     "langfuse==4.15.2",

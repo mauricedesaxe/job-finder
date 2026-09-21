@@ -73,6 +73,22 @@ from job_finder.review.configuration_editor import (
     parse_configuration_form,
     publication_retry_page,
 )
+from job_finder.review.control_plane import (
+    CONTROL_DEFINITIONS,
+    ControlConflict,
+    ControlPlaneService,
+    ControlPlaneSnapshot,
+    ControlPlaneUnavailable,
+    RunLaunchUncertain,
+    RunNowCommand,
+    RunStarted,
+    ScheduleChangeCommand,
+    ScheduleChanged,
+    ScheduleStateConflict,
+    ScheduleStatus,
+    ScheduleView,
+    unavailable_control_plane_service,
+)
 from job_finder.review.models import (
     Compensation,
     ReviewConflict,
@@ -116,6 +132,13 @@ _CONFIGURATION_NOTICES = {
     "publication-replayed": "Publication confirmed from the original request. Active search configuration is unchanged.",
     "activated": "Published draft activated.",
 }
+_OPERATIONS_NOTICES = {
+    "run-started": "Run submitted to Dagster.",
+    "run-replayed": "This run request was already submitted.",
+    "schedule-paused": "Schedule paused.",
+    "schedule-resumed": "Schedule resumed.",
+    "schedule-replayed": "Schedule already had the requested state.",
+}
 
 
 def create_review_app(
@@ -125,10 +148,12 @@ def create_review_app(
     *,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
+    control_service: ControlPlaneService | None = None,
     actor: str = "owner",
     now: DateTimeClock = lambda: datetime.now(UTC),
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
+    controls = control_service or unavailable_control_plane_service()
     app = FastHTML(
         before=Beforeware(
             _require_owner,
@@ -184,9 +209,99 @@ def create_review_app(
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
+        try:
+            control_snapshot = controls.load()
+        except ControlPlaneUnavailable:
+            control_snapshot = None
         return HTMLResponse(
-            _document(_operations_page(snapshot, csrf_token), title="Job Finder operations")
+            _document(
+                _operations_page(
+                    snapshot,
+                    control_snapshot,
+                    csrf_token,
+                    run_key=secrets.token_urlsafe(32),
+                    notice=_OPERATIONS_NOTICES.get(request.query_params.get("notice", "")),
+                ),
+                title="Job Finder operations",
+            )
         )
+
+    @app.route("/operations/run", methods=["POST"])
+    async def run_operation(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        csrf_token = _verified_control_csrf_token(request, form)
+        if csrf_token is None:
+            return _operations_forbidden_response()
+        try:
+            job_name = _required_control_form_text(form, "job_name")
+            idempotency_key = _required_control_form_text(form, "idempotency_key")
+        except ValueError as error:
+            return _malformed_operations_response(str(error))
+        try:
+            result = controls.run_now(
+                RunNowCommand(
+                    job_name=job_name,
+                    idempotency_key=idempotency_key,
+                    actor=actor,
+                    timestamp=now(),
+                )
+            )
+        except ControlPlaneUnavailable as error:
+            return _operations_unavailable_response(str(error))
+        if isinstance(result, RunStarted):
+            notice = "run-replayed" if result.replayed else "run-started"
+            return RedirectResponse(f"/?notice={notice}", status_code=303)
+        if isinstance(result, ControlConflict):
+            return _operations_conflict_response(result.reason)
+        if isinstance(result, RunLaunchUncertain):
+            return _uncertain_run_response(
+                csrf_token,
+                job_name=job_name,
+                idempotency_key=idempotency_key,
+                detail=result.reason,
+            )
+        return _operations_unavailable_response(result.reason)
+
+    @app.route("/operations/schedule", methods=["POST"])
+    async def change_schedule(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if _verified_control_csrf_token(request, form) is None:
+            return _operations_forbidden_response()
+        try:
+            schedule_name = _required_control_form_text(form, "schedule_name")
+            expected = ScheduleStatus(_required_control_form_text(form, "expected_state"))
+            desired = ScheduleStatus(_required_control_form_text(form, "desired_state"))
+        except ValueError as error:
+            return _malformed_operations_response(str(error))
+        try:
+            result = controls.change_schedule(
+                ScheduleChangeCommand(
+                    schedule_name=schedule_name,
+                    expected_state=expected,
+                    desired_state=desired,
+                    actor=actor,
+                    timestamp=now(),
+                )
+            )
+        except ControlPlaneUnavailable as error:
+            return _operations_unavailable_response(str(error))
+        if isinstance(result, ScheduleChanged):
+            notice = (
+                "schedule-replayed"
+                if result.replayed
+                else "schedule-resumed"
+                if result.status is ScheduleStatus.RUNNING
+                else "schedule-paused"
+            )
+            return RedirectResponse(f"/?notice={notice}", status_code=303)
+        if isinstance(result, ScheduleStateConflict):
+            return _operations_conflict_response(
+                "Schedule state changed before this request. "
+                + f"Expected {result.expected.value}; observed {result.observed.value}."
+            )
+        if isinstance(result, ControlConflict):
+            return _operations_conflict_response(result.reason)
+        return _operations_unavailable_response(result.reason)
 
     @app.route("/review", methods=["GET"])
     def review_page(request: Request) -> HTMLResponse:
@@ -674,7 +789,14 @@ def _review_page(queue: ReviewQueue, csrf_token: str) -> object:
     )
 
 
-def _operations_page(snapshot: OperationsSnapshot, csrf_token: str) -> object:
+def _operations_page(
+    snapshot: OperationsSnapshot,
+    controls: ControlPlaneSnapshot | None,
+    csrf_token: str,
+    *,
+    run_key: str,
+    notice: str | None,
+) -> object:
     health_title, health_detail = {
         OperationsHealth.CAUGHT_UP: (
             "Caught up",
@@ -695,6 +817,7 @@ def _operations_page(snapshot: OperationsSnapshot, csrf_token: str) -> object:
     }[snapshot.health]
     return Main(
         authenticated_masthead(csrf_token, current="operations"),
+        P(notice, cls="operations-notice", role="status") if notice else None,
         Div(
             Small("Owner operations", cls="eyebrow"),
             H1(health_title),
@@ -730,13 +853,7 @@ def _operations_page(snapshot: OperationsSnapshot, csrf_token: str) -> object:
                 cls="operations-panel spend-panel",
             ),
             Div(
-                Small("Dagster control plane", cls="eyebrow"),
-                H2("Schedule status unavailable"),
-                P(
-                    "Dagster schedule status is not available here yet. "
-                    + "PostgreSQL does not infer or duplicate schedule state.",
-                    cls="operations-muted",
-                ),
+                _schedule_controls(controls, csrf_token, run_key),
                 cls="operations-panel",
             ),
             cls="operations-grid",
@@ -744,6 +861,117 @@ def _operations_page(snapshot: OperationsSnapshot, csrf_token: str) -> object:
         _runs_panel(snapshot.recent_runs),
         _failures_panel(snapshot.failures),
         cls="review-shell operations-shell",
+    )
+
+
+def _schedule_controls(
+    snapshot: ControlPlaneSnapshot | None, csrf_token: str, run_key: str
+) -> tuple[object, ...]:
+    if snapshot is None:
+        return (
+            Small("Dagster control plane", cls="eyebrow"),
+            H2("Schedule status unavailable"),
+            P(
+                "Dagster could not be reached. Pipeline evidence above is still current, but "
+                + "schedule controls are disabled.",
+                cls="operations-muted",
+            ),
+            Ul(
+                *(
+                    _unavailable_schedule_row(definition.label, definition.cadence)
+                    for definition in CONTROL_DEFINITIONS
+                ),
+                cls="schedule-list",
+            ),
+        )
+    return (
+        Small("Dagster control plane", cls="eyebrow"),
+        H2("Schedules"),
+        P(
+            "Current state from Dagster. Changes are re-checked before applying.",
+            cls="operations-muted",
+        ),
+        Ul(
+            *(_schedule_row(schedule, csrf_token, run_key) for schedule in snapshot.schedules),
+            cls="schedule-list",
+        ),
+    )
+
+
+def _schedule_row(schedule: ScheduleView, csrf_token: str, run_key: str) -> object:
+    desired = (
+        ScheduleStatus.STOPPED
+        if schedule.status is ScheduleStatus.RUNNING
+        else ScheduleStatus.RUNNING
+    )
+    return Li(
+        Div(
+            Div(
+                Strong(schedule.definition.label),
+                Span(
+                    schedule.status.value.title(),
+                    cls=f"schedule-state {schedule.status.value.lower()}",
+                ),
+            ),
+            P(schedule.definition.cadence, cls="schedule-cadence"),
+            P(
+                f"Next: {_format_timestamp(schedule.next_tick)}"
+                if schedule.next_tick is not None
+                else "Next tick unavailable while stopped",
+                cls="schedule-next",
+            ),
+            Div(
+                Form(
+                    Input(type="hidden", name="csrf_token", value=csrf_token),
+                    Input(type="hidden", name="job_name", value=schedule.definition.job_name),
+                    Input(type="hidden", name="idempotency_key", value=run_key),
+                    Button("Run now", type="submit", cls="operation-button"),
+                    action="/operations/run",
+                    method="post",
+                ),
+                Form(
+                    Input(type="hidden", name="csrf_token", value=csrf_token),
+                    Input(
+                        type="hidden",
+                        name="schedule_name",
+                        value=schedule.definition.schedule_name,
+                    ),
+                    Input(
+                        type="hidden",
+                        name="expected_state",
+                        value=schedule.status.value,
+                    ),
+                    Input(type="hidden", name="desired_state", value=desired.value),
+                    Button(
+                        "Pause" if desired is ScheduleStatus.STOPPED else "Resume",
+                        type="submit",
+                        cls="operation-button secondary",
+                    ),
+                    action="/operations/schedule",
+                    method="post",
+                ),
+                cls="schedule-actions",
+            ),
+        )
+    )
+
+
+def _unavailable_schedule_row(label: str, cadence: str) -> object:
+    return Li(
+        Div(
+            Div(Strong(label), Span("Unavailable", cls="schedule-state unavailable")),
+            P(cadence, cls="schedule-cadence"),
+            Div(
+                Button("Run now", type="button", disabled=True, cls="operation-button"),
+                Button(
+                    "Change schedule",
+                    type="button",
+                    disabled=True,
+                    cls="operation-button secondary",
+                ),
+                cls="schedule-actions",
+            ),
+        )
     )
 
 
@@ -1065,6 +1293,65 @@ def _unavailable_response() -> HTMLResponse:
     )
 
 
+def _operations_forbidden_response() -> HTMLResponse:
+    return _state_response(
+        "This operations form expired",
+        "Reload operations and try again.",
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=403,
+    )
+
+
+def _malformed_operations_response(detail: str) -> HTMLResponse:
+    return _state_response(
+        "Malformed operations form",
+        detail,
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=400,
+    )
+
+
+def _operations_conflict_response(detail: str) -> HTMLResponse:
+    return _state_response(
+        "Operations state changed",
+        detail,
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=409,
+    )
+
+
+def _operations_unavailable_response(detail: str) -> HTMLResponse:
+    return _state_response(
+        "Dagster control is unavailable",
+        detail,
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=503,
+    )
+
+
+def _uncertain_run_response(
+    csrf_token: str,
+    *,
+    job_name: str,
+    idempotency_key: str,
+    detail: str,
+) -> HTMLResponse:
+    retry_form = Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="job_name", value=job_name),
+        Input(type="hidden", name="idempotency_key", value=idempotency_key),
+        Button("Retry the same request", type="submit", cls="retry"),
+        action="/operations/run",
+        method="post",
+    )
+    return _state_response(
+        "Run launch result is uncertain",
+        f"{detail}. Retry with the same request so Dagster can be reconciled without relaunching.",
+        action=retry_form,
+        status_code=503,
+    )
+
+
 def _configuration_unavailable_response() -> HTMLResponse:
     return _state_response(
         "Search setup is unavailable",
@@ -1187,6 +1474,22 @@ def _verified_csrf_token(request: Request, form: FormData) -> str | None:
     if not _valid_csrf(request, supplied):
         return None
     return _csrf_token(request)
+
+
+def _verified_control_csrf_token(request: Request, form: FormData) -> str | None:
+    values = form.getlist("csrf_token")
+    if len(values) != 1 or not isinstance(values[0], str):
+        return None
+    if not _valid_csrf(request, values[0]):
+        return None
+    return _csrf_token(request)
+
+
+def _required_control_form_text(form: FormData, key: str) -> str:
+    values = form.getlist(key)
+    if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
+        raise ValueError(f"Expected one {key} value")
+    return values[0]
 
 
 def _required_form_text(form: FormData, key: str) -> str:
@@ -1376,6 +1679,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-header.health-caught_up { box-shadow: 8px 8px 0 var(--acid); }
 .operations-header.health-working, .operations-header.health-unknown { box-shadow: 8px 8px 0 var(--caution); }
 .operations-header.health-action_required { background: var(--caution); color: var(--accent-ink); }
+.operations-notice { margin: 1.25rem 0 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
 .operations-intro { max-width: 54ch; margin: 1rem 0 0; font-size: 1.08rem; line-height: 1.55; }
 .operations-metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 2rem; border: 2px solid var(--line); background: var(--panel); }
 .operations-metrics > div { min-width: 0; padding: 0.8rem; border-right: 2px solid var(--line); }
@@ -1386,6 +1690,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-metrics span { margin-top: 0.15rem; color: var(--muted); font-size: 0.8rem; }
 .operations-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin-top: 1.25rem; }
 .operations-panel, .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
+.spend-panel { align-self: start; }
 .spend-value { display: block; font: 700 clamp(2rem, 6vw, 4rem) Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
@@ -1395,6 +1700,17 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
 .run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
 .failure-list p { margin-bottom: 0; overflow-wrap: anywhere; }
+.schedule-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
+.schedule-list > li { padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
+.schedule-list > li > div > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.schedule-state { padding: 0.18rem 0.35rem; border: 2px solid var(--line); font-size: 0.68rem; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; }
+.schedule-state.running { background: var(--acid); color: var(--accent-ink); }
+.schedule-state.stopped, .schedule-state.unavailable { background: var(--caution); color: var(--accent-ink); }
+.schedule-cadence, .schedule-next { margin: 0.45rem 0 0; color: var(--muted); font-size: 0.86rem; }
+.schedule-actions { display: grid !important; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.75rem; }
+.operation-button { width: 100%; min-height: 42px; padding: 0 0.6rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
+.operation-button.secondary { background: var(--panel); color: var(--ink); }
+.operation-button:disabled { cursor: not-allowed; opacity: 0.5; }
 @media (prefers-color-scheme: dark) {
   :root {
     --ink: #f3f0e7;
@@ -1436,6 +1752,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .operations-metrics > div { border-right: 0; border-bottom: 2px solid var(--line); }
   .operations-metrics > div:last-child { border-bottom: 0; }
   .operations-grid { grid-template-columns: 1fr; }
+  .schedule-actions { grid-template-columns: 1fr; }
 }
 @media (max-width: 360px) {
   .masthead-label { display: none; }

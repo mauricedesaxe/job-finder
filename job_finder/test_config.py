@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from job_finder.config import (
     CorpusEvaluationSettings,
+    DagsterControlSettings,
     DatabaseSettings,
     JevCorpusEvaluationSettings,
     LangfuseSettings,
@@ -51,6 +52,30 @@ def test_review_app_settings_reject_missing_secrets(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ValidationError):
         _ = ReviewAppSettings.from_environment()
+
+
+def test_dagster_control_settings_read_url_and_repo_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", "http://dagster:3000/graphql")
+    monkeypatch.delenv("JOB_FINDER_DAGSTER_REPOSITORY_LOCATION", raising=False)
+    monkeypatch.delenv("JOB_FINDER_DAGSTER_REPOSITORY_NAME", raising=False)
+
+    settings = DagsterControlSettings.from_environment()
+
+    assert str(settings.graphql_url) == "http://dagster:3000/graphql"
+    assert settings.repository_location_name == "job_finder.dagster"
+    assert settings.repository_name == "__repository__"
+    assert settings.timeout_seconds == 5
+
+
+def test_dagster_control_settings_require_the_graphql_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", raising=False)
+
+    with pytest.raises(ValidationError):
+        _ = DagsterControlSettings.from_environment()
 
 
 def test_database_settings_reads_the_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
