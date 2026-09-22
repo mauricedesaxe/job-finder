@@ -84,7 +84,7 @@ jobs:
             "SELECT password_hash FROM owner_onboarding WHERE singleton_id = 1" \
             | grep --quiet '^scrypt'
           docker compose restart review
-          curl --retry 12 --retry-connrefused --retry-delay 2 --fail --silent \
+          curl --retry 12 --retry-all-errors --retry-delay 2 --fail --silent \
             http://127.0.0.1:8080/readyz
           rm -f /tmp/job-finder-cookies
           curl --silent --show-error --cookie-jar /tmp/job-finder-cookies \
