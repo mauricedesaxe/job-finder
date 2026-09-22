@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ import pytest
 from fastmcp import Client
 from psycopg import sql
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 import job_finder.configuration_service as configuration_service_module
 import job_finder.evaluation.manifest_execution as manifest_execution_module
@@ -184,6 +186,15 @@ from job_finder.discovery.jina import SearchSucceeded
 from job_finder.mcp_server import McpDependencies, create_mcp_server
 from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
 from job_finder.pipeline.state import prepare_orchestration_run
+from job_finder.provider_credentials import (
+    ProviderCapability,
+    ProviderCredentialChanged,
+    ProviderCredentialStored,
+    ProviderKind,
+    ProviderValidation,
+    credential_cipher,
+    postgres_provider_setup_service,
+)
 
 
 @pytest.fixture
@@ -230,6 +241,7 @@ EXPECTED_MIGRATIONS = (
     "0027_work_recovery_receipts.sql",
     "0028_append_only_job_reevaluations.sql",
     "0029_owner_onboarding.sql",
+    "0030_provider_credentials.sql",
 )
 
 
@@ -314,6 +326,77 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     assert "legacy secure owner password" not in str(stored[0])
     assert service.authenticate("legacy secure owner password") is True
     assert service.authenticate("different owner password") is False
+
+
+def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+    owner = postgres_owner_access_service(lambda: _connection(authority_schema))
+    _ = owner.bootstrap("secure owner password")
+    cipher = credential_cipher(SecretStr(base64.urlsafe_b64encode(b"k" * 32).decode()))
+    service = postgres_provider_setup_service(
+        lambda: _connection(authority_schema),
+        cipher,
+        {
+            provider: lambda _secret, provider=provider: ProviderValidation(
+                capabilities={
+                    ProviderKind.JINA: (
+                        ProviderCapability.SEARCH,
+                        ProviderCapability.SCRAPE,
+                    ),
+                    ProviderKind.OPENROUTER: (
+                        ProviderCapability.STRUCTURED_GENERATION,
+                        ProviderCapability.USAGE_COST,
+                    ),
+                    ProviderKind.TYPESAFE: (
+                        ProviderCapability.RELEVANCE_EVALUATION,
+                        ProviderCapability.USAGE_COST,
+                    ),
+                }[provider]
+            )
+            for provider in ProviderKind
+        },
+    )
+
+    def replace_jina(_index: int) -> object:
+        return service.replace(
+            ProviderKind.JINA,
+            SecretStr("jina-secret-value"),
+            0,
+            "owner",
+            datetime(2026, 9, 22, tzinfo=UTC),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(replace_jina, range(2)))
+
+    assert sum(isinstance(result, ProviderCredentialStored) for result in results) == 1
+    assert sum(isinstance(result, ProviderCredentialChanged) for result in results) == 1
+    for provider in (ProviderKind.OPENROUTER, ProviderKind.TYPESAFE):
+        result = service.replace(
+            provider,
+            SecretStr(f"{provider.value}-secret-value"),
+            0,
+            "owner",
+            datetime(2026, 9, 22, tzinfo=UTC),
+        )
+        assert isinstance(result, ProviderCredentialStored)
+
+    advanced = service.advance()
+
+    assert advanced.state.stage is OnboardingStage.PREFERENCES
+    assert service.inspect().ready
+    assert service.resolve(ProviderKind.JINA).get_secret_value() == "jina-secret-value"
+    with _connection(authority_schema) as connection:
+        rows = connection.execute(
+            "SELECT nonce, ciphertext FROM provider_credentials ORDER BY provider"
+        ).fetchall()
+        assert len(rows) == 3
+        assert all(b"secret-value" not in cast(bytes, row[1]) for row in rows)
+        with pytest.raises(psycopg.errors.CheckViolation, match="cannot be deleted"):
+            connection.execute("DELETE FROM provider_credentials WHERE provider = 'jina'")
 
 
 def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
@@ -732,7 +815,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-7:] == (
+        assert apply_migrations(connection)[-8:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
@@ -740,6 +823,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
             "0027_work_recovery_receipts.sql",
             "0028_append_only_job_reevaluations.sql",
             "0029_owner_onboarding.sql",
+            "0030_provider_credentials.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)

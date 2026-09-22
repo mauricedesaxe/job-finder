@@ -13,6 +13,15 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
+from job_finder.provider_credentials import (
+    ProviderCapability,
+    ProviderCredentialState,
+    ProviderCredentialStored,
+    ProviderKind,
+    ProviderSetupService,
+    ProviderSetupSnapshot,
+    ProviderStageAdvanced,
+)
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.review.control_plane import (
@@ -1317,12 +1326,24 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
         authenticate=lambda _password: False,
         bootstrap=bootstrap,
     )
+    provider_setup = ProviderSetupService(
+        inspect=lambda: ProviderSetupSnapshot(
+            credentials=tuple(
+                ProviderCredentialState(provider=provider, generation=0)
+                for provider in ProviderKind
+            )
+        ),
+        replace=lambda *_args: pytest.fail("provider credential was unexpectedly replaced"),
+        advance=lambda: pytest.fail("provider setup unexpectedly advanced"),
+        resolve=lambda _provider: pytest.fail("provider credential was unexpectedly resolved"),
+    )
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
             _configuration_service(),
             SETTINGS,
             owner_access_service=owner_access,
+            provider_setup_service=provider_setup,
             now=lambda: NOW,
         )
     )
@@ -1361,9 +1382,108 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     assert rejected_token.status_code == 401
     assert "Create the owner password" in setup.text
     assert completed.status_code == 303
-    assert completed.headers["location"] == "/"
+    assert completed.headers["location"] == "/setup/providers"
     assert calls == [OWNER_PASSWORD]
-    assert client.get("/review").status_code == 200
+    review = client.get("/review", follow_redirects=False)
+    assert review.status_code == 303
+    assert review.headers["location"] == "/setup/providers"
+    assert "Connect the services" in client.get("/setup/providers").text
+
+
+def test_provider_setup_never_echoes_credentials_and_advances_when_ready() -> None:
+    state = [OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=True)]
+    stored: dict[ProviderKind, ProviderCredentialState] = {}
+
+    def inspect() -> ProviderSetupSnapshot:
+        return ProviderSetupSnapshot(
+            credentials=tuple(
+                stored.get(provider, ProviderCredentialState(provider=provider, generation=0))
+                for provider in ProviderKind
+            )
+        )
+
+    def replace(
+        provider: ProviderKind,
+        secret: SecretStr,
+        expected_generation: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> ProviderCredentialStored:
+        assert secret.get_secret_value() == "credential-that-must-not-be-rendered"
+        credential = ProviderCredentialState(
+            provider=provider,
+            generation=expected_generation + 1,
+            capabilities={
+                ProviderKind.JINA: (
+                    ProviderCapability.SEARCH,
+                    ProviderCapability.SCRAPE,
+                ),
+                ProviderKind.OPENROUTER: (
+                    ProviderCapability.STRUCTURED_GENERATION,
+                    ProviderCapability.USAGE_COST,
+                ),
+                ProviderKind.TYPESAFE: (
+                    ProviderCapability.RELEVANCE_EVALUATION,
+                    ProviderCapability.USAGE_COST,
+                ),
+            }[provider],
+            validated_at=NOW,
+        )
+        stored[provider] = credential
+        return ProviderCredentialStored(state=credential)
+
+    def advance() -> ProviderStageAdvanced:
+        assert inspect().ready
+        state[0] = OwnerAccessState(stage=OnboardingStage.PREFERENCES, has_password=True)
+        return ProviderStageAdvanced(state=state[0])
+
+    owner_access = OwnerAccessService(
+        load_state=lambda: state[0],
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    providers = ProviderSetupService(
+        inspect=inspect,
+        replace=replace,
+        advance=advance,
+        resolve=lambda _provider: pytest.fail("provider credential was unexpectedly resolved"),
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=owner_access,
+            provider_setup_service=providers,
+            now=lambda: NOW,
+        )
+    )
+    _authenticate(client)
+    csrf_token = _csrf(client)
+
+    for provider in ProviderKind:
+        response = client.post(
+            "/setup/providers",
+            data={
+                "csrf_token": csrf_token,
+                "provider": provider.value,
+                "expected_generation": "0",
+                "credential": "credential-that-must-not-be-rendered",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "credential-that-must-not-be-rendered" not in response.text
+
+    completed = client.post(
+        "/setup/providers/continue",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+
+    assert completed.status_code == 303
+    assert completed.headers["location"] == "/configuration"
+    assert client.get("/review", follow_redirects=False).headers["location"] == "/configuration"
 
 
 def test_legacy_install_fails_closed_until_password_import() -> None:

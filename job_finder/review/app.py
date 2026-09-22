@@ -34,6 +34,7 @@ from fasthtml.common import (
     Meta,
     P,
     Pre,
+    Section,
     Small,
     Span,
     Strong,
@@ -45,7 +46,7 @@ from fasthtml.common import (
     Ul,
     to_xml,
 )
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from starlette.responses import PlainTextResponse
 from starlette.datastructures import FormData
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -131,6 +132,14 @@ from job_finder.review.owner_access import (
     OwnerBootstrapConflict,
 )
 from job_finder.review.postgres import ReviewService
+from job_finder.provider_credentials import (
+    ProviderCredentialChanged,
+    ProviderCredentialRejected,
+    ProviderKind,
+    ProviderSetupService,
+    ProviderSetupSnapshot,
+    ProviderStageBlocked,
+)
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
 DateTimeClock = Callable[[], datetime]
@@ -177,6 +186,7 @@ def create_review_app(
     settings: ReviewAppSettings,
     *,
     owner_access_service: OwnerAccessService,
+    provider_setup_service: ProviderSetupService | None = None,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     control_service: ControlPlaneService | None = None,
@@ -281,7 +291,143 @@ def create_review_app(
                 status_code=409,
             )
         _authenticate_session(request)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/setup/providers", status_code=303)
+
+    @app.route("/setup/providers", methods=["GET"])
+    def provider_setup_form(request: Request) -> HTMLResponse:
+        if provider_setup_service is None:
+            return _state_response(
+                "Provider setup is unavailable",
+                "Provider credential storage is not configured for this deployment.",
+                status_code=503,
+            )
+        try:
+            snapshot = provider_setup_service.inspect()
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Provider setup is unavailable",
+                "Provider state could not be loaded. Try again after the database recovers.",
+                status_code=503,
+            )
+        return HTMLResponse(
+            _document(_provider_setup_content(_ensure_csrf_token(request), snapshot))
+        )
+
+    @app.route("/setup/providers", methods=["POST"])
+    async def provider_setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if not _valid_csrf(request, _form_text(form, "csrf_token")):
+            return _state_response(
+                "Provider setup failed",
+                "This setup form expired. Reload and try again.",
+                status_code=403,
+            )
+        if provider_setup_service is None:
+            return _state_response(
+                "Provider setup is unavailable",
+                "Provider credential storage is not configured for this deployment.",
+                status_code=503,
+            )
+        try:
+            provider = ProviderKind(_form_text(form, "provider"))
+            expected_generation = int(_form_text(form, "expected_generation"))
+        except (ValueError, TypeError):
+            return _state_response(
+                "Provider setup failed",
+                "The provider request was invalid. Reload and try again.",
+                status_code=400,
+            )
+        credential = _form_text(form, "credential")
+        if not credential:
+            return _state_response(
+                "Provider setup failed",
+                "Enter a provider credential.",
+                status_code=400,
+            )
+        try:
+            result = await to_thread.run_sync(
+                provider_setup_service.replace,
+                provider,
+                SecretStr(credential),
+                expected_generation,
+                "owner",
+                now(),
+            )
+        except (psycopg.Error, RuntimeError, ValueError):
+            return _state_response(
+                "Provider setup is unavailable",
+                "The credential was not stored. Reload and try again.",
+                status_code=503,
+            )
+        try:
+            snapshot = provider_setup_service.inspect()
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Provider state is unavailable",
+                "The credential request finished, but current state could not be reloaded.",
+                status_code=503,
+            )
+        if isinstance(result, ProviderCredentialRejected):
+            message = (
+                "The provider rejected that credential."
+                if result.error_code == "invalid_credentials"
+                else "The provider could not be reached. The credential was not stored."
+            )
+            return HTMLResponse(
+                _document(_provider_setup_content(_ensure_csrf_token(request), snapshot, message)),
+                status_code=422,
+            )
+        if isinstance(result, ProviderCredentialChanged):
+            return HTMLResponse(
+                _document(
+                    _provider_setup_content(
+                        _ensure_csrf_token(request),
+                        snapshot,
+                        "This credential changed in another session. Review the current state.",
+                    )
+                ),
+                status_code=409,
+            )
+        return RedirectResponse("/setup/providers", status_code=303)
+
+    @app.route("/setup/providers/continue", methods=["POST"])
+    async def provider_setup_continue(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if not _valid_csrf(request, _form_text(form, "csrf_token")):
+            return _state_response(
+                "Provider setup failed",
+                "This setup form expired. Reload and try again.",
+                status_code=403,
+            )
+        if provider_setup_service is None:
+            return _state_response(
+                "Provider setup is unavailable",
+                "Provider credential storage is not configured for this deployment.",
+                status_code=503,
+            )
+        try:
+            result = provider_setup_service.advance()
+            snapshot = provider_setup_service.inspect()
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Provider setup is unavailable",
+                "Provider state could not be confirmed. Reload and try again.",
+                status_code=503,
+            )
+        if isinstance(result, ProviderStageBlocked):
+            if result.state.stage is OnboardingStage.PREFERENCES:
+                return RedirectResponse("/configuration", status_code=303)
+            return HTMLResponse(
+                _document(
+                    _provider_setup_content(
+                        _ensure_csrf_token(request),
+                        snapshot,
+                        "Validate every required provider before continuing.",
+                    )
+                ),
+                status_code=409,
+            )
+        return RedirectResponse("/configuration", status_code=303)
 
     @app.route("/login", methods=["GET"])
     def login_form(request: Request) -> HTMLResponse:
@@ -963,6 +1109,25 @@ def _require_owner(request: Request, owner_access: OwnerAccessService) -> Respon
         if request.url.path == "/setup":
             return None
         return RedirectResponse("/setup", status_code=303)
+    onboarding_path = {
+        OnboardingStage.PROVIDERS: "/setup/providers",
+        OnboardingStage.PREFERENCES: "/configuration",
+        OnboardingStage.BUDGET: "/setup/budget",
+        OnboardingStage.TEST_SEARCH: "/setup/test-search",
+    }.get(state.stage)
+    if onboarding_path is not None:
+        if request.url.path == "/login":
+            return None
+        if request.session.get("authenticated") is not True:
+            return RedirectResponse(
+                f"/login?next={quote(onboarding_path, safe='')}", status_code=303
+            )
+        allowed_prefix = (
+            "/configuration" if state.stage is OnboardingStage.PREFERENCES else onboarding_path
+        )
+        if request.url.path == "/logout" or request.url.path.startswith(allowed_prefix):
+            return None
+        return RedirectResponse(onboarding_path, status_code=303)
     if request.url.path == "/setup":
         destination = "/" if request.session.get("authenticated") is True else "/login"
         return RedirectResponse(destination, status_code=303)
@@ -979,6 +1144,90 @@ def _require_owner(request: Request, owner_access: OwnerAccessService) -> Respon
 def _authenticate_session(request: Request) -> None:
     request.session.clear()
     request.session.update({"authenticated": True, "csrf_token": secrets.token_urlsafe(32)})
+
+
+def _ensure_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if isinstance(token, str):
+        return token
+    token = secrets.token_urlsafe(32)
+    request.session["csrf_token"] = token
+    return token
+
+
+def _provider_setup_content(
+    csrf_token: str,
+    snapshot: ProviderSetupSnapshot,
+    error: str | None = None,
+) -> object:
+    labels = {
+        ProviderKind.JINA: ("Jina", "Searches job boards and reads job pages."),
+        ProviderKind.OPENROUTER: (
+            "OpenRouter",
+            "Enriches and deduplicates jobs with structured model calls.",
+        ),
+        ProviderKind.TYPESAFE: (
+            "Typesafe",
+            "Evaluates relevance against your criteria. Validation makes one small paid request.",
+        ),
+    }
+    cards = []
+    for credential in snapshot.credentials:
+        name, explanation = labels[credential.provider]
+        status = "Validated" if credential.configured else "Required"
+        cards.append(
+            Section(
+                Div(
+                    Div(Small(credential.provider.value.upper(), cls="eyebrow"), H2(name)),
+                    Span(status, cls="status-pill"),
+                    cls="section-heading",
+                ),
+                P(explanation),
+                Form(
+                    Input(type="hidden", name="csrf_token", value=csrf_token),
+                    Input(type="hidden", name="provider", value=credential.provider.value),
+                    Input(
+                        type="hidden",
+                        name="expected_generation",
+                        value=str(credential.generation),
+                    ),
+                    Label(
+                        "Replace credential" if credential.configured else "Credential",
+                        Input(
+                            type="password",
+                            name="credential",
+                            required=True,
+                            autocomplete="off",
+                        ),
+                    ),
+                    Button("Validate and save", type="submit"),
+                    action="/setup/providers",
+                    method="post",
+                ),
+                cls="editor-section",
+            )
+        )
+    return Main(
+        Div(
+            Small("JF / FIRST RUN", cls="eyebrow"),
+            H1("Connect the services that do the work."),
+            P(
+                "Credentials are encrypted before storage and are never shown again. "
+                + "Validation checks only the capabilities Job Finder needs.",
+                cls="login-intro",
+            ),
+            cls="review-header",
+        ),
+        P(error, cls="error", role="alert") if error else None,
+        *cards,
+        Form(
+            Input(type="hidden", name="csrf_token", value=csrf_token),
+            Button("Continue to preferences", type="submit", disabled=not snapshot.ready),
+            action="/setup/providers/continue",
+            method="post",
+        ),
+        cls="configuration-shell",
+    )
 
 
 def _setup_content(csrf_token: str, error: str | None = None) -> object:
