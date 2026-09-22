@@ -1,4 +1,5 @@
 from decimal import Decimal
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import format_ats_block
 from job_finder.evaluation.corpus import (
+    CORPUS_ROOT,
     MAX_FALSE_NEGATIVE_RATE,
     MAX_FALSE_POSITIVE_RATE,
     EvaluationCorpusResult,
@@ -17,7 +19,7 @@ from job_finder.evaluation.corpus import (
     score_evaluation_corpus,
 )
 from scripts.evaluate_corpus import parse_arguments
-from job_finder.evaluation.models import Qualified
+from job_finder.evaluation.models import Qualified, Rejected
 
 
 def test_loads_only_direct_evaluation_fixtures_by_default() -> None:
@@ -143,6 +145,33 @@ def test_formats_ats_evidence_before_evaluation() -> None:
     assert evaluated_descriptions[0].count("## ATS Structured Data") == 1
 
 
+def test_recent_policy_fixtures_reach_model_evaluation_with_their_intended_outcomes(
+    tmp_path: Path,
+) -> None:
+    corpus = {case.name: case for case in load_evaluation_corpus()}
+    staged_directory = tmp_path / "reject"
+    staged_directory.mkdir()
+    shutil.copy(
+        CORPUS_ROOT / "reject" / "candidates" / "hype-copy-permanent-availability-product-role.md",
+        staged_directory / "hype-copy-permanent-availability-product-role.md",
+    )
+    staged = {case.name: case for case in load_evaluation_corpus(root=tmp_path)}
+    evaluated: list[str] = []
+
+    fine_tuning = evaluate_corpus_case(
+        corpus["fine-tuning-existing-model-product-engineer"],
+        lambda _job: _record_qualified(evaluated, "fine-tuning"),
+    )
+    always_on = evaluate_corpus_case(
+        staged["hype-copy-permanent-availability-product-role"],
+        lambda _job: _record_rejected(evaluated, "always-on"),
+    )
+
+    assert fine_tuning.actual_outcome == "qualified"
+    assert always_on.actual_outcome == "rejected"
+    assert evaluated == ["fine-tuning", "always-on"]
+
+
 def test_exposes_the_corpus_gate_as_a_module_command() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "scripts.evaluate_corpus", "--help"],
@@ -188,6 +217,11 @@ def _unexpected_evaluation() -> Qualified:
 def _record_qualified(descriptions: list[str], description: str) -> Qualified:
     descriptions.append(description)
     return Qualified(reason="Matched.", profile_name="test-profile")
+
+
+def _record_rejected(names: list[str], name: str) -> Rejected:
+    names.append(name)
+    return Rejected(reason="Policy rejection.")
 
 
 def _result(name: str, expected: str, actual: str | None) -> EvaluationCorpusResult:

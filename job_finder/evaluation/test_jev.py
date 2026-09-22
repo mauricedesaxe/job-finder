@@ -36,7 +36,11 @@ from job_finder.evaluation.models import (
     RetryableOperationalError,
     TerminalOperationalError,
 )
-from job_finder.evaluation.openrouter import ModelCallPersistence, prompt_input_digest
+from job_finder.evaluation.openrouter import (
+    ModelCallPersistence,
+    PendingModelCallUsage,
+    prompt_input_digest,
+)
 from job_finder.evaluation.prompt_releases import (
     build_prompt_release,
     build_work_culture_candidate_release,
@@ -594,6 +598,32 @@ def test_rejects_an_answer_set_that_does_not_match_the_requested_questions() -> 
         error_code="invalid_response",
         reason="Jev response did not contain exactly the requested answers",
     )
+
+
+def test_persisted_jev_execution_rejects_a_pending_usage_record() -> None:
+    prompt = build_prompt_release().versions[0]
+
+    def fail(*_args: object) -> None:
+        raise AssertionError("provider and persistence must not be touched")
+
+    with pytest.raises(RuntimeError, match="pending usage"):
+        evaluate_persisted_prompt(
+            prompt,
+            {"job": "Remote in Europe"},
+            _context({"job": "Remote in Europe"}),
+            ModelCallPersistence(
+                find_completed=lambda _request_id: PendingModelCallUsage(
+                    prompt_name=prompt.definition.name,
+                    response_model=JEV_MODEL,
+                    provider_response_id="typesafe-request-1",
+                    raw_response={},
+                ),
+                next_attempt_number=lambda _request_id: 0,
+                record=fail,
+            ),
+            api_key="secret",
+            sender=cast(JevSender, fail),
+        )
 
 
 def test_persists_each_retry_and_the_accepted_jev_result() -> None:

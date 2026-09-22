@@ -476,7 +476,10 @@ def test_keeps_unparseable_tool_arguments_as_an_invalid_response() -> None:
     assert [attempt.status for attempt in attempts] == ["retryable_error"]
 
 
-def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
+@pytest.mark.parametrize("retryable_status", [404, 524, 529])
+def test_recovers_missing_usage_without_reissuing_the_completion(
+    retryable_status: int,
+) -> None:
     prompt = build_prompt_release().versions[0]
     attempts: list[ModelCallAttempt] = []
     completion_calls = 0
@@ -484,7 +487,7 @@ def test_recovers_missing_usage_without_reissuing_the_completion() -> None:
     observations: list[ProviderRequestObservation] = []
     generation_responses = iter(
         (
-            HttpResponse(404, '{"error":{"message":"not ready"}}'),
+            HttpResponse(retryable_status, '{"error":{"message":"not ready"}}'),
             HttpResponse(
                 200,
                 json.dumps(
