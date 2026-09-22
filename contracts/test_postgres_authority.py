@@ -125,6 +125,7 @@ from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.models import ReviewSaved, ReviewSubmission
+from job_finder.review.onboarding import postgres_onboarding_progress_service
 from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerBootstrapped,
@@ -397,6 +398,23 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
         assert all(b"secret-value" not in cast(bytes, row[1]) for row in rows)
         with pytest.raises(psycopg.errors.CheckViolation, match="cannot be deleted"):
             connection.execute("DELETE FROM provider_credentials WHERE provider = 'jina'")
+
+    with _connection(authority_schema) as connection:
+        active = get_active_search_configuration(connection)
+    activation = postgres_onboarding_progress_service(
+        lambda: _connection(authority_schema)
+    ).activate_preferences(
+        ActivateConfigurationCommand(
+            target_revision_id=active.active.revision.id,
+            expected_active_revision_id=active.active.revision.id,
+            expected_generation=active.active.generation,
+            actor="owner",
+            timestamp=datetime(2026, 9, 22, tzinfo=UTC),
+        )
+    )
+
+    assert isinstance(activation, ConfigurationActivated)
+    assert owner.load_state().stage is OnboardingStage.BUDGET
 
 
 def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
