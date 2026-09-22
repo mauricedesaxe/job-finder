@@ -182,10 +182,10 @@ def test_selects_only_corrected_thin_bodies_and_reset_requeues_them(
         assert reset == 1
 
         row = connection.execute(
-            "SELECT state, terminal_decision_id FROM job_work_items WHERE job_id = %s",
+            "SELECT state, terminal_decision_id, attempt_count FROM job_work_items WHERE job_id = %s",
             (thin,),
         ).fetchone()
-        assert row == ("pending", None)
+        assert row == ("pending", None, 0)
         assert find_terminal_decision_id(connection, thin) is None
 
         survivor = connection.execute(

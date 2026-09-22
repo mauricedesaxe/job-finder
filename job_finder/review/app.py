@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
-from typing import cast
+from typing import Literal, assert_never, cast
 from urllib.parse import quote
 from uuid import UUID
 
@@ -98,11 +98,20 @@ from job_finder.review.models import (
     ReviewSubmission,
 )
 from job_finder.review.operations import (
+    ActionableWork,
     FailureSample,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,
+    OperationsUnavailable,
     PipelineRunSummary,
+    RecoveryAction,
+    WorkRecoveryActiveLease,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryKeyConflict,
+    WorkRecoveryNotFound,
+    WorkRecoveryStaleState,
     unknown_operations_service,
 )
 from job_finder.review.postgres import ReviewService
@@ -138,6 +147,9 @@ _OPERATIONS_NOTICES = {
     "schedule-paused": "Schedule paused.",
     "schedule-resumed": "Schedule resumed.",
     "schedule-replayed": "Schedule already had the requested state.",
+    "work-retried": "Work is ready for the next worker now.",
+    "terminal-recovered": "Terminal work recovered with a fresh attempt budget.",
+    "recovery-replayed": "This recovery request was already applied.",
 }
 
 
@@ -302,6 +314,61 @@ def create_review_app(
         if isinstance(result, ControlConflict):
             return _operations_conflict_response(result.reason)
         return _operations_unavailable_response(result.reason)
+
+    @app.route("/operations/recovery", methods=["POST"])
+    async def recover_operation(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if _verified_control_csrf_token(request, form) is None:
+            return _operations_forbidden_response()
+        try:
+            action = RecoveryAction(_required_control_form_text(form, "action"))
+            expected_state = _actionable_work_state(
+                _required_control_form_text(form, "expected_state")
+            )
+            command = WorkRecoveryCommand(
+                idempotency_key=_required_control_form_text(form, "idempotency_key"),
+                job_id=UUID(_required_control_form_text(form, "job_id")),
+                action=action,
+                expected_state=expected_state,
+                expected_attempt_count=int(
+                    _required_control_form_text(form, "expected_attempt_count")
+                ),
+                actor=actor,
+                requested_at=now(),
+            )
+        except ValueError as error:
+            return _malformed_operations_response(str(error))
+        try:
+            result = operations.recover(command)
+        except (OperationsUnavailable, psycopg.Error):
+            return _work_recovery_unavailable_response()
+        match result:
+            case WorkRecoveryApplied():
+                notice = (
+                    "recovery-replayed"
+                    if result.replayed
+                    else "work-retried"
+                    if command.action is RecoveryAction.RETRY_NOW
+                    else "terminal-recovered"
+                )
+                return RedirectResponse(f"/?notice={notice}", status_code=303)
+            case WorkRecoveryKeyConflict():
+                return _operations_conflict_response(
+                    "This recovery request key belongs to another command."
+                )
+            case WorkRecoveryActiveLease():
+                return _operations_conflict_response(
+                    "This work item was actively leased when the command was recorded and was not changed."
+                )
+            case WorkRecoveryStaleState():
+                observed = result.receipt.prior_state or "missing"
+                return _operations_conflict_response(
+                    f"Work state changed before this request. Observed {observed}."
+                )
+            case WorkRecoveryNotFound():
+                return _work_recovery_not_found_response()
+            case _:
+                assert_never(result)
 
     @app.route("/review", methods=["GET"])
     def review_page(request: Request) -> HTMLResponse:
@@ -859,6 +926,11 @@ def _operations_page(
             cls="operations-grid",
         ),
         _runs_panel(snapshot.recent_runs),
+        _work_recovery_panel(
+            snapshot.actionable_work,
+            snapshot.actionable_work_total,
+            csrf_token,
+        ),
         _failures_panel(snapshot.failures),
         cls="review-shell operations-shell",
     )
@@ -1023,6 +1095,71 @@ def _failures_panel(failures: tuple[FailureSample, ...]) -> object:
         H2("Recent failures"),
         rows,
         cls="operations-section",
+    )
+
+
+def _work_recovery_panel(work: tuple[ActionableWork, ...], total: int, csrf_token: str) -> object:
+    rows = (
+        Ul(*(_work_recovery_row(item, csrf_token) for item in work), cls="recovery-list")
+        if work
+        else P("No failed work needs recovery.", cls="operations-empty")
+    )
+    return Div(
+        Small("Explicit bounded targets", cls="eyebrow"),
+        H2("Work recovery"),
+        P(
+            "Retry delayed work now or give terminal work one fresh bounded attempt budget.",
+            cls="operations-muted",
+        ),
+        P(
+            f"Showing the newest {len(work)} of {total}; recover these to reveal older work.",
+            cls="operations-muted",
+        )
+        if total > len(work)
+        else None,
+        rows,
+        cls="operations-section",
+    )
+
+
+def _work_recovery_row(item: ActionableWork, csrf_token: str) -> object:
+    action = RecoveryAction.RETRY_NOW if item.state == "failed" else RecoveryAction.RECOVER_TERMINAL
+    timing = (
+        f"Scheduled retry: {_format_timestamp(item.retry_at)}"
+        if item.retry_at is not None
+        else f"Terminal since: {_format_timestamp(item.failed_at)}"
+    )
+    return Li(
+        Div(
+            Strong("Retryable" if item.state == "failed" else "Terminal"),
+            Span(f"Attempt {item.attempt_count}", cls="run-status"),
+        ),
+        Small(str(item.job_id), cls="recovery-id"),
+        P(item.failure_summary),
+        Small(timing),
+        Form(
+            Input(type="hidden", name="csrf_token", value=csrf_token),
+            Input(type="hidden", name="job_id", value=str(item.job_id)),
+            Input(type="hidden", name="action", value=action.value),
+            Input(type="hidden", name="expected_state", value=item.state),
+            Input(
+                type="hidden",
+                name="expected_attempt_count",
+                value=str(item.attempt_count),
+            ),
+            Input(
+                type="hidden",
+                name="idempotency_key",
+                value=secrets.token_urlsafe(32),
+            ),
+            Button(
+                "Retry now" if action is RecoveryAction.RETRY_NOW else "Recover terminal work",
+                type="submit",
+                cls="operation-button",
+            ),
+            action="/operations/recovery",
+            method="post",
+        ),
     )
 
 
@@ -1329,6 +1466,24 @@ def _operations_unavailable_response(detail: str) -> HTMLResponse:
     )
 
 
+def _work_recovery_unavailable_response() -> HTMLResponse:
+    return _state_response(
+        "Work recovery is unavailable",
+        "The database could not apply this command. Reload operations and try again.",
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=503,
+    )
+
+
+def _work_recovery_not_found_response() -> HTMLResponse:
+    return _state_response(
+        "Work item was not found",
+        "The requested work item no longer exists.",
+        action=A("Reload operations", href="/", cls="retry"),
+        status_code=404,
+    )
+
+
 def _uncertain_run_response(
     csrf_token: str,
     *,
@@ -1490,6 +1645,12 @@ def _required_control_form_text(form: FormData, key: str) -> str:
     if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
         raise ValueError(f"Expected one {key} value")
     return values[0]
+
+
+def _actionable_work_state(value: str) -> Literal["failed", "terminal_error"]:
+    if value == "failed" or value == "terminal_error":
+        return value
+    raise ValueError("Expected failed or terminal_error state")
 
 
 def _required_form_text(form: FormData, key: str) -> str:
@@ -1711,6 +1872,12 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operation-button { width: 100%; min-height: 42px; padding: 0 0.6rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
 .operation-button.secondary { background: var(--panel); color: var(--ink); }
 .operation-button:disabled { cursor: not-allowed; opacity: 0.5; }
+.recovery-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; list-style: none; margin: 1rem 0 0; padding: 0; }
+.recovery-list > li { min-width: 0; padding: 1rem; border: 2px solid var(--line); background: var(--surface-raised); }
+.recovery-list > li > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.recovery-list p { margin: 0.65rem 0; color: var(--muted); overflow-wrap: anywhere; }
+.recovery-list form { margin-top: 0.8rem; }
+.recovery-id { display: block; margin-top: 0.35rem; overflow-wrap: anywhere; color: var(--muted); }
 @media (prefers-color-scheme: dark) {
   :root {
     --ink: #f3f0e7;
@@ -1752,6 +1919,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .operations-metrics > div { border-right: 0; border-bottom: 2px solid var(--line); }
   .operations-metrics > div:last-child { border-bottom: 0; }
   .operations-grid { grid-template-columns: 1fr; }
+  .recovery-list { grid-template-columns: 1fr; }
   .schedule-actions { grid-template-columns: 1fr; }
 }
 @media (max-width: 360px) {

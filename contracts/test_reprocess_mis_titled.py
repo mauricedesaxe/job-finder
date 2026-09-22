@@ -201,10 +201,10 @@ def test_selects_only_mis_titled_refusals_and_reset_requeues_them(
 
         for job_id in (not_a_role, generic):
             row = connection.execute(
-                "SELECT state, terminal_decision_id FROM job_work_items WHERE job_id = %s",
+                "SELECT state, terminal_decision_id, attempt_count FROM job_work_items WHERE job_id = %s",
                 (job_id,),
             ).fetchone()
-            assert row == ("pending", None)
+            assert row == ("pending", None, 0)
             assert find_terminal_decision_id(connection, job_id) is None
 
         receipts = connection.execute(

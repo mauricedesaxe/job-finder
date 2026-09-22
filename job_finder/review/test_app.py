@@ -44,13 +44,22 @@ from job_finder.review.models import (
     ReviewSubmitResult,
 )
 from job_finder.review.operations import (
+    ActionableWork,
     FailureSample,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,
     PipelineRunSummary,
     QueueCounts,
+    RecoveryAction,
+    RecoveryOutcome,
     SpendSummary,
+    WorkItemState,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryReceipt,
+    WorkRecoveryResult,
+    WorkRecoveryStaleState,
 )
 from job_finder.review.postgres import ReviewService
 
@@ -87,6 +96,25 @@ def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None
                 summary="provider_timeout: OpenRouter did not respond",
             ),
         ),
+        actionable_work=(
+            ActionableWork(
+                job_id=UUID(int=31),
+                state="failed",
+                attempt_count=2,
+                retry_at=NOW,
+                failed_at=NOW,
+                failure_summary="provider_timeout: OpenRouter did not respond",
+            ),
+            ActionableWork(
+                job_id=UUID(int=32),
+                state="terminal_error",
+                attempt_count=3,
+                retry_at=None,
+                failed_at=NOW,
+                failure_summary="invalid_job: Job is invalid",
+            ),
+        ),
+        actionable_work_total=2,
     )
     client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
 
@@ -111,6 +139,45 @@ def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None
     assert 'aria-current="page">Operations' in response.text
     assert 'href="/review"' in response.text
     assert 'href="/configuration"' in response.text
+
+
+def test_the_operations_home_renders_bounded_recovery_commands() -> None:
+    snapshot = OperationsSnapshot(
+        health=OperationsHealth.ACTION_REQUIRED,
+        queues=QueueCounts(retrying=1, terminal_error=1),
+        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
+        recent_runs=(),
+        failures=(),
+        actionable_work=(
+            ActionableWork(
+                job_id=UUID(int=31),
+                state="failed",
+                attempt_count=2,
+                retry_at=NOW,
+                failed_at=NOW,
+                failure_summary="provider_timeout: OpenRouter did not respond",
+            ),
+            ActionableWork(
+                job_id=UUID(int=32),
+                state="terminal_error",
+                attempt_count=3,
+                retry_at=None,
+                failed_at=NOW,
+                failure_summary="invalid_job: Job is invalid",
+            ),
+        ),
+        actionable_work_total=5,
+    )
+    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.text.count('action="/operations/recovery"') == 2
+    assert "Retry now" in response.text
+    assert "Recover terminal work" in response.text
+    assert 'name="expected_attempt_count" value="2"' in response.text
+    assert "Showing the newest 2 of 5" in response.text
 
 
 def test_the_operations_home_requires_the_existing_owner_session() -> None:
@@ -223,7 +290,11 @@ def test_the_operations_home_renders_all_live_schedule_controls() -> None:
 
 
 def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
-    client = _client(_queue(), controls=_control_service())
+    calls: list[RunNowCommand] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False)
+    )
+    client = _client(_queue(), controls=controls)
 
     response = client.post(
         "/operations/run",
@@ -232,15 +303,29 @@ def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
 
     assert response.status_code == 403
     assert "This operations form expired" in response.text
+    assert calls == []
 
 
-@pytest.mark.parametrize("path", ["/operations/run", "/operations/schedule"])
+@pytest.mark.parametrize(
+    "path", ["/operations/run", "/operations/schedule", "/operations/recovery"]
+)
 def test_operations_actions_require_the_owner_session_before_service_calls(path: str) -> None:
+    calls: list[object] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False),
+        change_schedule=lambda command: calls.append(command)
+        or ScheduleChanged(ScheduleStatus.STOPPED, False),
+    )
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        recover=lambda command: calls.append(command) or _applied_recovery(command),
+    )
     app = create_review_app(
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
         _configuration_service(),
         SETTINGS,
-        control_service=_control_service(),
+        operations_service=operations,
+        control_service=controls,
         now=lambda: NOW,
     )
 
@@ -248,6 +333,7 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("/login?next=")
+    assert calls == []
 
 
 def test_run_now_rejects_a_malformed_form_without_calling_the_service() -> None:
@@ -443,6 +529,122 @@ def test_schedule_change_rejects_an_unknown_state_without_calling_the_service() 
 
     assert response.status_code == 400
     assert "Malformed operations form" in response.text
+
+
+def test_work_recovery_requires_csrf_before_calling_the_service() -> None:
+    calls: list[WorkRecoveryCommand] = []
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        recover=lambda command: calls.append(command) or _applied_recovery(command),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
+    calls: list[WorkRecoveryCommand] = []
+
+    def recover(command: WorkRecoveryCommand) -> WorkRecoveryResult:
+        calls.append(command)
+        return _applied_recovery(command)
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), recover=recover),
+    )
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?notice=work-retried"
+    assert calls == [
+        WorkRecoveryCommand(
+            idempotency_key="private-key",
+            job_id=UUID(int=31),
+            action=RecoveryAction.RETRY_NOW,
+            expected_state="failed",
+            expected_attempt_count=2,
+            actor="owner",
+            requested_at=NOW,
+        )
+    ]
+
+
+def test_work_recovery_rejects_malformed_identity_before_calling_the_service() -> None:
+    calls: list[WorkRecoveryCommand] = []
+    client = _client(
+        _queue(),
+        operations=OperationsService(
+            load=lambda: _operations_snapshot(),
+            recover=lambda command: calls.append(command) or _applied_recovery(command),
+        ),
+    )
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": "not-a-uuid",
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Malformed operations form" in response.text
+    assert calls == []
+
+
+def test_work_recovery_reports_a_stale_expected_state_as_conflict() -> None:
+    def recover(command: WorkRecoveryCommand) -> WorkRecoveryResult:
+        receipt = _recovery_receipt(command, outcome="stale_state", prior_state="completed")
+        return WorkRecoveryStaleState(receipt=receipt, replayed=False)
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), recover=recover),
+    )
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "Observed completed" in response.text
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
@@ -1171,4 +1373,47 @@ def _control_service(
         change_schedule=cast(Callable[..., Never], unexpected)
         if change_schedule is None
         else change_schedule,
+    )
+
+
+def _operations_snapshot() -> OperationsSnapshot:
+    return OperationsSnapshot(
+        health=OperationsHealth.UNKNOWN,
+        queues=QueueCounts(),
+        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
+        recent_runs=(),
+        failures=(),
+    )
+
+
+def _applied_recovery(command: WorkRecoveryCommand) -> WorkRecoveryApplied:
+    return WorkRecoveryApplied(
+        receipt=_recovery_receipt(command, outcome="applied", prior_state=command.expected_state),
+        replayed=False,
+    )
+
+
+def _recovery_receipt(
+    command: WorkRecoveryCommand,
+    *,
+    outcome: RecoveryOutcome,
+    prior_state: WorkItemState,
+) -> WorkRecoveryReceipt:
+    return WorkRecoveryReceipt(
+        idempotency_key=command.idempotency_key,
+        job_id=command.job_id,
+        action=command.action,
+        expected_state=command.expected_state,
+        expected_attempt_count=command.expected_attempt_count,
+        actor=command.actor,
+        requested_at=command.requested_at,
+        outcome=outcome,
+        prior_state=prior_state,
+        prior_attempt_count=2,
+        prior_retry_at=NOW if prior_state == "failed" else None,
+        prior_failed_at=NOW,
+        prior_error={"code": "failure", "reason": "failed"},
+        resulting_state=prior_state,
+        resulting_attempt_count=2,
+        resulting_retry_at=NOW if prior_state == "failed" else None,
     )
