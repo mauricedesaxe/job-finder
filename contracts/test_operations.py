@@ -165,6 +165,44 @@ def test_operations_snapshot_reads_authoritative_postgres_state(
     assert snapshot.failures[0].summary == "invalid_job: Job is invalid"
 
 
+def test_operations_health_follows_real_postgres_state_transitions(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+
+        empty = load_operations_snapshot(connection)
+
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'processing', 'contract-ref', %s, '{}'::jsonb,
+              'running', %s)
+            """,
+            (run_id, f"operations-health:{run_id}", release.id, now),
+        )
+        working = load_operations_snapshot(connection)
+
+        connection.execute(
+            "UPDATE pipeline_runs SET status = 'completed', completed_at = %s WHERE id = %s",
+            (now + timedelta(minutes=2), run_id),
+        )
+        caught_up = load_operations_snapshot(connection)
+
+    assert empty.health is OperationsHealth.UNKNOWN
+    assert empty.recent_runs == ()
+    assert working.health is OperationsHealth.WORKING
+    assert [run.status for run in working.recent_runs] == ["running"]
+    assert caught_up.health is OperationsHealth.CAUGHT_UP
+    assert [run.status for run in caught_up.recent_runs] == ["completed"]
+
+
 @contextmanager
 def _connection(
     schema_name: str,
