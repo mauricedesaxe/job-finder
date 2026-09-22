@@ -381,6 +381,158 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             connection.execute("DELETE FROM active_release_target")
 
 
+def test_release_target_lifecycle_rejects_unapproved_and_mismatched_commands(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, _, rates = _seed_evaluation_execution_context(connection, now)
+        active = get_active_release_target(connection)
+        prompt_release = load_prompt_release(connection, active.target.prompt_release_id)
+        candidate_relevance = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_faithful_policy(prompt_release)),
+            created_at=now,
+            created_by="contract",
+        )
+        candidate_target = ReleaseTarget(
+            prompt_release_id=prompt_release.id,
+            relevance_release_id=candidate_relevance.id,
+        )
+
+        def expected_result(
+            case: EvaluationManifestCase, _target: ReleaseTarget, _trial: int
+        ) -> EvaluationResult:
+            if case.expected_outcome == "qualified":
+                return Qualified(reason="Expected positive.", profile_name="profile")
+            return Rejected(reason="Expected negative.")
+
+        baseline_execution = run_manifest(
+            connection,
+            command=EvaluateManifestCommand(
+                idempotency_key="lifecycle-guard:baseline",
+                manifest_id=manifest_id,
+                target=active.target,
+                implementation_ref="baseline",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: expected_result,
+            now=lambda: now,
+        )
+        candidate_execution = run_manifest(
+            connection,
+            command=EvaluateManifestCommand(
+                idempotency_key="lifecycle-guard:candidate",
+                manifest_id=manifest_id,
+                target=candidate_target,
+                implementation_ref="candidate",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: expected_result,
+            now=lambda: now,
+        )
+        assert isinstance(baseline_execution, CompletedEvaluationExecution)
+        assert isinstance(candidate_execution, CompletedEvaluationExecution)
+        comparison = preview_run_comparison(
+            connection, baseline_execution.run.id, candidate_execution.run.id
+        )
+        approved = record_prompt_promotion_decision(
+            connection,
+            baseline_run_id=baseline_execution.run.id,
+            candidate_run_id=candidate_execution.run.id,
+            expected_comparison_id=comparison.id,
+            decision="approved",
+            reason="Exact target passed the frozen manifest.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="lifecycle-guard:decision-approved",
+        )
+        activated = activate_release_target(
+            connection,
+            ActivateReleaseTargetCommand(
+                idempotency_key="lifecycle-guard:activate",
+                promotion_decision_id=approved.id,
+                expected_active_target=active.target,
+                expected_generation=active.generation,
+                actor="owner",
+                timestamp=now + timedelta(minutes=1),
+            ),
+        )
+        with pytest.raises(
+            ReleaseTargetLifecycleError,
+            match="different release-target activation",
+        ):
+            activate_release_target(
+                connection,
+                ActivateReleaseTargetCommand(
+                    idempotency_key="lifecycle-guard:activate",
+                    promotion_decision_id=approved.id,
+                    expected_active_target=active.target,
+                    expected_generation=active.generation + 5,
+                    actor="owner",
+                    timestamp=now + timedelta(minutes=2),
+                ),
+            )
+        with pytest.raises(ValueError, match="already has a promotion decision"):
+            record_prompt_promotion_decision(
+                connection,
+                baseline_run_id=baseline_execution.run.id,
+                candidate_run_id=candidate_execution.run.id,
+                expected_comparison_id=comparison.id,
+                decision="rejected",
+                reason="Second opinion.",
+                actor="owner",
+                created_at=now + timedelta(minutes=3),
+                idempotency_key="lifecycle-guard:decision-duplicate",
+            )
+
+        second_candidate_execution = run_manifest(
+            connection,
+            command=EvaluateManifestCommand(
+                idempotency_key="lifecycle-guard:candidate-2",
+                manifest_id=manifest_id,
+                target=candidate_target,
+                implementation_ref="candidate",
+            ),
+            create_exchange_rates=lambda: rates,
+            create_evaluator=lambda _rates, _record: expected_result,
+            now=lambda: now,
+        )
+        assert isinstance(second_candidate_execution, CompletedEvaluationExecution)
+        second_comparison = preview_run_comparison(
+            connection, baseline_execution.run.id, second_candidate_execution.run.id
+        )
+        rejected = record_prompt_promotion_decision(
+            connection,
+            baseline_run_id=baseline_execution.run.id,
+            candidate_run_id=second_candidate_execution.run.id,
+            expected_comparison_id=second_comparison.id,
+            decision="rejected",
+            reason="Not taking this target.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="lifecycle-guard:decision-rejected",
+        )
+        with pytest.raises(
+            ReleaseTargetLifecycleError,
+            match="Approved promotion decision does not exist",
+        ):
+            activate_release_target(
+                connection,
+                ActivateReleaseTargetCommand(
+                    idempotency_key="lifecycle-guard:activate-rejected",
+                    promotion_decision_id=rejected.id,
+                    expected_active_target=active.target,
+                    expected_generation=active.generation,
+                    actor="owner",
+                    timestamp=now + timedelta(minutes=4),
+                ),
+            )
+
+        assert isinstance(activated, ReleaseTargetActivated)
+        assert get_active_release_target(connection) == activated.active
+
+
 def test_release_target_migration_bootstraps_configurable_prompt_criteria(
     authority_schema: str,
 ) -> None:
