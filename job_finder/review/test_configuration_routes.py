@@ -37,6 +37,12 @@ from job_finder.review.configuration_editor import (
     ConfigurationEditorState,
 )
 from job_finder.review.models import ReviewQueue, ReviewSaved
+from job_finder.review.owner_access import (
+    OnboardingStage,
+    OwnerAccessService,
+    OwnerAccessState,
+    OwnerBootstrapConflict,
+)
 from job_finder.review.postgres import ReviewService
 from job_finder.search_configuration import (
     ActiveSearchConfiguration,
@@ -52,9 +58,15 @@ from job_finder.search_configuration import (
 
 NOW = datetime(2026, 9, 20, 15, tzinfo=UTC)
 SETTINGS = ReviewAppSettings(
-    app_password="correct horse battery staple",
     session_secret="s" * 32,
     cookie_secure=False,
+)
+OWNER_PASSWORD = "correct horse battery staple"
+OWNER_STATE = OwnerAccessState(stage=OnboardingStage.COMPLETE, has_password=True)
+OWNER_ACCESS = OwnerAccessService(
+    load_state=lambda: OWNER_STATE,
+    authenticate=lambda password: password == OWNER_PASSWORD,
+    bootstrap=lambda _password: OwnerBootstrapConflict(OWNER_STATE),
 )
 
 
@@ -584,7 +596,15 @@ def test_configuration_database_failure_is_a_retryable_503() -> None:
         review_queue=lambda: ReviewQueue(),
         submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
     )
-    client = TestClient(create_review_app(review, service, SETTINGS, now=lambda: NOW))
+    client = TestClient(
+        create_review_app(
+            review,
+            service,
+            SETTINGS,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
+    )
     _authenticate(client)
 
     response = client.get("/configuration")
@@ -618,7 +638,15 @@ def _client(harness: ServiceHarness, *, authenticate: bool = True) -> TestClient
         review_queue=lambda: ReviewQueue(),
         submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
     )
-    client = TestClient(create_review_app(review, harness.service(), SETTINGS, now=lambda: NOW))
+    client = TestClient(
+        create_review_app(
+            review,
+            harness.service(),
+            SETTINGS,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
+    )
     if authenticate:
         _authenticate(client)
     return client
@@ -627,7 +655,7 @@ def _client(harness: ServiceHarness, *, authenticate: bool = True) -> TestClient
 def _authenticate(client: TestClient) -> None:
     response = client.post(
         "/login",
-        data={"password": SETTINGS.app_password, "next": "/configuration"},
+        data={"password": OWNER_PASSWORD, "next": "/configuration"},
         follow_redirects=False,
     )
     assert response.status_code == 303

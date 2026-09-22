@@ -9,6 +9,7 @@ from uuid import UUID
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
@@ -65,15 +66,30 @@ from job_finder.review.operations import (
     WorkRecoveryResult,
     WorkRecoveryStaleState,
 )
+from job_finder.review.owner_access import (
+    OnboardingStage,
+    OwnerAccessService,
+    OwnerAccessState,
+    OwnerBootstrapped,
+    OwnerBootstrapConflict,
+)
 from job_finder.review.postgres import ReviewService
 
 TODAY = date(2026, 9, 10)
 YESTERDAY = date(2026, 9, 9)
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
 SETTINGS = ReviewAppSettings(
-    app_password="correct horse battery staple",
+    bootstrap_token=SecretStr("bootstrap-token-with-at-least-32-characters"),
     session_secret="s" * 32,
     cookie_secure=False,
+)
+OWNER_PASSWORD = "correct horse battery staple"
+BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-32-characters"
+OWNER_STATE = OwnerAccessState(stage=OnboardingStage.COMPLETE, has_password=True)
+OWNER_ACCESS = OwnerAccessService(
+    load_state=lambda: OWNER_STATE,
+    authenticate=lambda password: password == OWNER_PASSWORD,
+    bootstrap=lambda _password: OwnerBootstrapConflict(OWNER_STATE),
 )
 
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
@@ -189,6 +205,7 @@ def test_the_operations_home_requires_the_existing_owner_session() -> None:
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
         _configuration_service(),
         SETTINGS,
+        owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
 
@@ -335,6 +352,7 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
         _configuration_service(),
         SETTINGS,
+        owner_access_service=OWNER_ACCESS,
         operations_service=operations,
         control_service=controls,
         now=lambda: NOW,
@@ -828,6 +846,7 @@ def test_the_login_uses_the_editorial_split_and_route_line() -> None:
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
             _configuration_service(),
             SETTINGS,
+            owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
     )
@@ -1018,7 +1037,13 @@ def test_submitting_a_revision_returns_to_the_item_page_with_the_update() -> Non
         submit=submit,
     )
     client = TestClient(
-        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+        create_review_app(
+            service,
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
     )
     _authenticate(client)
 
@@ -1247,6 +1272,7 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
         ReviewService(review_queue=unavailable, submit=_saved),
         _configuration_service(),
         SETTINGS,
+        owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
     client = TestClient(app)
@@ -1266,6 +1292,7 @@ def test_requires_a_signed_session_for_review_routes() -> None:
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
             _configuration_service(),
             SETTINGS,
+            owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
     )
@@ -1276,12 +1303,100 @@ def test_requires_a_signed_session_for_review_routes() -> None:
     assert response.headers["location"] == "/login?next=%2Freview"
 
 
+def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
+    state = [OwnerAccessState(stage=OnboardingStage.OWNER_ACCOUNT, has_password=False)]
+    calls: list[str] = []
+
+    def bootstrap(password: str) -> OwnerBootstrapped:
+        calls.append(password)
+        state[0] = OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=True)
+        return OwnerBootstrapped(state[0])
+
+    owner_access = OwnerAccessService(
+        load_state=lambda: state[0],
+        authenticate=lambda _password: False,
+        bootstrap=bootstrap,
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=owner_access,
+            now=lambda: NOW,
+        )
+    )
+
+    protected = client.get("/review", follow_redirects=False)
+    forbidden = client.post(
+        "/setup",
+        data={"password": OWNER_PASSWORD, "password_confirmation": OWNER_PASSWORD},
+    )
+    setup = client.get("/setup")
+    csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', setup.text)
+    assert csrf_match is not None
+    rejected_token = client.post(
+        "/setup",
+        data={
+            "csrf_token": csrf_match.group(1),
+            "bootstrap_token": "incorrect-bootstrap-token-with-32-characters",
+            "password": OWNER_PASSWORD,
+            "password_confirmation": OWNER_PASSWORD,
+        },
+    )
+    completed = client.post(
+        "/setup",
+        data={
+            "csrf_token": csrf_match.group(1),
+            "bootstrap_token": BOOTSTRAP_TOKEN,
+            "password": OWNER_PASSWORD,
+            "password_confirmation": OWNER_PASSWORD,
+        },
+        follow_redirects=False,
+    )
+
+    assert protected.status_code == 303
+    assert protected.headers["location"] == "/setup"
+    assert forbidden.status_code == 403
+    assert rejected_token.status_code == 401
+    assert "Create the owner password" in setup.text
+    assert completed.status_code == 303
+    assert completed.headers["location"] == "/"
+    assert calls == [OWNER_PASSWORD]
+    assert client.get("/review").status_code == 200
+
+
+def test_legacy_install_fails_closed_until_password_import() -> None:
+    legacy = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(
+            stage=OnboardingStage.LEGACY_OWNER_IMPORT, has_password=False
+        ),
+        authenticate=lambda _password: False,
+        bootstrap=lambda _password: pytest.fail("legacy installation became claimable"),
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=legacy,
+            now=lambda: NOW,
+        )
+    )
+
+    response = client.get("/setup")
+
+    assert response.status_code == 503
+    assert "Legacy owner import is required" in response.text
+
+
 def test_authenticates_and_signs_out_the_owner() -> None:
     client = TestClient(
         create_review_app(
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
             _configuration_service(),
             SETTINGS,
+            owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
     )
@@ -1289,7 +1404,7 @@ def test_authenticates_and_signs_out_the_owner() -> None:
     rejected = client.post("/login", data={"password": "wrong password", "next": "/review"})
     accepted = client.post(
         "/login",
-        data={"password": SETTINGS.app_password, "next": "/review"},
+        data={"password": OWNER_PASSWORD, "next": "/review"},
         follow_redirects=False,
     )
     csrf_token = _csrf(client)
@@ -1314,6 +1429,7 @@ def test_exposes_public_health_and_database_readiness() -> None:
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
         _configuration_service(),
         SETTINGS,
+        owner_access_service=OWNER_ACCESS,
         readiness=ready,
         now=lambda: NOW,
     )
@@ -1333,6 +1449,7 @@ def test_reports_database_readiness_failure_without_authentication() -> None:
             ReviewService(review_queue=lambda: _queue(), submit=_saved),
             _configuration_service(),
             SETTINGS,
+            owner_access_service=OWNER_ACCESS,
             readiness=unavailable,
             now=lambda: NOW,
         )
@@ -1361,6 +1478,7 @@ def _client(
             service,
             _configuration_service(),
             SETTINGS,
+            owner_access_service=OWNER_ACCESS,
             operations_service=operations,
             control_service=controls,
             now=lambda: NOW,
@@ -1373,7 +1491,13 @@ def _client(
 def _draining_client(remaining: list[ReviewItem], submit: Submitter) -> TestClient:
     service = ReviewService(review_queue=lambda: ReviewQueue(items=tuple(remaining)), submit=submit)
     client = TestClient(
-        create_review_app(service, _configuration_service(), SETTINGS, now=lambda: NOW)
+        create_review_app(
+            service,
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
     )
     _authenticate(client)
     return client
@@ -1382,7 +1506,7 @@ def _draining_client(remaining: list[ReviewItem], submit: Submitter) -> TestClie
 def _authenticate(client: TestClient) -> None:
     response = client.post(
         "/login",
-        data={"password": SETTINGS.app_password, "next": "/review"},
+        data={"password": OWNER_PASSWORD, "next": "/review"},
         follow_redirects=False,
     )
     assert response.status_code == 303

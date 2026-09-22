@@ -36,21 +36,47 @@ def test_review_app_settings_require_production_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "correct horse battery staple")
+    monkeypatch.setenv("JOB_FINDER_BOOTSTRAP_TOKEN", "b" * 32)
     monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
     monkeypatch.setenv("JOB_FINDER_REVIEW_COOKIE_SECURE", "false")
 
     settings = ReviewAppSettings.from_environment()
 
-    assert settings.app_password == "correct horse battery staple"
+    assert settings.legacy_password is not None
+    assert settings.legacy_password.get_secret_value() == "correct horse battery staple"
+    assert settings.bootstrap_token is not None
+    assert settings.bootstrap_token.get_secret_value() == "b" * 32
     assert settings.session_secret == "s" * 32
     assert not settings.cookie_secure
 
 
-def test_review_app_settings_reject_missing_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("JOB_FINDER_REVIEW_PASSWORD", raising=False)
-    monkeypatch.delenv("JOB_FINDER_REVIEW_SESSION_SECRET", raising=False)
+def test_review_app_settings_require_only_the_session_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "")
+    monkeypatch.setenv("JOB_FINDER_BOOTSTRAP_TOKEN", "")
+    monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
+
+    settings = ReviewAppSettings.from_environment()
+
+    assert settings.legacy_password is None
+    assert settings.bootstrap_token is None
+
+    monkeypatch.delenv("JOB_FINDER_REVIEW_SESSION_SECRET")
 
     with pytest.raises(ValidationError):
+        _ = ReviewAppSettings.from_environment()
+
+
+def test_review_app_settings_reject_the_documented_placeholder_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "JOB_FINDER_REVIEW_SESSION_SECRET",
+        "replace-with-at-least-32-random-characters",
+    )
+
+    with pytest.raises(ValidationError, match="randomly generated"):
         _ = ReviewAppSettings.from_environment()
 
 
