@@ -127,6 +127,35 @@ def _mcp_connect(schema_name: str) -> Callable[[], AbstractContextManager[Connec
     return connect
 
 
+def test_evaluation_run_reports_an_unconfigured_deployment_without_touching_postgres() -> None:
+    @contextmanager
+    def unreachable() -> Generator[Connection]:
+        raise AssertionError("database must not be touched")
+        yield  # pragma: no cover
+
+    server = create_mcp_server(
+        McpDependencies(connect=unreachable, actor="contract-owner", now=lambda: _NOW)
+    )
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="Evaluation execution is not configured"):
+                await client.call_tool(
+                    "evaluation_run",
+                    {
+                        "idempotency_key": "unconfigured:run",
+                        "manifest_id": "a" * 64,
+                        "target": {
+                            "prompt_release_id": "b" * 64,
+                            "relevance_release_id": "c" * 64,
+                        },
+                        "implementation_ref": "contract",
+                    },
+                )
+
+    asyncio.run(exercise())
+
+
 def _seed_pursued_feedback(connection: Connection) -> UUID:
     run_id = uuid4()
     release = bootstrap_prompt_release(connection)
@@ -426,6 +455,17 @@ def test_mcp_release_lifecycle_activates_exact_approved_target(authority_schema:
                 await client.call_tool(
                     "release_target_candidate_create",
                     {"prompt_release_id": "0" * 64},
+                )
+            with pytest.raises(ToolError, match="both a relevance release and policy"):
+                await client.call_tool(
+                    "release_target_candidate_create",
+                    {
+                        "prompt_release_id": active.target.prompt_release_id,
+                        "relevance_release_id": candidate.relevance_release_id,
+                        "relevance_policy": build_jev_faithful_policy(prompt_release).model_dump(
+                            mode="json"
+                        ),
+                    },
                 )
             with pytest.raises(ToolError, match="Evaluation execution does not exist"):
                 await client.call_tool("evaluation_execution_get", {"execution_id": "0" * 64})

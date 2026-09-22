@@ -241,6 +241,48 @@ def test_compares_case_transitions_deterministically_for_distinct_release_target
         compare_runs(manifest, baseline, baseline.model_copy(update={"id": "f" * 64}))
 
 
+def test_a_candidate_under_the_absolute_threshold_can_still_regress_against_baseline() -> None:
+    policy = ManifestPolicy(
+        regular_trial_count=4,
+        critical_trial_count=5,
+        max_false_positive_rate=Decimal("0.4"),
+        max_false_negative_rate=Decimal("0.5"),
+    )
+    manifest = EvaluationManifest(
+        id="a" * 64,
+        policy=policy,
+        cases=(
+            _case(0, "rejected", False, 4),
+            _case(1, "rejected", True, 5),
+            _case(2, "qualified", False, 4),
+        ),
+        created_at=NOW,
+        created_by="test",
+    )
+    perfect = tuple(
+        _result(position, trial, expected, expected, None)
+        for position, expected, trials in (
+            (0, "rejected", 4),
+            (1, "rejected", 5),
+            (2, "qualified", 4),
+        )
+        for trial in range(trials)
+    )
+    regressed = list(perfect)
+    regressed[0] = _result(0, 0, "rejected", "qualified", "false_positive")
+
+    comparison = compare_runs(
+        manifest,
+        _run("b" * 64, "c" * 64, manifest, perfect),
+        _run("d" * 64, "e" * 64, manifest, tuple(regressed)),
+    )
+
+    assert comparison.eligible is False
+    assert comparison.eligibility_failures == (
+        "Candidate regresses against baseline false positives",
+    )
+
+
 def _manifest() -> EvaluationManifest:
     return EvaluationManifest(
         id="a" * 64,

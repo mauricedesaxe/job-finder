@@ -23,6 +23,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 import job_finder.configuration_service as configuration_service_module
+import scripts.evaluate_manifest as evaluate_manifest_module
+from scripts.evaluate_manifest import run_stored_manifest
 import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
@@ -379,6 +381,32 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             )
         with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
             connection.execute("DELETE FROM active_release_target")
+
+
+def test_run_stored_manifest_fails_sanitized_without_provider_keys_and_replays(
+    authority_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.11")}, source="fallback", observed_at=now)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(evaluate_manifest_module, "fetch_exchange_rates", lambda observed_at: rates)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, _seeded_rates = _seed_evaluation_execution_context(connection, now)
+        command = EvaluateManifestCommand(
+            idempotency_key="evaluate-manifest:missing-key",
+            manifest_id=manifest_id,
+            target=target,
+            implementation_ref="stored-manifest",
+        )
+
+        failed = run_stored_manifest(connection, command)
+        replayed = run_stored_manifest(connection, command)
+
+    assert isinstance(failed, FailedEvaluationExecution)
+    assert failed.failure.code == "unexpected_exception"
+    assert "TYPESAFE_API_KEY" not in failed.failure.message
+    assert replayed == failed
 
 
 def test_release_target_lifecycle_rejects_unapproved_and_mismatched_commands(
