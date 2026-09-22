@@ -238,6 +238,8 @@ def create_review_app(
                 _document(_setup_content("", "This setup form expired. Reload and try again.")),
                 status_code=403,
             )
+        csrf_token = request.session.get("csrf_token")
+        assert isinstance(csrf_token, str)
         password = _form_text(form, "password")
         configured_token = settings.bootstrap_token
         supplied_token = _form_text(form, "bootstrap_token")
@@ -247,7 +249,7 @@ def create_review_app(
             return HTMLResponse(
                 _document(
                     _setup_content(
-                        str(request.session["csrf_token"]),
+                        csrf_token,
                         "The bootstrap token is incorrect.",
                     )
                 ),
@@ -255,14 +257,14 @@ def create_review_app(
             )
         if password != _form_text(form, "password_confirmation"):
             return HTMLResponse(
-                _document(_setup_content(str(request.session["csrf_token"]), "Passwords differ.")),
+                _document(_setup_content(csrf_token, "Passwords differ.")),
                 status_code=400,
             )
         try:
             result = await to_thread.run_sync(owner_access_service.bootstrap, password)
         except ValueError as error:
             return HTMLResponse(
-                _document(_setup_content(str(request.session["csrf_token"]), str(error))),
+                _document(_setup_content(csrf_token, str(error))),
                 status_code=400,
             )
         except psycopg.Error:
@@ -986,7 +988,7 @@ def _setup_content(csrf_token: str, error: str | None = None) -> object:
             H1("Create the owner password."),
             P(
                 "This password protects configuration, operations, and every job decision. "
-                "It is hashed before storage and cannot be recovered.",
+                + "It is hashed before storage and cannot be recovered.",
                 cls="login-intro",
             ),
             cls="login-editorial",

@@ -78,7 +78,9 @@ def _hash_owner_password(password: str, *, salt: bytes | None = None, enforce_ma
     )
     encoded_salt = base64.urlsafe_b64encode(password_salt).decode()
     encoded_hash = base64.urlsafe_b64encode(derived).decode()
-    return f"scrypt$v=1$n={_SCRYPT_N}$r={_SCRYPT_R}$p={_SCRYPT_P}" f"${encoded_salt}${encoded_hash}"
+    return (
+        f"scrypt$v=1$n={_SCRYPT_N}$r={_SCRYPT_R}$p={_SCRYPT_P}" + f"${encoded_salt}${encoded_hash}"
+    )
 
 
 def verify_owner_password(password: str, encoded: str) -> bool:
