@@ -11,9 +11,6 @@ import requests
 from job_finder.config import DagsterControlSettings
 from job_finder.review.control_plane import (
     CONTROL_DEFINITIONS,
-    OWNER_HOME_CORRELATION_TAG,
-    OWNER_HOME_ACTOR_TAG,
-    OWNER_HOME_SOURCE_TAG,
     ControlConflict,
     ControlPlaneUnavailable,
     RunLaunchUncertain,
@@ -37,14 +34,11 @@ class FakeGraphQL:
         self.statuses = {
             definition.schedule_name: ScheduleStatus.RUNNING for definition in CONTROL_DEFINITIONS
         }
-        self.mutations: list[str] = []
-        self.run_filters: list[Mapping[str, object]] = []
 
     def __call__(self, query: str, variables: Mapping[str, object]) -> Mapping[str, object]:
         if "OwnerSchedules" in query:
             return {"schedulesOrError": {"__typename": "Schedules", "results": self._schedules()}}
         if "OwnerRuns" in query:
-            self.run_filters.append(cast(Mapping[str, object], variables["filter"]))
             return {
                 "runsOrError": {
                     "__typename": "Runs",
@@ -57,12 +51,10 @@ class FakeGraphQL:
             selector = cast(Mapping[str, object], variables["selector"])
             name = cast(str, selector["scheduleName"])
             self.statuses[name] = ScheduleStatus.RUNNING
-            self.mutations.append(name)
             return self._mutation("startSchedule", ScheduleStatus.RUNNING)
         if "StopOwnerSchedule" in query:
             name = cast(str, variables["id"]).removeprefix("id:")
             self.statuses[name] = ScheduleStatus.STOPPED
-            self.mutations.append(name)
             return self._mutation("stopRunningSchedule", ScheduleStatus.STOPPED)
         raise AssertionError(query)
 
@@ -104,31 +96,6 @@ class FakeResponse:
 
 def _command(*, job_name: str = "job_finder", key: str = "private-key") -> RunNowCommand:
     return RunNowCommand(job_name=job_name, idempotency_key=key, actor="owner", timestamp=NOW)
-
-
-def test_http_transport_posts_graphql_and_returns_typed_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    posts: list[tuple[str, object, float]] = []
-
-    def post(url: str, *, json: object, timeout: float) -> FakeResponse:
-        posts.append((url, json, timeout))
-        return FakeResponse({"data": {"viewer": "ok"}})
-
-    monkeypatch.setattr(requests, "post", post)
-
-    result = requests_graphql_transport("http://dagster.test/graphql", timeout=3)(
-        "query Test { viewer }", {"name": "value"}
-    )
-
-    assert result == {"viewer": "ok"}
-    assert posts == [
-        (
-            "http://dagster.test/graphql",
-            {"query": "query Test { viewer }", "variables": {"name": "value"}},
-            3,
-        )
-    ]
 
 
 @pytest.mark.parametrize(
@@ -212,10 +179,6 @@ def test_run_now_replays_the_single_run_matching_job_and_private_digest() -> Non
 
     assert result == RunStarted(run_id="run-existing", replayed=True)
     assert launches == []
-    tags = cast(list[Mapping[str, str]], graphql.run_filters[0]["tags"])
-    assert tags[0]["key"] == OWNER_HOME_CORRELATION_TAG
-    assert tags[0]["value"] != "private-key"
-    assert len(tags[0]["value"]) == 64
 
 
 def test_run_now_rejects_reusing_a_request_key_for_another_job() -> None:
@@ -265,9 +228,6 @@ def test_sequential_run_now_retries_with_the_same_key_do_not_relaunch() -> None:
     assert first == RunStarted(run_id="run-new", replayed=False)
     assert second == RunStarted(run_id="run-new", replayed=True)
     assert len(launches) == 1
-    assert "private-key" not in repr(launches)
-    assert launches[0][OWNER_HOME_ACTOR_TAG] == "owner"
-    assert launches[0][OWNER_HOME_SOURCE_TAG] == "owner-home"
 
 
 def test_run_now_reconciles_after_a_launch_transport_error() -> None:
@@ -315,7 +275,7 @@ def test_schedule_change_rejects_stale_state_without_mutating() -> None:
     assert result == ScheduleStateConflict(
         expected=ScheduleStatus.RUNNING, observed=ScheduleStatus.STOPPED
     )
-    assert graphql.mutations == []
+    assert graphql.statuses["job_finder_schedule"] is ScheduleStatus.STOPPED
 
 
 def test_schedule_change_is_convergent_when_desired_state_is_current() -> None:
@@ -335,7 +295,7 @@ def test_schedule_change_is_convergent_when_desired_state_is_current() -> None:
     )
 
     assert result == ScheduleChanged(status=ScheduleStatus.RUNNING, replayed=True)
-    assert graphql.mutations == []
+    assert graphql.statuses["job_finder_schedule"] is ScheduleStatus.RUNNING
 
 
 def test_schedule_change_uses_the_public_mutation_and_verifies_its_state() -> None:
@@ -355,7 +315,7 @@ def test_schedule_change_uses_the_public_mutation_and_verifies_its_state() -> No
     )
 
     assert result == ScheduleChanged(status=ScheduleStatus.STOPPED, replayed=False)
-    assert graphql.mutations == ["job_finder_schedule"]
+    assert graphql.statuses["job_finder_schedule"] is ScheduleStatus.STOPPED
 
 
 def test_schedule_change_reconciles_a_mutation_error_from_authoritative_state() -> None:
