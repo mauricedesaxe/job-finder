@@ -1238,21 +1238,9 @@ def _require_owner(
         if request.url.path == "/logout" or request.url.path.startswith(allowed_prefix):
             return None
         return RedirectResponse(onboarding_path, status_code=303)
-    if (
-        budget_setup is not None
-        and request.session.get("authenticated") is True
-        and request.url.path not in ("/logout", "/setup/budget")
-    ):
-        try:
-            policy = budget_setup.inspect(25).policy
-        except (psycopg.Error, RuntimeError):
-            return _state_response(
-                "Budget setup is unavailable",
-                "Budget state could not be loaded. Try again after the database recovers.",
-                status_code=503,
-            )
-        if policy is None:
-            return RedirectResponse("/setup/budget", status_code=303)
+    budget_response = _require_completed_budget(request, budget_setup)
+    if budget_response is not None:
+        return budget_response
     if request.url.path == "/setup":
         destination = "/" if request.session.get("authenticated") is True else "/login"
         return RedirectResponse(destination, status_code=303)
@@ -1264,6 +1252,29 @@ def _require_owner(
     if request.url.query:
         next_url = f"{next_url}?{request.url.query}"
     return RedirectResponse(f"/login?next={quote(next_url, safe='')}", status_code=303)
+
+
+def _require_completed_budget(
+    request: Request,
+    budget_setup: BudgetSetupService | None,
+) -> Response | None:
+    if (
+        budget_setup is None
+        or request.session.get("authenticated") is not True
+        or request.url.path in ("/logout", "/setup/budget")
+    ):
+        return None
+    try:
+        policy = budget_setup.inspect(25).policy
+    except (psycopg.Error, RuntimeError):
+        return _state_response(
+            "Budget setup is unavailable",
+            "Budget state could not be loaded. Try again after the database recovers.",
+            status_code=503,
+        )
+    if policy is None:
+        return RedirectResponse("/setup/budget", status_code=303)
+    return None
 
 
 def _authenticate_session(request: Request) -> None:
