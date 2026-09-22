@@ -7,6 +7,8 @@ driven end-to-end against a real dagster-webserver GraphQL endpoint without
 network side effects.
 """
 
+# pyright: reportUnknownVariableType=false
+
 from __future__ import annotations
 
 from dagster import DefaultScheduleStatus, Definitions, JobDefinition, ScheduleDefinition, job, op

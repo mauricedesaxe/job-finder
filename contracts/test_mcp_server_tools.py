@@ -128,10 +128,8 @@ def _mcp_connect(schema_name: str) -> Callable[[], AbstractContextManager[Connec
 
 
 def test_evaluation_run_reports_an_unconfigured_deployment_without_touching_postgres() -> None:
-    @contextmanager
-    def unreachable() -> Generator[Connection]:
+    def unreachable() -> AbstractContextManager[Connection]:
         raise AssertionError("database must not be touched")
-        yield  # pragma: no cover
 
     server = create_mcp_server(
         McpDependencies(connect=unreachable, actor="contract-owner", now=lambda: _NOW)

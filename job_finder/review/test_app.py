@@ -262,8 +262,11 @@ def test_run_now_rejects_a_malformed_form_without_calling_the_service() -> None:
     assert "Malformed operations form" in response.text
 
 
-def test_run_now_redirects_and_the_home_renders_the_allowlisted_notice() -> None:
-    controls = _control_service(run_now=lambda _command: RunStarted("run-1", False))
+def test_run_now_passes_owner_provenance_then_renders_the_allowlisted_notice() -> None:
+    calls: list[RunNowCommand] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("run-1", False)
+    )
     client = _client(_queue(), controls=controls)
 
     response = client.post(
@@ -278,6 +281,14 @@ def test_run_now_redirects_and_the_home_renders_the_allowlisted_notice() -> None
 
     assert response.status_code == 200
     assert "Run submitted to Dagster." in response.text
+    assert calls == [
+        RunNowCommand(
+            job_name="job_finder",
+            idempotency_key="private-key",
+            actor="owner",
+            timestamp=NOW,
+        )
+    ]
 
 
 def test_uncertain_run_renders_an_exact_retry_form_with_the_same_private_key() -> None:
@@ -317,8 +328,10 @@ def test_run_now_integrity_conflict_is_reported_as_conflict() -> None:
 
 
 def test_schedule_change_reports_stale_state_without_redirecting() -> None:
+    calls: list[ScheduleChangeCommand] = []
     controls = _control_service(
-        change_schedule=lambda _command: ScheduleStateConflict(
+        change_schedule=lambda command: calls.append(command)
+        or ScheduleStateConflict(
             expected=ScheduleStatus.RUNNING,
             observed=ScheduleStatus.STOPPED,
         )
@@ -337,6 +350,8 @@ def test_schedule_change_reports_stale_state_without_redirecting() -> None:
 
     assert response.status_code == 409
     assert "Expected RUNNING; observed STOPPED" in response.text
+    assert calls[0].actor == "owner"
+    assert calls[0].timestamp == NOW
 
 
 def test_schedule_change_redirects_after_a_verified_pause() -> None:

@@ -674,6 +674,12 @@ def test_persists_each_retry_and_the_accepted_jev_result() -> None:
     assert attempts[1].requested_model == JEV_MODEL
     assert attempts[1].response_model == JEV_MODEL
     assert attempts[1].provider_response_id == "typesafe-request-1"
+    assert attempts[1].input_tokens == 100
+    assert attempts[1].output_tokens == 4
+    assert attempts[1].observed_at == observed_at
+    assert attempts[1].raw_response == json.loads(
+        _multi_response_body(dict.fromkeys(ATOMIC_QUESTIONS["remote-europe-eligible"], 0.75))
+    )
 
 
 def test_persisted_execution_uses_the_stored_relevance_policy() -> None:
