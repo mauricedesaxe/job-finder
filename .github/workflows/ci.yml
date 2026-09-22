@@ -58,5 +58,13 @@ jobs:
           JOB_FINDER_POSTGRES_DSN="$JOB_FINDER_TEST_POSTGRES_DSN" uv run dagster definitions validate -m job_finder.dagster
           uv run pytest
           uv run pytest contracts
-      - name: Build Dagster image
+      - name: Build application image
         run: docker build --tag job-finder-dagster:test .
+      - name: Smoke test Compose deployment
+        run: |
+          cp .env.example .env
+          POSTGRES_PORT=5433 docker compose up --build --detach --wait
+          curl --fail --silent --show-error http://127.0.0.1:8080/readyz
+      - name: Stop Compose deployment
+        if: always()
+        run: if [ -f .env ]; then docker compose down --volumes; fi
