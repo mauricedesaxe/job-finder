@@ -10,6 +10,11 @@ from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.control_plane import dagster_control_plane_service
 from job_finder.review.operations import postgres_operations_service
+from job_finder.review.owner_access import (
+    OnboardingStage,
+    import_legacy_owner_password,
+    postgres_owner_access_service,
+)
 from job_finder.review.postgres import postgres_review_service
 
 
@@ -23,6 +28,16 @@ def create_app() -> FastHTML:
 
     with connect() as connection:
         _ = apply_migrations(connection)
+        owner_state = import_legacy_owner_password(
+            connection,
+            None
+            if settings.legacy_password is None
+            else settings.legacy_password.get_secret_value(),
+        )
+        if owner_state.stage is OnboardingStage.OWNER_ACCOUNT and settings.bootstrap_token is None:
+            raise RuntimeError(
+                "JOB_FINDER_BOOTSTRAP_TOKEN is required until the owner account is created"
+            )
 
     def readiness() -> None:
         with connect() as connection:
@@ -32,6 +47,7 @@ def create_app() -> FastHTML:
         postgres_review_service(connect),
         postgres_configuration_editor_service(connect),
         settings,
+        owner_access_service=postgres_owner_access_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
         control_service=dagster_control_plane_service(dagster),

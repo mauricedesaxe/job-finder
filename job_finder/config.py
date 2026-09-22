@@ -4,7 +4,7 @@ import os
 from collections.abc import Mapping
 from typing import ClassVar
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 class DatabaseSettings(BaseModel):
@@ -20,20 +20,31 @@ class DatabaseSettings(BaseModel):
 class ReviewAppSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-    app_password: str = Field(min_length=12)
+    legacy_password: SecretStr | None = None
+    bootstrap_token: SecretStr | None = Field(default=None, min_length=32)
     session_secret: str = Field(min_length=32)
     cookie_secure: bool = True
 
     @classmethod
     def from_environment(cls) -> ReviewAppSettings:
+        legacy_password = os.environ.get("JOB_FINDER_REVIEW_PASSWORD") or None
+        bootstrap_token = os.environ.get("JOB_FINDER_BOOTSTRAP_TOKEN") or None
         return cls.model_validate(
             {
-                "app_password": os.environ.get("JOB_FINDER_REVIEW_PASSWORD"),
+                "legacy_password": legacy_password,
+                "bootstrap_token": bootstrap_token,
                 "session_secret": os.environ.get("JOB_FINDER_REVIEW_SESSION_SECRET"),
                 "cookie_secure": os.environ.get("JOB_FINDER_REVIEW_COOKIE_SECURE", "true")
                 == "true",
             }
         )
+
+    @field_validator("session_secret")
+    @classmethod
+    def reject_example_session_secret(cls, value: str) -> str:
+        if value == "replace-with-at-least-32-random-characters":
+            raise ValueError("session secret must be randomly generated")
+        return value
 
 
 class DagsterControlSettings(BaseModel):

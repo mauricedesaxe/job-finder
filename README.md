@@ -54,10 +54,10 @@ Open `.env` and replace these values:
 - `JINA_API_KEY`
 - `OPENROUTER_API_KEY`
 - `TYPESAFE_API_KEY`
-- `JOB_FINDER_REVIEW_PASSWORD`, with at least 12 characters
 - `JOB_FINDER_REVIEW_SESSION_SECRET`, with at least 32 random characters
+- `JOB_FINDER_BOOTSTRAP_TOKEN`, with at least 32 random characters for a fresh deployment
 
-Generate a session secret with:
+Generate each secret separately with:
 
 ```sh
 docker run --rm python:3.12-alpine \
@@ -83,7 +83,12 @@ daemon remain on the internal Compose network. PostgreSQL is available only on
 the configured localhost port. The database is stored in the `postgres-data`
 volume and survives restarts.
 
-Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
+On the first visit, enter `JOB_FINDER_BOOTSTRAP_TOKEN` and create the owner
+password. The token proves the first visitor controls the deployment; Job
+Finder hashes the password into PostgreSQL before continuing. Upgrading
+installations can leave their existing `JOB_FINDER_REVIEW_PASSWORD` set for one
+startup; Job Finder imports it once, after which the environment value can be
+removed.
 The authenticated home reads and controls the four Job Finder schedules through
 Dagster's GraphQL API. In deployment, set `JOB_FINDER_DAGSTER_GRAPHQL_URL`
 to the Dagster webserver's internal `/graphql` URL.

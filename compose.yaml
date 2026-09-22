@@ -6,6 +6,8 @@ x-job-finder-service: &job-finder-service
     JOB_FINDER_POSTGRES_DSN: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/job_finder
     JOB_FINDER_DAGSTER_POSTGRES_DSN: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/job_finder?options=-csearch_path%3Ddagster
     JOB_FINDER_DAGSTER_GRAPHQL_URL: http://dagster-webserver:3000/graphql
+    JOB_FINDER_REVIEW_SESSION_SECRET: ${JOB_FINDER_REVIEW_SESSION_SECRET:?Set a random session secret in .env}
+    JOB_FINDER_BOOTSTRAP_TOKEN: ${JOB_FINDER_BOOTSTRAP_TOKEN:-}
   restart: unless-stopped
 
 services:

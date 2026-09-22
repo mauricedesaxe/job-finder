@@ -14,6 +14,7 @@ SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"
 SEARCH_CONFIGURATION_PUBLICATION_MIGRATION = "0017_search_configuration_publications.sql"
 PIPELINE_RUN_CONFIGURATION_MIGRATION = "0020_pipeline_run_configuration_revisions.sql"
 RELEASE_TARGET_LIFECYCLE_MIGRATION = "0026_release_target_lifecycle.sql"
+OWNER_ONBOARDING_MIGRATION = "0029_owner_onboarding.sql"
 INITIAL_SEARCH_CONFIGURATION_REVISION_ID = (
     "621346c249608e7d8766902c2cd9fbcfb83ac687f58de8a8fdb7f81980a14099"
 )
@@ -47,6 +48,7 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
             "SELECT name, sha256 FROM job_finder_schema_migrations ORDER BY name"
         ).fetchall()
     }
+    existing_installation = bool(applied)
     migration_names: list[str] = []
     for path in sorted(MIGRATIONS_PATH.glob("*.sql")):
         content = path.read_bytes()
@@ -66,6 +68,8 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
             _backfill_search_configuration_publications(connection)
         if path.name == RELEASE_TARGET_LIFECYCLE_MIGRATION:
             _seed_initial_release_target(connection)
+        if path.name == OWNER_ONBOARDING_MIGRATION:
+            _seed_owner_onboarding(connection, existing_installation=existing_installation)
         _ = connection.execute(
             "INSERT INTO job_finder_schema_migrations (name, sha256) VALUES (%s, %s)",
             (path.name, digest),
@@ -75,6 +79,18 @@ def _apply_migrations(connection: psycopg.Connection[tuple[object, ...]]) -> tup
     if unknown:
         raise SchemaMigrationError(f"Database contains unknown migrations: {', '.join(unknown)}")
     return tuple(migration_names)
+
+
+def _seed_owner_onboarding(
+    connection: psycopg.Connection[tuple[object, ...]], *, existing_installation: bool
+) -> None:
+    _ = connection.execute(
+        """
+        INSERT INTO owner_onboarding (singleton_id, stage)
+        VALUES (1, %s)
+        """,
+        ("legacy_owner_import" if existing_installation else "owner_account",),
+    )
 
 
 def _seed_initial_search_configuration(

@@ -123,6 +123,12 @@ from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.models import ReviewSaved, ReviewSubmission
+from job_finder.review.owner_access import (
+    OnboardingStage,
+    OwnerBootstrapped,
+    import_legacy_owner_password,
+    postgres_owner_access_service,
+)
 from job_finder.review.postgres import (
     deterministic_rejected_sample,
     enqueue_qualified_review_item,
@@ -132,6 +138,7 @@ from job_finder.review.postgres import (
     load_review_queue,
     record_review,
 )
+from scripts.serve_review import create_app as create_review_server
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     SearchConfigurationDraft,
@@ -222,6 +229,7 @@ EXPECTED_MIGRATIONS = (
     "0026_release_target_lifecycle.sql",
     "0027_work_recovery_receipts.sql",
     "0028_append_only_job_reevaluations.sql",
+    "0029_owner_onboarding.sql",
 )
 
 
@@ -236,6 +244,76 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert connection.execute(
             "SELECT count(*) FROM job_finder_schema_migrations"
         ).fetchone() == (len(EXPECTED_MIGRATIONS),)
+        assert connection.execute(
+            "SELECT stage, password_hash FROM owner_onboarding WHERE singleton_id = 1"
+        ).fetchone() == ("owner_account", None)
+
+
+def test_owner_bootstrap_is_single_winner_and_authenticates_from_postgres(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+    service = postgres_owner_access_service(lambda: _connection(authority_schema))
+    barrier = Barrier(2)
+
+    def bootstrap(password: str) -> object:
+        _ = barrier.wait()
+        return service.bootstrap(password)
+
+    passwords = ("first secure owner password", "second secure owner password")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(bootstrap, passwords))
+
+    assert sum(isinstance(result, OwnerBootstrapped) for result in results) == 1
+    assert service.load_state().stage is OnboardingStage.PROVIDERS
+    assert sum(service.authenticate(password) for password in passwords) == 1
+    with _connection(authority_schema) as connection:
+        with pytest.raises(psycopg.errors.CheckViolation, match="cannot be replaced or removed"):
+            connection.execute(
+                """
+                UPDATE owner_onboarding
+                SET stage = 'owner_account', password_hash = NULL
+                WHERE singleton_id = 1
+                """
+            )
+        with pytest.raises(psycopg.errors.CheckViolation, match="cannot be deleted"):
+            connection.execute("DELETE FROM owner_onboarding WHERE singleton_id = 1")
+
+
+def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
+    authority_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0028_append_only_job_reevaluations.sql")
+
+    settings = PostgresContractSettings.from_environment()
+    monkeypatch.setenv(
+        "JOB_FINDER_POSTGRES_DSN",
+        f"{settings.postgres_dsn}?options=-csearch_path%3D{authority_schema}",
+    )
+    monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "legacy secure owner password")
+    monkeypatch.delenv("JOB_FINDER_BOOTSTRAP_TOKEN", raising=False)
+    monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
+    monkeypatch.setenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", "http://dagster.test/graphql")
+
+    _ = create_review_server()
+
+    with _connection(authority_schema) as connection:
+        imported = import_legacy_owner_password(connection, "different owner password")
+        replayed = import_legacy_owner_password(connection, "different owner password")
+        stored = connection.execute(
+            "SELECT password_hash FROM owner_onboarding WHERE singleton_id = 1"
+        ).fetchone()
+
+    service = postgres_owner_access_service(lambda: _connection(authority_schema))
+    assert imported.stage is OnboardingStage.COMPLETE
+    assert replayed == imported
+    assert stored is not None
+    assert "legacy secure owner password" not in str(stored[0])
+    assert service.authenticate("legacy secure owner password") is True
+    assert service.authenticate("different owner password") is False
 
 
 def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
@@ -654,13 +732,14 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-6:] == (
+        assert apply_migrations(connection)[-7:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
             "0026_release_target_lifecycle.sql",
             "0027_work_recovery_receipts.sql",
             "0028_append_only_job_reevaluations.sql",
+            "0029_owner_onboarding.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
@@ -676,8 +755,11 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
 def test_concurrent_migration_startup_serializes_schema_writes(
     authority_schema: str,
 ) -> None:
+    barrier = Barrier(2)
+
     def migrate() -> tuple[str, ...]:
         with _connection(authority_schema) as connection:
+            _ = barrier.wait()
             return apply_migrations(connection)
 
     def migrate_for_index(_index: int) -> tuple[str, ...]:

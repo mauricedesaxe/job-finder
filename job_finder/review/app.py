@@ -13,6 +13,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 import psycopg
+from anyio import Lock, to_thread
 from fasthtml.common import (
     A,
     Beforeware,
@@ -121,6 +122,14 @@ from job_finder.review.operations import (
     WorkRecoveryStaleState,
     unknown_operations_service,
 )
+from job_finder.review.owner_access import (
+    MAXIMUM_PASSWORD_INPUT_LENGTH,
+    MAXIMUM_PASSWORD_LENGTH,
+    MINIMUM_PASSWORD_LENGTH,
+    OnboardingStage,
+    OwnerAccessService,
+    OwnerBootstrapConflict,
+)
 from job_finder.review.postgres import ReviewService
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
@@ -167,6 +176,7 @@ def create_review_app(
     configuration_service: ConfigurationEditorService,
     settings: ReviewAppSettings,
     *,
+    owner_access_service: OwnerAccessService,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     control_service: ControlPlaneService | None = None,
@@ -175,10 +185,14 @@ def create_review_app(
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
     controls = control_service or unavailable_control_plane_service()
+
+    def require_owner(request: Request) -> Response | None:
+        return _require_owner(request, owner_access_service)
+
     app = FastHTML(
         before=Beforeware(
-            _require_owner,
-            skip=[r"/healthz", r"/readyz", r"/login", r"/favicon.ico"],
+            require_owner,
+            skip=[r"/healthz", r"/readyz", r"/favicon.ico"],
         ),
         default_hdrs=False,
         htmx=False,
@@ -190,6 +204,7 @@ def create_review_app(
         sess_https_only=settings.cookie_secure,
     )
     login_failures: dict[str, deque[float]] = {}
+    login_attempt_lock = Lock()
 
     @app.route("/healthz", methods=["GET"])
     def healthz() -> PlainTextResponse:
@@ -207,6 +222,65 @@ def create_review_app(
     def favicon() -> Response:
         return Response(status_code=204)
 
+    @app.route("/setup", methods=["GET"])
+    def setup_form(request: Request) -> HTMLResponse:
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            csrf_token = secrets.token_urlsafe(32)
+            request.session["csrf_token"] = csrf_token
+        return HTMLResponse(_document(_setup_content(csrf_token)))
+
+    @app.route("/setup", methods=["POST"])
+    async def setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if not _valid_csrf(request, _form_text(form, "csrf_token")):
+            return HTMLResponse(
+                _document(_setup_content("", "This setup form expired. Reload and try again.")),
+                status_code=403,
+            )
+        password = _form_text(form, "password")
+        configured_token = settings.bootstrap_token
+        supplied_token = _form_text(form, "bootstrap_token")
+        if configured_token is None or not hmac.compare_digest(
+            supplied_token, configured_token.get_secret_value()
+        ):
+            return HTMLResponse(
+                _document(
+                    _setup_content(
+                        str(request.session["csrf_token"]),
+                        "The bootstrap token is incorrect.",
+                    )
+                ),
+                status_code=401,
+            )
+        if password != _form_text(form, "password_confirmation"):
+            return HTMLResponse(
+                _document(_setup_content(str(request.session["csrf_token"]), "Passwords differ.")),
+                status_code=400,
+            )
+        try:
+            result = await to_thread.run_sync(owner_access_service.bootstrap, password)
+        except ValueError as error:
+            return HTMLResponse(
+                _document(_setup_content(str(request.session["csrf_token"]), str(error))),
+                status_code=400,
+            )
+        except psycopg.Error:
+            return _state_response(
+                "Owner setup is unavailable",
+                "The password was not confirmed. Reload this page and try again.",
+                status_code=503,
+            )
+        if isinstance(result, OwnerBootstrapConflict):
+            return _state_response(
+                "Owner setup is already complete",
+                "Sign in with the owner password that was created first.",
+                action=A("Go to sign in", href="/login", cls="retry"),
+                status_code=409,
+            )
+        _authenticate_session(request)
+        return RedirectResponse("/", status_code=303)
+
     @app.route("/login", methods=["GET"])
     def login_form(request: Request) -> HTMLResponse:
         return HTMLResponse(
@@ -215,7 +289,9 @@ def create_review_app(
 
     @app.route("/login", methods=["POST"])
     async def login_submit(request: Request) -> HTMLResponse | RedirectResponse:
-        return await _submit_login(request, settings, login_failures)
+        return await _submit_login(
+            request, owner_access_service, login_failures, login_attempt_lock
+        )
 
     @app.route("/", methods=["GET"])
     def home(request: Request) -> HTMLResponse:
@@ -725,15 +801,28 @@ def create_review_app(
 
 async def _submit_login(
     request: Request,
-    settings: ReviewAppSettings,
+    owner_access: OwnerAccessService,
     login_failures: dict[str, deque[float]],
+    login_attempt_lock: Lock,
 ) -> HTMLResponse | RedirectResponse:
     form = await request.form()
     password = _form_text(form, "password")
     next_url = _safe_next(_form_text(form, "next"))
-    client_id = request.headers.get("x-real-ip")
-    if client_id is None:
-        client_id = request.client.host if request.client else "unknown"
+    client_id = request.client.host if request.client else "unknown"
+    async with login_attempt_lock:
+        return await _check_login(
+            request, owner_access, login_failures, password, next_url, client_id
+        )
+
+
+async def _check_login(
+    request: Request,
+    owner_access: OwnerAccessService,
+    login_failures: dict[str, deque[float]],
+    password: str,
+    next_url: str,
+    client_id: str,
+) -> HTMLResponse | RedirectResponse:
     checked_at = time.monotonic()
     recent = login_failures.get(client_id, deque())
     while recent and checked_at - recent[0] >= LOGIN_WINDOW_SECONDS:
@@ -743,10 +832,17 @@ async def _submit_login(
             _document(_login_content(next_url, "Too many attempts. Try again in a few minutes.")),
             status_code=429,
         )
-    if hmac.compare_digest(password, settings.app_password):
+    try:
+        authenticated = await to_thread.run_sync(owner_access.authenticate, password)
+    except psycopg.Error:
+        return _state_response(
+            "Sign in is unavailable",
+            "The password could not be checked. Reload this page and try again.",
+            status_code=503,
+        )
+    if authenticated:
         login_failures.pop(client_id, None)
-        request.session.clear()
-        request.session.update({"authenticated": True, "csrf_token": secrets.token_urlsafe(32)})
+        _authenticate_session(request)
         return RedirectResponse(next_url, status_code=303)
     if client_id not in login_failures and len(login_failures) >= LOGIN_MAX_CLIENTS:
         login_failures.pop(next(iter(login_failures)))
@@ -844,15 +940,102 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
-def _require_owner(request: Request) -> Response | None:
+def _require_owner(request: Request, owner_access: OwnerAccessService) -> Response | None:
     if ".." in request.url.path.split("/"):
         return Response(status_code=404)
+    try:
+        state = owner_access.load_state()
+    except (psycopg.Error, RuntimeError):
+        return _state_response(
+            "Owner access is unavailable",
+            "The installation state could not be loaded. Try again after the database recovers.",
+            status_code=503,
+        )
+    if state.stage is OnboardingStage.LEGACY_OWNER_IMPORT:
+        return _state_response(
+            "Legacy owner import is required",
+            "Restore JOB_FINDER_REVIEW_PASSWORD for one startup to import the existing owner securely.",
+            status_code=503,
+        )
+    if state.stage is OnboardingStage.OWNER_ACCOUNT:
+        if request.url.path == "/setup":
+            return None
+        return RedirectResponse("/setup", status_code=303)
+    if request.url.path == "/setup":
+        destination = "/" if request.session.get("authenticated") is True else "/login"
+        return RedirectResponse(destination, status_code=303)
+    if request.url.path == "/login":
+        return None
     if request.session.get("authenticated") is True:
         return None
     next_url = request.url.path
     if request.url.query:
         next_url = f"{next_url}?{request.url.query}"
     return RedirectResponse(f"/login?next={quote(next_url, safe='')}", status_code=303)
+
+
+def _authenticate_session(request: Request) -> None:
+    request.session.clear()
+    request.session.update({"authenticated": True, "csrf_token": secrets.token_urlsafe(32)})
+
+
+def _setup_content(csrf_token: str, error: str | None = None) -> object:
+    return Main(
+        Div(
+            Small("JF / FIRST RUN", cls="eyebrow"),
+            H1("Create the owner password."),
+            P(
+                "This password protects configuration, operations, and every job decision. "
+                "It is hashed before storage and cannot be recovered.",
+                cls="login-intro",
+            ),
+            cls="login-editorial",
+        ),
+        Div(
+            Small("Owner setup", cls="eyebrow"),
+            H2("Secure this installation"),
+            P(error, cls="error", role="alert") if error else None,
+            Form(
+                Input(type="hidden", name="csrf_token", value=csrf_token),
+                Label(
+                    "Bootstrap token",
+                    Input(
+                        type="password",
+                        name="bootstrap_token",
+                        required=True,
+                        autocomplete="one-time-code",
+                    ),
+                ),
+                Label(
+                    "Password",
+                    Input(
+                        type="password",
+                        name="password",
+                        minlength=str(MINIMUM_PASSWORD_LENGTH),
+                        maxlength=str(MAXIMUM_PASSWORD_LENGTH),
+                        required=True,
+                        autocomplete="new-password",
+                    ),
+                ),
+                Label(
+                    "Confirm password",
+                    Input(
+                        type="password",
+                        name="password_confirmation",
+                        minlength=str(MINIMUM_PASSWORD_LENGTH),
+                        maxlength=str(MAXIMUM_PASSWORD_LENGTH),
+                        required=True,
+                        autocomplete="new-password",
+                    ),
+                ),
+                Button("Create owner", type="submit", cls="primary-action"),
+                action="/setup",
+                method="post",
+            ),
+            cls="login-card",
+        ),
+        cls="login-shell",
+    )
 
 
 def _login_content(next_url: str, error: str | None = None) -> object:
@@ -885,6 +1068,7 @@ def _login_content(next_url: str, error: str | None = None) -> object:
                     Input(
                         type="password",
                         name="password",
+                        maxlength=str(MAXIMUM_PASSWORD_INPUT_LENGTH),
                         required=True,
                         autocomplete="current-password",
                     ),
