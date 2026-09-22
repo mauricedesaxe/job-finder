@@ -56,6 +56,7 @@ Open `.env` and replace these values:
 - `TYPESAFE_API_KEY`
 - `JOB_FINDER_REVIEW_SESSION_SECRET`, with at least 32 random characters
 - `JOB_FINDER_BOOTSTRAP_TOKEN`, with at least 32 random characters for a fresh deployment
+- `JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY`, generated with the command below
 
 Generate each secret separately with:
 

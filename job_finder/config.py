@@ -22,6 +22,7 @@ class ReviewAppSettings(BaseModel):
 
     legacy_password: SecretStr | None = None
     bootstrap_token: SecretStr | None = Field(default=None, min_length=32)
+    credential_encryption_key: SecretStr | None = None
     session_secret: str = Field(min_length=32)
     cookie_secure: bool = True
 
@@ -29,10 +30,12 @@ class ReviewAppSettings(BaseModel):
     def from_environment(cls) -> ReviewAppSettings:
         legacy_password = os.environ.get("JOB_FINDER_REVIEW_PASSWORD") or None
         bootstrap_token = os.environ.get("JOB_FINDER_BOOTSTRAP_TOKEN") or None
+        credential_encryption_key = os.environ.get("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY") or None
         return cls.model_validate(
             {
                 "legacy_password": legacy_password,
                 "bootstrap_token": bootstrap_token,
+                "credential_encryption_key": credential_encryption_key,
                 "session_secret": os.environ.get("JOB_FINDER_REVIEW_SESSION_SECRET"),
                 "cookie_secure": os.environ.get("JOB_FINDER_REVIEW_COOKIE_SECURE", "true")
                 == "true",

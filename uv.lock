@@ -8,8 +8,8 @@ exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
 fastmcp = false
-langfuse = false
 fastmcp-slim = false
+langfuse = false
 
 [[package]]
 name = "aiofile"
@@ -899,6 +899,7 @@ name = "job-finder"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "dagster" },
     { name = "dagster-graphql" },
     { name = "dagster-postgres" },
@@ -924,6 +925,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = "==50.0.1" },
     { name = "dagster", specifier = "==1.13.21" },
     { name = "dagster-graphql", specifier = "==1.13.21" },
     { name = "dagster-postgres", specifier = "==0.29.21" },

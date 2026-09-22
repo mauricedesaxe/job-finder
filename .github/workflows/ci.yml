@@ -66,6 +66,7 @@ jobs:
           export POSTGRES_PORT=5433
           export JOB_FINDER_REVIEW_SESSION_SECRET=ci-session-secret-with-at-least-32-characters
           export JOB_FINDER_BOOTSTRAP_TOKEN=ci-bootstrap-token-with-at-least-32-characters
+          export JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY=Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=
           docker compose up --build --detach --wait
           curl --fail --silent --show-error http://127.0.0.1:8080/readyz
           curl --fail --silent --cookie-jar /tmp/job-finder-cookies \
@@ -93,7 +94,7 @@ jobs:
             --data-urlencode 'next=/review' http://127.0.0.1:8080/login
           grep --quiet '303' /tmp/job-finder-login.headers
           curl --fail --silent --cookie /tmp/job-finder-cookies \
-            http://127.0.0.1:8080/review | grep --quiet 'Review'
+            http://127.0.0.1:8080/setup/providers | grep --quiet 'Connect the services'
       - name: Stop Compose deployment
         if: always()
         run: |

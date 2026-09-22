@@ -37,6 +37,7 @@ def test_review_app_settings_require_production_secrets(
 ) -> None:
     monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "correct horse battery staple")
     monkeypatch.setenv("JOB_FINDER_BOOTSTRAP_TOKEN", "b" * 32)
+    monkeypatch.setenv("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY", "credential-key")
     monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
     monkeypatch.setenv("JOB_FINDER_REVIEW_COOKIE_SECURE", "false")
 
@@ -46,6 +47,8 @@ def test_review_app_settings_require_production_secrets(
     assert settings.legacy_password.get_secret_value() == "correct horse battery staple"
     assert settings.bootstrap_token is not None
     assert settings.bootstrap_token.get_secret_value() == "b" * 32
+    assert settings.credential_encryption_key is not None
+    assert settings.credential_encryption_key.get_secret_value() == "credential-key"
     assert settings.session_secret == "s" * 32
     assert not settings.cookie_secure
 
@@ -55,12 +58,14 @@ def test_review_app_settings_require_only_the_session_secret(
 ) -> None:
     monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "")
     monkeypatch.setenv("JOB_FINDER_BOOTSTRAP_TOKEN", "")
+    monkeypatch.setenv("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY", "")
     monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
 
     settings = ReviewAppSettings.from_environment()
 
     assert settings.legacy_password is None
     assert settings.bootstrap_token is None
+    assert settings.credential_encryption_key is None
 
     monkeypatch.delenv("JOB_FINDER_REVIEW_SESSION_SECRET")
 
