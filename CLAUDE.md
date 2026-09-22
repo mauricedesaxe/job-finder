@@ -217,7 +217,7 @@ them early from a workstation with the public DSN is fine.
 - ruff handles formatting and lint. Don't fight it; run `uv run ruff format .`.
 - Keep functions short enough to read without scrolling. Xenon enforces
   block complexity at C, module at B, average A.
-- Imports are absolute within the package (`from job_finder.evaluation import ...`).
+- Imports are absolute and name the owning module (`from job_finder.evaluation.models import ...`).
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
