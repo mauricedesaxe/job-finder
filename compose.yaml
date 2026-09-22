@@ -1,11 +1,93 @@
+x-job-finder-service: &job-finder-service
+  build: .
+  image: job-finder:local
+  env_file: .env
+  environment:
+    JOB_FINDER_POSTGRES_DSN: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/job_finder
+    JOB_FINDER_DAGSTER_POSTGRES_DSN: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/job_finder?options=-csearch_path%3Ddagster
+    JOB_FINDER_DAGSTER_GRAPHQL_URL: http://dagster-webserver:3000/graphql
+  restart: unless-stopped
+
 services:
-  webserver:
-    build: .
-    command: uv run dagster-webserver -h 0.0.0.0 -p 3000 -w workspace.yaml
-    env_file: .env
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: job_finder
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "3000:3000"
-  daemon:
-    build: .
-    command: uv run dagster-daemon run -w workspace.yaml
-    env_file: .env
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d job_finder"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  dagster-webserver:
+    <<: *job-finder-service
+    command: uv run --no-sync dagster-webserver -h 0.0.0.0 -p 3000 -w workspace.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - python
+        - scripts/container_healthcheck.py
+        - dagster-webserver
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  dagster-daemon:
+    <<: *job-finder-service
+    command: uv run --no-sync dagster-daemon run -w workspace.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dagster-webserver:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - python
+        - scripts/container_healthcheck.py
+        - dagster-daemon
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  review:
+    <<: *job-finder-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dagster-webserver:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2)
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+volumes:
+  postgres-data:

@@ -18,7 +18,7 @@ This README has two setup paths:
 
 ## Run Job Finder for yourself
 
-The steps below run the full application on your computer. The default search
+The steps below run the full application with Docker Compose. The default search
 and evaluation criteria target senior product engineering and applied AI roles
 that can be worked remotely from Europe. Use the **Search setup** page to change
 those defaults before your first search.
@@ -28,43 +28,20 @@ those defaults before your first search.
 Install:
 
 - [Git](https://git-scm.com/downloads)
-- [Python 3.12](https://www.python.org/downloads/)
-- [uv 0.12.9 or newer](https://docs.astral.sh/uv/getting-started/installation/)
 - [Docker](https://docs.docker.com/get-started/get-docker/)
 - A [Jina API key](https://jina.ai/api-dashboard/)
 - An [OpenRouter API key](https://openrouter.ai/settings/keys) with enough
   credit for model calls
+- A Typesafe API key for the default relevance policy
 
-Clone the repository and install its locked dependencies:
+Clone the repository:
 
 ```sh
 git clone https://github.com/mauricedesaxe/job-finder.git
 cd job-finder
-uv sync --frozen
 ```
 
-### 2. Start PostgreSQL
-
-If you already have PostgreSQL, create a database and a `dagster` schema, then
-use your connection details in the next step. Otherwise, start PostgreSQL 17
-in Docker:
-
-```sh
-docker run --name job-finder-postgres --detach \
-  --env POSTGRES_PASSWORD=postgres \
-  --env POSTGRES_DB=job_finder \
-  --publish 5432:5432 \
-  postgres:17
-
-until docker exec job-finder-postgres pg_isready -U postgres -d job_finder; do sleep 1; done
-docker exec job-finder-postgres \
-  psql -U postgres -d job_finder -c 'CREATE SCHEMA IF NOT EXISTS dagster'
-```
-
-Use `docker start job-finder-postgres` after a restart. The container keeps its
-database until you remove the container.
-
-### 3. Configure the application
+### 2. Configure the application
 
 Create your local environment file:
 
@@ -79,56 +56,43 @@ Open `.env` and replace these values:
 - `TYPESAFE_API_KEY`
 - `JOB_FINDER_REVIEW_PASSWORD`, with at least 12 characters
 - `JOB_FINDER_REVIEW_SESSION_SECRET`, with at least 32 random characters
-- `JOB_FINDER_DAGSTER_GRAPHQL_URL`, the review app's server-side Dagster GraphQL URL
 
 Generate a session secret with:
 
 ```sh
-python -c 'import secrets; print(secrets.token_urlsafe(32))'
+docker run --rm python:3.12-alpine \
+  python -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-The sample database URLs match the Docker container from step 2. If you use
-another PostgreSQL database, update `JOB_FINDER_POSTGRES_DSN` and
-`JOB_FINDER_DAGSTER_POSTGRES_DSN`. Keep the encoded `dagster` search path at
-the end of the Dagster URL.
+Compose supplies private PostgreSQL and Dagster URLs, so the loopback URLs in
+`.env` are only used for native development. Set `POSTGRES_PASSWORD` in `.env`
+to replace the local database password; use a URL-safe value. If port 5432 is
+already in use, change `POSTGRES_PORT`. PostgreSQL binds only to localhost so
+native development and contract tests can reach it.
 
-Load `.env` in every terminal that runs Job Finder:
+### 3. Start Job Finder
+
+Build and start the complete stack:
 
 ```sh
-set -a
-source .env
-set +a
+docker compose up --build --detach --wait
 ```
 
-### 4. Start Job Finder
-
-Start Dagster in one terminal:
-
-```sh
-set -a; source .env; set +a
-DAGSTER_HOME="$PWD" uv run dagster dev -w workspace.yaml
-```
-
-Start the review app in a second terminal:
-
-```sh
-set -a; source .env; set +a
-uv run uvicorn scripts.serve_review:create_app --factory \
-  --host 127.0.0.1 --port 8080
-```
-
-Open:
-
-- Dagster: <http://localhost:3000>
-- Review queue: <http://localhost:8080>
-- Search setup: <http://localhost:8080/configuration>
+Open the private review app at <http://localhost:8080>. The Dagster webserver and
+daemon remain on the internal Compose network. PostgreSQL is available only on
+the configured localhost port. The database is stored in the `postgres-data`
+volume and survives restarts.
 
 Log in to the review queue with `JOB_FINDER_REVIEW_PASSWORD`.
 The authenticated home reads and controls the four Job Finder schedules through
-Dagster's public GraphQL API. In deployment, set `JOB_FINDER_DAGSTER_GRAPHQL_URL`
+Dagster's GraphQL API. In deployment, set `JOB_FINDER_DAGSTER_GRAPHQL_URL`
 to the Dagster webserver's internal `/graphql` URL.
 
-### 5. Set your job criteria
+Use `docker compose logs --follow` to inspect startup or pipeline logs. Stop the
+stack with `docker compose down`. To also permanently delete all local Job
+Finder data, run `docker compose down --volumes`.
+
+### 4. Set your job criteria
 
 Open **Search setup** and review the search keywords, enabled job boards,
 personal criteria, and target profiles. Use the separate actions in order:
@@ -200,14 +164,14 @@ release target, treat it as the candidate in the same workflow: read the current
 baseline, run both targets against one manifest, compare them, record a new
 approval, and activate the approved old target.
 
-### 6. Run your first search
+### 5. Run your first search
 
-Open Dagster, select **Jobs**, select **job_finder**, and launch a run. The run
-discovers listings, evaluates new work, and adds qualified jobs to the review
-queue. It pins the active configuration and release target when it starts.
-Refresh <http://localhost:8080> after the run completes.
+Open the authenticated home, find **Full discovery**, and select **Run now**.
+The run discovers listings, evaluates new work, and adds qualified jobs to the
+review queue. It pins the active configuration and release target when it
+starts. Refresh <http://localhost:8080> after the run completes.
 
-Dagster starts these schedules automatically while `dagster dev` is running:
+The private Dagster daemon starts these schedules automatically:
 
 | Schedule | Frequency |
 |---|---|
@@ -216,8 +180,8 @@ Dagster starts these schedules automatically while `dagster dev` is running:
 | Rejected-job review sample | Daily at 00:15 UTC |
 | Langfuse projection | Every minute when Langfuse credentials are set |
 
-Jina and OpenRouter usage can incur charges. Check both providers' usage pages
-after the first run.
+Jina, OpenRouter, and Typesafe usage can incur charges. Check the relevant
+providers' usage pages after the first run.
 
 ## Contribute to Job Finder
 
