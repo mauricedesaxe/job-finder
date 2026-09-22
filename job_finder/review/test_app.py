@@ -29,6 +29,7 @@ from job_finder.review.control_plane import (
     ScheduleStateConflict,
     ScheduleStatus,
     ScheduleView,
+    unavailable_control_plane_service,
 )
 from job_finder.review.models import (
     Compensation,
@@ -136,6 +137,73 @@ def test_the_operations_home_reports_database_unavailability() -> None:
 
     assert response.status_code == 503
     assert "Operations status is unavailable" in response.text
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "heading"),
+    [
+        (
+            OperationsSnapshot(
+                health=OperationsHealth.UNKNOWN,
+                queues=QueueCounts(),
+                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
+                recent_runs=(),
+                failures=(),
+            ),
+            "Status unknown",
+        ),
+        (
+            OperationsSnapshot(
+                health=OperationsHealth.WORKING,
+                queues=QueueCounts(pending=1),
+                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
+                recent_runs=(
+                    PipelineRunSummary(
+                        id=UUID(int=7),
+                        kind="processing",
+                        status="running",
+                        started_at=NOW,
+                        completed_at=None,
+                    ),
+                ),
+                failures=(),
+            ),
+            "Work is in progress",
+        ),
+        (
+            OperationsSnapshot(
+                health=OperationsHealth.CAUGHT_UP,
+                queues=QueueCounts(),
+                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
+                recent_runs=(
+                    PipelineRunSummary(
+                        id=UUID(int=8),
+                        kind="processing",
+                        status="completed",
+                        started_at=NOW,
+                        completed_at=NOW,
+                    ),
+                ),
+                failures=(),
+            ),
+            "Caught up",
+        ),
+    ],
+)
+def test_the_owner_home_renders_each_operations_health_state(
+    snapshot: OperationsSnapshot, heading: str
+) -> None:
+    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert heading in response.text
+    assert "No recent failures recorded." in response.text
+    if snapshot.recent_runs:
+        assert snapshot.recent_runs[0].status in response.text
+    else:
+        assert "No pipeline runs recorded." in response.text
 
 
 def test_the_operations_home_renders_all_live_schedule_controls() -> None:
@@ -292,6 +360,74 @@ def test_schedule_change_redirects_after_a_verified_pause() -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "/?notice=schedule-paused"
+
+
+def test_schedule_resume_redirects_and_the_home_renders_the_notice() -> None:
+    controls = _control_service(
+        change_schedule=lambda _command: ScheduleChanged(
+            status=ScheduleStatus.RUNNING, replayed=False
+        )
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.post(
+        "/operations/schedule",
+        data={
+            "csrf_token": _csrf(client),
+            "schedule_name": "job_finder_schedule",
+            "expected_state": "STOPPED",
+            "desired_state": "RUNNING",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert "Schedule resumed." in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "form"),
+    [
+        (
+            "/operations/run",
+            {"job_name": "job_finder", "idempotency_key": "private-key"},
+        ),
+        (
+            "/operations/schedule",
+            {
+                "schedule_name": "job_finder_schedule",
+                "expected_state": "RUNNING",
+                "desired_state": "STOPPED",
+            },
+        ),
+    ],
+)
+def test_operations_actions_report_control_plane_unavailability(
+    path: str, form: dict[str, str]
+) -> None:
+    client = _client(_queue(), controls=unavailable_control_plane_service())
+
+    response = client.post(path, data={"csrf_token": _csrf(client), **form}, follow_redirects=False)
+
+    assert response.status_code == 503
+    assert "Dagster control is unavailable" in response.text
+
+
+def test_schedule_change_rejects_an_unknown_state_without_calling_the_service() -> None:
+    client = _client(_queue(), controls=_control_service())
+
+    response = client.post(
+        "/operations/schedule",
+        data={
+            "csrf_token": _csrf(client),
+            "schedule_name": "job_finder_schedule",
+            "expected_state": "PAUSED",
+            "desired_state": "STOPPED",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Malformed operations form" in response.text
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
