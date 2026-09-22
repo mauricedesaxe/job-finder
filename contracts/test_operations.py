@@ -12,7 +12,7 @@ import pytest
 
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
-from job_finder.evaluation import bootstrap_prompt_release
+from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.review.operations import OperationsHealth, load_operations_snapshot
 
 

@@ -4,7 +4,7 @@ import psycopg
 
 from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
-from job_finder.evaluation import bootstrap_prompt_release
+from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 
 
 def main() -> None:

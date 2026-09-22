@@ -56,6 +56,7 @@ from job_finder.configuration_service import (
     save_search_configuration_draft,
     validate_search_configuration,
 )
+from job_finder.discovery.catalog import SupportedSearchSource
 from job_finder.search_configuration import (
     Connection,
     SearchConfiguration,
@@ -66,7 +67,8 @@ from job_finder.search_configuration import (
 )
 
 ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
-_SUPPORTED_SOURCES = ("ashby", "lever", "greenhouse", "workable")
+_SOURCE_LABELS = {source.value: source.value.title() for source in SupportedSearchSource}
+_SUPPORTED_SOURCES = tuple(_SOURCE_LABELS)
 
 
 @dataclass(frozen=True)
@@ -468,19 +470,13 @@ def _sources_editor(
     raw: RawConfigurationForm,
     issues: tuple[ConfigurationValidationIssue, ...],
 ) -> object:
-    labels = {
-        "ashby": "Ashby",
-        "lever": "Lever",
-        "greenhouse": "Greenhouse",
-        "workable": "Workable",
-    }
     issue_ids = _issue_ids(issues, ("enabled_sources",))
     selected = set(raw.enabled_sources)
     seen: set[str] = set()
     invalid_rows: list[tuple[int, str]] = []
     order_controls: list[object] = []
     for index, value in enumerate(raw.enabled_sources):
-        if value in labels and value not in seen:
+        if value in _SOURCE_LABELS and value not in seen:
             order_controls.append(Input(type="hidden", name=f"source_order.{index}", value=value))
             seen.add(value)
         else:
@@ -501,10 +497,10 @@ def _sources_editor(
                         aria_invalid="true" if issue_ids else None,
                         aria_describedby=issue_ids or None,
                     ),
-                    labels[value],
+                    _SOURCE_LABELS[value],
                     cls="source-choice",
                 )
-                for value in labels
+                for value in _SOURCE_LABELS
             ),
             cls="source-grid",
         ),

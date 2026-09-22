@@ -18,29 +18,29 @@ from pydantic import TypeAdapter
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
-from job_finder.evaluation import (
-    ActiveReleaseTarget,
-    ActivateReleaseTargetResult,
-    ActiveReleaseTargetChanged,
+from job_finder.evaluation.langfuse import ProjectionQueueStatus
+from job_finder.evaluation.manifests import (
     CompletedEvaluationExecution,
     CuratedReviewEvent,
     EvaluateManifestCommand,
     EvaluationManifestCase,
+    EvaluationRunComparison,
     ManifestPolicy,
     ManifestSummary,
     ManifestSummaryPage,
     PromptPromotionDecision,
-    ProjectionQueueStatus,
-    ReleaseTarget,
-    ReleaseTargetActivated,
-    bootstrap_prompt_release,
     create_manifest,
     include_review_event,
     run_manifest,
 )
-from job_finder.evaluation.manifests import EvaluationRunComparison
-from job_finder.evaluation.models import EvaluationResult, Qualified
-from job_finder.evaluation.prompt_releases import load_prompt_release
+from job_finder.evaluation.models import EvaluationResult, Qualified, ReleaseTarget
+from job_finder.evaluation.prompt_releases import bootstrap_prompt_release, load_prompt_release
+from job_finder.evaluation.release_targets import (
+    ActiveReleaseTarget,
+    ActivateReleaseTargetResult,
+    ActiveReleaseTargetChanged,
+    ReleaseTargetActivated,
+)
 from job_finder.evaluation.relevance_releases import build_jev_faithful_policy
 from job_finder.mcp_server import Connection, McpDependencies, create_mcp_server
 from job_finder.review.models import (
