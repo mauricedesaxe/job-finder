@@ -1455,13 +1455,6 @@ def _insert_run(connection: Connection, run: EvaluationRun) -> None:
         )
 
 
-def load_run_by_key(connection: Connection, idempotency_key: str) -> EvaluationRun | None:
-    row = connection.execute(
-        "SELECT id FROM evaluation_runs WHERE idempotency_key = %s", (idempotency_key,)
-    ).fetchone()
-    return None if row is None else load_run(connection, str(row[0]))
-
-
 def load_run(connection: Connection, run_id: Digest) -> EvaluationRun:
     row = connection.execute(
         """

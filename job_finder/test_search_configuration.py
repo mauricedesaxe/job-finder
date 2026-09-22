@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from job_finder.database import INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-from job_finder.discovery.catalog import SEARCH_DOMAINS, SEARCH_KEYWORDS
+from job_finder.discovery.catalog import SEARCH_KEYWORDS
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
@@ -27,7 +27,7 @@ def test_default_configuration_tracks_the_prompt_and_search_catalog() -> None:
 
     assert configuration.search_keywords == SEARCH_KEYWORDS
     assert tuple(SEARCH_SOURCE_DOMAINS[source] for source in configuration.enabled_sources) == (
-        SEARCH_DOMAINS
+        tuple(SEARCH_SOURCE_DOMAINS.values())
     )
     assert tuple(item.key for item in configuration.personal_criteria) == tuple(
         prompt.criterion for prompt in EVALUATION_PROMPTS if prompt.phase == "filter"

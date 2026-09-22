@@ -21,12 +21,10 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable
-from job_finder.ats.policy import format_ats_block
+from job_finder.ats.policy import detect_ats_source, format_ats_block
 from job_finder.config import BackfillSettings
 from job_finder.database import apply_migrations
-from job_finder.jobs.scraping import detect_source
 
-ATS_SOURCES = frozenset(("lever", "ashbyhq", "greenhouse", "workable"))
 WORKER_COUNT = 12
 
 
@@ -68,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidates: list[_Snapshot] = []
         for row in rows:
             raw_url = str(row[1])
-            if detect_source(raw_url) not in ATS_SOURCES:
+            if detect_ats_source(raw_url) is None:
                 continue
             candidates.append(
                 _Snapshot.model_validate(
