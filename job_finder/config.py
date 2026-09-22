@@ -163,9 +163,10 @@ class OrchestrationSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     postgres_dsn: str = Field(min_length=1)
-    openrouter_api_key: str = Field(min_length=1)
-    typesafe_api_key: str = Field(min_length=1)
-    jina_api_key: str = Field(min_length=1)
+    openrouter_api_key: str | None = None
+    typesafe_api_key: str | None = None
+    jina_api_key: str | None = None
+    credential_encryption_key: SecretStr | None = None
     implementation_ref: str = Field(min_length=1)
     enable_ats_enrichment: bool = True
     search_worker_count: int = Field(default=8, gt=0, le=32)
@@ -180,9 +181,11 @@ class OrchestrationSettings(BaseModel):
         return cls.model_validate(
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),
-                "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY"),
-                "typesafe_api_key": os.environ.get("TYPESAFE_API_KEY"),
-                "jina_api_key": os.environ.get("JINA_API_KEY"),
+                "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY") or None,
+                "typesafe_api_key": os.environ.get("TYPESAFE_API_KEY") or None,
+                "jina_api_key": os.environ.get("JINA_API_KEY") or None,
+                "credential_encryption_key": os.environ.get("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY")
+                or None,
                 "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF"),
                 "enable_ats_enrichment": os.environ.get("ENABLE_ATS_ENRICHMENT", "true") == "true",
                 "search_worker_count": os.environ.get("JOB_FINDER_SEARCH_WORKER_COUNT", "8"),

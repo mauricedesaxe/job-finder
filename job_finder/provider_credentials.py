@@ -8,15 +8,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, TypeAlias, cast
+from typing import ClassVar, Literal, TypeAlias, cast
 
 import requests
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
+from job_finder.discovery.jina import JinaReaderEnvelope, JinaSearchEnvelope
+from job_finder.evaluation.jev import JevSystemOneResponse
+from job_finder.evaluation.openrouter import OpenRouterCompletion
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
-from job_finder.review.postgres import ConnectionFactory
+from job_finder.review.postgres import Connection, ConnectionFactory
 
 
 class ProviderKind(StrEnum):
@@ -47,7 +50,7 @@ REQUIRED_CAPABILITIES: Mapping[ProviderKind, tuple[ProviderCapability, ...]] = {
 
 
 class ProviderCredentialModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
 
 class ProviderCredentialState(ProviderCredentialModel):
@@ -125,6 +128,16 @@ class ProviderSetupService:
     replace: Callable[[ProviderKind, SecretStr, int, str, datetime], ProviderCredentialResult]
     advance: Callable[[], ProviderStageResult]
     resolve: Callable[[ProviderKind], SecretStr]
+
+
+class ExecutionProviderCredentials(ProviderCredentialModel):
+    jina: SecretStr
+    openrouter: SecretStr
+    typesafe: SecretStr
+
+
+class _OpenRouterValidationOutput(ProviderCredentialModel):
+    ready: Literal[True]
 
 
 def credential_cipher(encoded_key: SecretStr) -> CredentialCipher:
@@ -361,6 +374,49 @@ def postgres_provider_setup_service(
     return ProviderSetupService(inspect=inspect, replace=replace, advance=advance, resolve=resolve)
 
 
+def resolve_execution_provider_credentials(
+    connection: Connection,
+    *,
+    cipher: CredentialCipher | None,
+    jina_fallback: str | None,
+    openrouter_fallback: str | None,
+    typesafe_fallback: str | None,
+) -> ExecutionProviderCredentials:
+    rows = connection.execute(
+        """
+        SELECT provider, generation, nonce, ciphertext
+        FROM provider_credentials
+        ORDER BY provider
+        """
+    ).fetchall()
+    if rows:
+        if cipher is None or len(rows) != len(ProviderKind):
+            raise RuntimeError(
+                "Database provider credentials are incomplete or cannot be decrypted"
+            )
+        resolved = {
+            ProviderKind(str(row[0])): cipher.decrypt(
+                ProviderKind(str(row[0])),
+                cast(int, row[1]),
+                cast(bytes, row[2]),
+                cast(bytes, row[3]),
+            )
+            for row in rows
+        }
+        return ExecutionProviderCredentials(
+            jina=resolved[ProviderKind.JINA],
+            openrouter=resolved[ProviderKind.OPENROUTER],
+            typesafe=resolved[ProviderKind.TYPESAFE],
+        )
+    if jina_fallback is None or openrouter_fallback is None or typesafe_fallback is None:
+        raise RuntimeError("Provider credentials are not configured")
+    return ExecutionProviderCredentials(
+        jina=SecretStr(jina_fallback),
+        openrouter=SecretStr(openrouter_fallback),
+        typesafe=SecretStr(typesafe_fallback),
+    )
+
+
 def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]:
     def jina(secret: SecretStr) -> ProviderValidation:
         search, failure = _provider_json_request(
@@ -370,7 +426,11 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
         )
         if failure is not None:
             return failure
-        if not isinstance(search, dict) or search.get("code") != 200:
+        try:
+            search_envelope = JinaSearchEnvelope.model_validate(search)
+        except ValidationError:
+            return ProviderValidation()
+        if search_envelope.code != 200:
             return ProviderValidation()
         reader, failure = _provider_json_request(
             "https://r.jina.ai/",
@@ -379,7 +439,11 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
         )
         if failure is not None:
             return failure
-        if not isinstance(reader, dict) or reader.get("code") != 200:
+        try:
+            reader_envelope = JinaReaderEnvelope.model_validate(reader)
+        except ValidationError:
+            return ProviderValidation()
+        if reader_envelope.code != 200:
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.JINA])
 
@@ -392,30 +456,38 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
                 "messages": [{"role": "user", "content": 'Return {"ready":true}.'}],
                 "max_tokens": 16,
                 "usage": {"include": True},
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "provider_validation",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {"ready": {"type": "boolean"}},
-                            "required": ["ready"],
-                            "additionalProperties": False,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "validate_provider",
+                            "description": "Confirm structured generation is available.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"ready": {"type": "boolean"}},
+                                "required": ["ready"],
+                                "additionalProperties": False,
+                            },
                         },
-                    },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "validate_provider"},
                 },
             },
         )
         if failure is not None:
             return failure
-        if not isinstance(response, dict):
+        try:
+            completion = OpenRouterCompletion.model_validate(response)
+            tool_call = completion.choices[0].message.tool_calls[0]
+            if tool_call.function.name != "validate_provider":
+                raise ValueError("OpenRouter returned the wrong validation tool")
+            _ = _OpenRouterValidationOutput.model_validate_json(tool_call.function.arguments)
+        except (IndexError, ValidationError, ValueError):
             return ProviderValidation()
-        choices = response.get("choices")
-        usage = response.get("usage")
-        if not isinstance(choices, list) or not choices or not isinstance(usage, dict):
-            return ProviderValidation()
-        if not isinstance(usage.get("cost"), int | float):
+        if completion.usage is None:
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.OPENROUTER])
 
@@ -437,13 +509,11 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
         )
         if failure is not None:
             return failure
-        if not isinstance(response, dict):
+        try:
+            result = JevSystemOneResponse.model_validate(response)
+        except ValidationError:
             return ProviderValidation()
-        answers = response.get("answers")
-        usage = response.get("usage")
-        if not isinstance(answers, dict) or "validation" not in answers:
-            return ProviderValidation()
-        if not isinstance(usage, dict) or not isinstance(usage.get("input_tokens"), int):
+        if "validation" not in result.answers:
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.TYPESAFE])
 

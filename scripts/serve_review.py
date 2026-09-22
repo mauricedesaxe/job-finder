@@ -6,6 +6,7 @@ from fasthtml.common import FastHTML
 
 from job_finder.config import DagsterControlSettings, DatabaseSettings, ReviewAppSettings
 from job_finder.database import apply_migrations
+from job_finder.execution_budget import postgres_budget_setup_service
 from job_finder.provider_credentials import (
     credential_cipher,
     postgres_provider_setup_service,
@@ -75,6 +76,7 @@ def create_app() -> FastHTML:
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
         onboarding_progress_service=postgres_onboarding_progress_service(connect),
+        budget_setup_service=postgres_budget_setup_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
         control_service=dagster_control_plane_service(dagster),

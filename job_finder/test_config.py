@@ -155,6 +155,22 @@ def test_orchestration_settings_require_the_typesafe_key(
     assert settings.typesafe_api_key == "typesafe-secret"
 
 
+def test_orchestration_provider_keys_can_be_resolved_from_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://example/production")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "test-ref")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+
+    settings = OrchestrationSettings.from_environment()
+
+    assert settings.openrouter_api_key is None
+    assert settings.typesafe_api_key is None
+    assert settings.jina_api_key is None
+
+
 def test_langfuse_settings_require_valid_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

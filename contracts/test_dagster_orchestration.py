@@ -29,6 +29,7 @@ from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
 from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse, JevRetryPolicy
 from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
 from job_finder.evaluation.release_targets import get_active_release_target
+from job_finder.execution_budget import postgres_budget_setup_service
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
     ProcessingSummary,
@@ -48,6 +49,7 @@ from job_finder.review.operations import (
     JobReevaluationUnsupported,
     request_job_reevaluation,
 )
+from job_finder.review.owner_access import postgres_owner_access_service
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     SupportedSearchSource,
@@ -373,6 +375,37 @@ def test_dagster_job_executes_the_domain_cycle(
     monkeypatch.setenv("TYPESAFE_API_KEY", "unused")
     monkeypatch.setenv("JINA_API_KEY", "unused")
     monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_REF", "commit-1")
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+    owner = postgres_owner_access_service(lambda: _connection(authority_schema))
+    _ = owner.bootstrap("secure contract owner password")
+    with _connection(authority_schema) as connection:
+        for stage in ("preferences", "budget"):
+            _ = connection.execute(
+                """
+                UPDATE owner_onboarding
+                SET stage = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE singleton_id = 1
+                """,
+                (stage,),
+            )
+    _ = postgres_budget_setup_service(lambda: _connection(authority_schema)).save(
+        0,
+        Decimal("20"),
+        Decimal("2"),
+        25,
+        "contract-owner",
+        now,
+    )
+    with _connection(authority_schema) as connection:
+        _ = connection.execute(
+            """
+            UPDATE owner_onboarding
+            SET stage = 'complete', updated_at = CURRENT_TIMESTAMP
+            WHERE singleton_id = 1
+            """
+        )
 
     def fixed_boundaries(*, jina_api_key: str) -> PipelineBoundaries:
         assert jina_api_key == "unused"
