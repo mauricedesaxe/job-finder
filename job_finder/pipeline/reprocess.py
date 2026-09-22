@@ -141,7 +141,7 @@ def _reset_chunk(
                         UPDATE job_work_items w
                         SET state = 'pending', owner_token = NULL, lease_expires_at = NULL,
                             retry_at = NULL, terminal_decision_id = NULL, last_error = NULL,
-                            completed_at = NULL
+                            completed_at = NULL, attempt_count = 0
                         FROM evaluation_decisions d
                         JOIN job_snapshots s ON s.id = d.snapshot_id
                         {extra_from}

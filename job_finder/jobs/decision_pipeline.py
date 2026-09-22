@@ -31,7 +31,6 @@ DecisionOutcome = Literal[
 ]
 DecisionStage = Literal["ats_structural", "structural", "evaluation", "qualified", "company_policy"]
 THIN_BODY_THRESHOLD = 500
-THIN_SCRAPE_ATTEMPT_LIMIT = 3
 CompanyPolicy = Literal["blocked", "recent_application"]
 Enricher = Callable[[JobListing], PromptAccepted[EnrichedJob] | OperationalFailure]
 TitleDeduplicator = Callable[

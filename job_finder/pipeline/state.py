@@ -30,6 +30,8 @@ from job_finder.search_configuration import SearchConfigurationRevisionId
 Connection = psycopg.Connection[tuple[object, ...]]
 RateSnapshotFactory = Callable[[], ExchangeRateSnapshot]
 ActiveConfigurationLoader = Callable[[Connection], PublishedActiveSearchConfiguration]
+JobWorkFailureOutcome = Literal["retry", "terminal_error", "lease_lost"]
+JOB_WORK_ATTEMPT_LIMIT = 3
 _RATES = TypeAdapter(dict[str, Decimal])
 
 
@@ -259,14 +261,48 @@ def claim_next_job(
     if lease_for <= timedelta(0):
         raise ValueError("Job claim lease must be positive")
     with connection.transaction():
+        _ = connection.execute(
+            """
+            UPDATE job_work_items
+            SET state = 'terminal_error', owner_token = NULL, lease_expires_at = NULL,
+                retry_at = NULL, completed_at = %s, terminal_decision_id = NULL,
+                last_failed_at = %s,
+                last_error = CASE
+                  WHEN state = 'failed' THEN last_error
+                  ELSE %s
+                END
+            WHERE attempt_count >= %s
+              AND (
+                (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
+                OR (state = 'leased' AND lease_expires_at <= %s)
+              )
+            """,
+            (
+                claimed_at,
+                claimed_at,
+                Jsonb(
+                    {
+                        "code": "lease_expired",
+                        "reason": "Job work lease expired after the final attempt",
+                        "retryability": "retryable",
+                    }
+                ),
+                JOB_WORK_ATTEMPT_LIMIT,
+                claimed_at,
+                claimed_at,
+            ),
+        )
         row = connection.execute(
             """
             WITH candidate AS (
               SELECT job_id
               FROM job_work_items
-              WHERE state = 'pending'
-                 OR (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
-                 OR (state = 'leased' AND lease_expires_at <= %s)
+              WHERE attempt_count < %s
+                AND (
+                  state = 'pending'
+                  OR (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
+                  OR (state = 'leased' AND lease_expires_at <= %s)
+                )
               ORDER BY created_at, job_id
               FOR UPDATE SKIP LOCKED
               LIMIT 1
@@ -280,7 +316,13 @@ def claim_next_job(
             RETURNING item.job_id, jobs.raw_url, item.keyword, item.attempt_count,
                       item.lease_expires_at
             """,
-            (claimed_at, claimed_at, owner_token, claimed_at + lease_for),
+            (
+                JOB_WORK_ATTEMPT_LIMIT,
+                claimed_at,
+                claimed_at,
+                owner_token,
+                claimed_at + lease_for,
+            ),
         ).fetchone()
     if row is None:
         return None
@@ -326,20 +368,24 @@ def fail_job_claim(
     retry_after: timedelta,
     error_code: str,
     reason: str,
-) -> bool:
+) -> JobWorkFailureOutcome:
     _require_autocommit(connection)
     if retry_after < timedelta(0):
         raise ValueError("Job retry delay cannot be negative")
+    exhausted = claim.attempt_count >= JOB_WORK_ATTEMPT_LIMIT
     with connection.transaction():
         changed = connection.execute(
             """
             UPDATE job_work_items
-            SET state = 'failed', owner_token = NULL, lease_expires_at = NULL,
-                retry_at = %s, last_error = %s
+            SET state = %s, owner_token = NULL, lease_expires_at = NULL,
+                retry_at = %s, completed_at = %s, terminal_decision_id = NULL,
+                last_error = %s, last_failed_at = %s
             WHERE job_id = %s AND state = 'leased' AND owner_token = %s
             """,
             (
-                failed_at + retry_after,
+                "terminal_error" if exhausted else "failed",
+                None if exhausted else failed_at + retry_after,
+                failed_at if exhausted else None,
                 Jsonb(
                     {
                         "code": error_code,
@@ -347,11 +393,14 @@ def fail_job_claim(
                         "retryability": "retryable",
                     }
                 ),
+                failed_at,
                 claim.job_id,
                 claim.owner_token,
             ),
         ).rowcount
-    return changed == 1
+    if changed != 1:
+        return "lease_lost"
+    return "terminal_error" if exhausted else "retry"
 
 
 def terminally_fail_job_claim(
@@ -369,7 +418,7 @@ def terminally_fail_job_claim(
             UPDATE job_work_items
             SET state = 'terminal_error', owner_token = NULL, lease_expires_at = NULL,
                 retry_at = NULL, completed_at = %s, terminal_decision_id = NULL,
-                last_error = %s
+                last_error = %s, last_failed_at = %s
             WHERE job_id = %s AND state = 'leased' AND owner_token = %s
             """,
             (
@@ -381,6 +430,7 @@ def terminally_fail_job_claim(
                         "retryability": "terminal",
                     }
                 ),
+                completed_at,
                 claim.job_id,
                 claim.owner_token,
             ),

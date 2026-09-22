@@ -52,7 +52,6 @@ from job_finder.evaluation.relevance_releases import (
 )
 from job_finder.jobs.decision_pipeline import (
     THIN_BODY_THRESHOLD,
-    THIN_SCRAPE_ATTEMPT_LIMIT,
     DecisionContext,
     DecisionStore,
     PersistedDecision,
@@ -368,7 +367,14 @@ def _process_claim(
         return "terminal"
 
     if len(body.strip()) < THIN_BODY_THRESHOLD:
-        return _fail_thin_scrape(connection, claim, now(), retry_after)
+        return _schedule_retry(
+            connection,
+            claim,
+            "thin_scrape",
+            "Scrape produced no usable job body",
+            now(),
+            retry_after,
+        )
     if isinstance(relevance_policy, GeminiExecutionPolicy):
         relevance_api_key = openrouter_api_key
     else:
@@ -615,33 +621,6 @@ def _record_terminal_error(
     return "terminal_error" if recorded else "lease_lost"
 
 
-def _fail_thin_scrape(
-    connection: Connection,
-    claim: JobWorkClaim,
-    failed_at: datetime,
-    retry_after: timedelta,
-) -> Literal["retry", "terminal_error", "lease_lost"]:
-    reason = "Scrape produced no usable job body"
-    if claim.attempt_count >= THIN_SCRAPE_ATTEMPT_LIMIT:
-        recorded = terminally_fail_job_claim(
-            connection,
-            claim,
-            completed_at=failed_at,
-            error_code="thin_scrape",
-            reason=reason,
-        )
-        return "terminal_error" if recorded else "lease_lost"
-    scheduled = fail_job_claim(
-        connection,
-        claim,
-        failed_at=failed_at,
-        retry_after=retry_after,
-        error_code="thin_scrape",
-        reason=reason,
-    )
-    return "retry" if scheduled else "lease_lost"
-
-
 def _schedule_retry(
     connection: Connection,
     claim: JobWorkClaim,
@@ -649,8 +628,8 @@ def _schedule_retry(
     reason: str,
     failed_at: datetime,
     retry_after: timedelta,
-) -> Literal["retry", "lease_lost"]:
-    scheduled = fail_job_claim(
+) -> Literal["retry", "terminal_error", "lease_lost"]:
+    return fail_job_claim(
         connection,
         claim,
         failed_at=failed_at,
@@ -658,4 +637,3 @@ def _schedule_retry(
         error_code=error_code,
         reason=reason,
     )
-    return "retry" if scheduled else "lease_lost"

@@ -322,13 +322,16 @@ def test_failed_work_becomes_claimable_after_retry_time(authority_schema: str) -
             lease_for=timedelta(minutes=5),
         )
         assert claim is not None
-        assert fail_job_claim(
-            connection,
-            claim,
-            failed_at=now,
-            retry_after=timedelta(minutes=2),
-            error_code="reader_unavailable",
-            reason="timeout",
+        assert (
+            fail_job_claim(
+                connection,
+                claim,
+                failed_at=now,
+                retry_after=timedelta(minutes=2),
+                error_code="reader_unavailable",
+                reason="timeout",
+            )
+            == "retry"
         )
         too_early = claim_next_job(
             connection,
@@ -756,6 +759,75 @@ def test_a_thin_scrape_retries_then_dead_letters(authority_schema: str) -> None:
     assert fourth.claimed_count == 0
     assert work == ("terminal_error", 3, "thin_scrape")
     assert decision_count == (0,)
+
+
+def test_an_unexpected_work_failure_retries_then_dead_letters(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://example.com/careers/crashing-role"
+
+    def crash(_url: str) -> ScrapeSucceeded:
+        raise RuntimeError("reader crashed")
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-crashing-work", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="example.com",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        boundaries = PipelineBoundaries(
+            search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+            scrape=crash,
+            fetch_ats=lambda _url, _title: pytest.fail("crashing scrape reached ATS"),
+        )
+
+        def attempt() -> ProcessingSummary:
+            return process_claimed_jobs(
+                connection,
+                run,
+                boundaries,
+                openrouter_api_key="unused",
+                owner_token=uuid4(),
+                observed_at=now,
+                max_items=1,
+                lease_for=timedelta(minutes=5),
+                retry_after=timedelta(0),
+                enable_ats_enrichment=False,
+                now=lambda: now,
+            )
+
+        with pytest.raises(RuntimeError, match="reader crashed"):
+            _ = attempt()
+        with pytest.raises(RuntimeError, match="reader crashed"):
+            _ = attempt()
+        with pytest.raises(RuntimeError, match="reader crashed"):
+            _ = attempt()
+        fourth = attempt()
+        work = connection.execute(
+            """
+            SELECT state, attempt_count, completed_at, retry_at,
+                   last_error->>'code', last_error->>'reason',
+                   last_error->>'retryability'
+            FROM job_work_items
+            """
+        ).fetchone()
+
+    assert fourth.claimed_count == 0
+    assert work == (
+        "terminal_error",
+        3,
+        now,
+        None,
+        "RuntimeError",
+        "reader crashed",
+        "retryable",
+    )
 
 
 def test_llm_rejection_persists_every_model_attempt_and_terminal_state(

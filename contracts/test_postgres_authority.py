@@ -220,6 +220,7 @@ EXPECTED_MIGRATIONS = (
     "0024_evaluation_run_executions.sql",
     "0025_release_target_promotion_decisions.sql",
     "0026_release_target_lifecycle.sql",
+    "0027_work_recovery_receipts.sql",
 )
 
 
@@ -652,7 +653,13 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-1] == "0026_release_target_lifecycle.sql"
+        assert apply_migrations(connection)[-5:] == (
+            "0023_unbounded_review_event_notes.sql",
+            "0024_evaluation_run_executions.sql",
+            "0025_release_target_promotion_decisions.sql",
+            "0026_release_target_lifecycle.sql",
+            "0027_work_recovery_receipts.sql",
+        )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
         assert len(note) == 2001

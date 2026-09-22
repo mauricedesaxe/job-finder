@@ -1,19 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
+from threading import Barrier
 
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Jsonb
 import pytest
 
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
-from job_finder.review.operations import OperationsHealth, load_operations_snapshot
+from job_finder.review.operations import (
+    OperationsHealth,
+    RecoveryAction,
+    WorkRecoveryActiveLease,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryKeyConflict,
+    WorkRecoveryResult,
+    WorkRecoveryStaleState,
+    load_operations_snapshot,
+    recover_work,
+)
 
 
 @pytest.fixture
@@ -163,6 +177,298 @@ def test_operations_snapshot_reads_authoritative_postgres_state(
     assert len(snapshot.failures) == 1
     assert snapshot.failures[0].source == "job"
     assert snapshot.failures[0].summary == "invalid_job: Job is invalid"
+    assert len(snapshot.actionable_work) == 1
+    assert snapshot.actionable_work[0].job_id == terminal_job_id
+    assert snapshot.actionable_work[0].state == "terminal_error"
+    assert snapshot.actionable_work[0].attempt_count == 0
+    assert snapshot.actionable_work[0].retry_at is None
+    assert snapshot.actionable_work[0].failed_at == now + timedelta(minutes=1)
+    assert snapshot.actionable_work[0].failure_summary == "invalid_job: Job is invalid"
+
+
+def test_work_recovery_is_atomic_replay_safe_and_preserves_prior_evidence(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    retry_at = now + timedelta(hours=2)
+    lease_expires_at = now + timedelta(minutes=30)
+    run_id = uuid4()
+    failed_job_id = uuid4()
+    terminal_job_id = uuid4()
+    pending_job_id = uuid4()
+    leased_job_id = uuid4()
+    concurrent_job_id = uuid4()
+    owner_token = uuid4()
+    retry_error = {
+        "retryability": "retryable",
+        "code": "provider_timeout",
+        "reason": "Provider did not respond",
+    }
+    terminal_error = {
+        "retryability": "terminal",
+        "code": "invalid_job",
+        "reason": "Job is invalid",
+    }
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at, completed_at
+            ) VALUES (%s, %s, 'processing', 'recovery-contract', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"recovery:{run_id}", release.id, now - timedelta(hours=1), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/failed', %s, %s),
+                   (%s, 'https://example.com/terminal', %s, %s),
+                   (%s, 'https://example.com/pending', %s, %s),
+                   (%s, 'https://example.com/leased', %s, %s)
+            """,
+            (
+                failed_job_id,
+                now,
+                now,
+                terminal_job_id,
+                now,
+                now,
+                pending_job_id,
+                now,
+                now,
+                leased_job_id,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/concurrent', %s, %s)
+            """,
+            (concurrent_job_id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, attempt_count,
+              retry_at, last_error, last_failed_at, created_at
+            ) VALUES (%s, %s, 'python', 'failed', 1, %s, %s, %s, %s)
+            """,
+            (
+                concurrent_job_id,
+                run_id,
+                retry_at,
+                Jsonb(retry_error),
+                now - timedelta(minutes=2),
+                now - timedelta(hours=1),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, attempt_count,
+              owner_token, lease_expires_at, retry_at, last_error,
+              created_at, completed_at
+            ) VALUES
+              (%s, %s, 'python', 'failed', 2, NULL, NULL, %s, %s, %s, NULL),
+              (%s, %s, 'python', 'terminal_error', 5, NULL, NULL, NULL, %s, %s, %s),
+              (%s, %s, 'python', 'pending', 0, NULL, NULL, NULL, NULL, %s, NULL),
+              (%s, %s, 'python', 'leased', 2, %s, %s, NULL, NULL, %s, NULL)
+            """,
+            (
+                failed_job_id,
+                run_id,
+                retry_at,
+                Jsonb(retry_error),
+                now - timedelta(hours=1),
+                terminal_job_id,
+                run_id,
+                Jsonb(terminal_error),
+                now - timedelta(hours=1),
+                now - timedelta(minutes=5),
+                pending_job_id,
+                run_id,
+                now - timedelta(hours=1),
+                leased_job_id,
+                run_id,
+                owner_token,
+                lease_expires_at,
+                now - timedelta(hours=1),
+            ),
+        )
+
+        retry_command = WorkRecoveryCommand(
+            idempotency_key="retry-failed-now",
+            job_id=failed_job_id,
+            action=RecoveryAction.RETRY_NOW,
+            expected_state="failed",
+            expected_attempt_count=2,
+            actor="owner",
+            requested_at=now,
+        )
+        applied_retry = recover_work(connection, retry_command)
+        replayed_retry = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key=retry_command.idempotency_key,
+                job_id=retry_command.job_id,
+                action=retry_command.action,
+                expected_state=retry_command.expected_state,
+                expected_attempt_count=retry_command.expected_attempt_count,
+                actor=retry_command.actor,
+                requested_at=now + timedelta(minutes=1),
+            ),
+        )
+        key_conflict = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key=retry_command.idempotency_key,
+                job_id=pending_job_id,
+                action=RecoveryAction.RETRY_NOW,
+                expected_state="failed",
+                expected_attempt_count=0,
+                actor="owner",
+                requested_at=now,
+            ),
+        )
+        applied_terminal = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key="recover-terminal",
+                job_id=terminal_job_id,
+                action=RecoveryAction.RECOVER_TERMINAL,
+                expected_state="terminal_error",
+                expected_attempt_count=5,
+                actor="owner",
+                requested_at=now + timedelta(seconds=1),
+            ),
+        )
+        stale = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key="stale-pending",
+                job_id=pending_job_id,
+                action=RecoveryAction.RETRY_NOW,
+                expected_state="failed",
+                expected_attempt_count=0,
+                actor="owner",
+                requested_at=now,
+            ),
+        )
+        active_lease = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key="active-lease",
+                job_id=leased_job_id,
+                action=RecoveryAction.RETRY_NOW,
+                expected_state="failed",
+                expected_attempt_count=2,
+                actor="owner",
+                requested_at=now,
+            ),
+        )
+        stale_generation = recover_work(
+            connection,
+            WorkRecoveryCommand(
+                idempotency_key="stale-generation",
+                job_id=failed_job_id,
+                action=RecoveryAction.RETRY_NOW,
+                expected_state="failed",
+                expected_attempt_count=1,
+                actor="owner",
+                requested_at=now,
+            ),
+        )
+
+        concurrent_command = WorkRecoveryCommand(
+            idempotency_key="concurrent-retry",
+            job_id=concurrent_job_id,
+            action=RecoveryAction.RETRY_NOW,
+            expected_state="failed",
+            expected_attempt_count=1,
+            actor="owner",
+            requested_at=now,
+        )
+        barrier = Barrier(2)
+
+        def concurrent_recovery(_index: int) -> WorkRecoveryResult:
+            with _connection(authority_schema) as concurrent_connection:
+                _ = barrier.wait()
+                return recover_work(concurrent_connection, concurrent_command)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            concurrent_results = tuple(executor.map(concurrent_recovery, range(2)))
+
+        assert isinstance(applied_retry, WorkRecoveryApplied)
+        assert applied_retry.replayed is False
+        assert applied_retry.receipt.prior_attempt_count == 2
+        assert applied_retry.receipt.prior_retry_at == retry_at
+        assert applied_retry.receipt.prior_error == retry_error
+        assert applied_retry.receipt.resulting_retry_at == now
+        assert isinstance(replayed_retry, WorkRecoveryApplied)
+        assert replayed_retry.replayed is True
+        assert replayed_retry.receipt == applied_retry.receipt
+        assert isinstance(key_conflict, WorkRecoveryKeyConflict)
+
+        assert isinstance(applied_terminal, WorkRecoveryApplied)
+        assert applied_terminal.receipt.prior_attempt_count == 5
+        assert applied_terminal.receipt.prior_error == terminal_error
+        assert applied_terminal.receipt.resulting_state == "pending"
+        assert applied_terminal.receipt.resulting_attempt_count == 0
+        assert isinstance(stale, WorkRecoveryStaleState)
+        assert stale.receipt.prior_state == "pending"
+        assert isinstance(active_lease, WorkRecoveryActiveLease)
+        assert active_lease.receipt.prior_state == "leased"
+        assert isinstance(stale_generation, WorkRecoveryStaleState)
+        assert stale_generation.receipt.prior_attempt_count == 2
+        assert all(isinstance(result, WorkRecoveryApplied) for result in concurrent_results)
+        assert sorted(
+            result.replayed
+            for result in concurrent_results
+            if isinstance(result, WorkRecoveryApplied)
+        ) == [False, True]
+
+        assert connection.execute(
+            "SELECT state, attempt_count, retry_at, last_error FROM job_work_items WHERE job_id = %s",
+            (failed_job_id,),
+        ).fetchone() == ("failed", 2, now, retry_error)
+        assert connection.execute(
+            """
+            SELECT state, attempt_count, retry_at, last_error, completed_at
+            FROM job_work_items WHERE job_id = %s
+            """,
+            (terminal_job_id,),
+        ).fetchone() == ("pending", 0, None, None, None)
+        assert connection.execute(
+            """
+            SELECT state, attempt_count, owner_token, lease_expires_at
+            FROM job_work_items WHERE job_id = %s
+            """,
+            (leased_job_id,),
+        ).fetchone() == ("leased", 2, owner_token, lease_expires_at)
+        assert connection.execute("SELECT count(*) FROM work_recovery_receipts").fetchone() == (6,)
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                "UPDATE work_recovery_receipts SET actor = 'tampered' WHERE idempotency_key = %s",
+                (retry_command.idempotency_key,),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                """
+                INSERT INTO work_recovery_receipts (
+                  idempotency_key, job_id, action, expected_state, actor, requested_at,
+                  expected_attempt_count, outcome
+                ) VALUES ('invalid-action-state', %s, 'retry_now', 'terminal_error',
+                  'owner', %s, 0, 'not_found')
+                """,
+                (uuid4(), now),
+            )
 
 
 def test_operations_health_follows_real_postgres_state_transitions(
