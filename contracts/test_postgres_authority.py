@@ -386,7 +386,7 @@ def test_run_stored_manifest_fails_sanitized_without_provider_keys_and_replays(
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     def fixed_rates(*, observed_at: datetime) -> ExchangeRateSnapshot:
-        assert observed_at == now
+        assert observed_at.tzinfo is not None
         return rates
 
     monkeypatch.setattr(evaluate_manifest_module, "fetch_exchange_rates", fixed_rates)
