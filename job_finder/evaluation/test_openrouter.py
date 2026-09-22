@@ -92,9 +92,11 @@ def test_records_each_retry_before_the_next_request() -> None:
     responses = iter(
         (
             HttpResponse(429, '{"error":{"message":"slow down"}}'),
+            HttpResponse(503, '{"error":{"message":"overloaded"}}'),
             _accepted_response(pass_value=False, reason="not remote"),
         )
     )
+    delays: list[float] = []
 
     def send(
         _url: str, _headers: Mapping[str, str], _body: dict[str, object], _timeout: float
@@ -116,8 +118,8 @@ def test_records_each_retry_before_the_next_request() -> None:
         ),
         api_key="secret",
         sender=send,
-        retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
-        sleep=lambda _delay: None,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_seconds=0.25),
+        sleep=delays.append,
         now=lambda: NOW,
     )
 
@@ -125,8 +127,11 @@ def test_records_each_retry_before_the_next_request() -> None:
         "sent",
         "recorded:0:retryable_error",
         "sent",
-        "recorded:1:accepted",
+        "recorded:1:retryable_error",
+        "sent",
+        "recorded:2:accepted",
     ]
+    assert delays == [0.25, 0.5]
     assert isinstance(result, CriterionAccepted)
     assert result.passed is False
 
@@ -484,9 +489,11 @@ def test_recovers_missing_usage_without_reissuing_the_completion(
     attempts: list[ModelCallAttempt] = []
     completion_calls = 0
     generation_calls = 0
+    delays: list[float] = []
     observations: list[ProviderRequestObservation] = []
     generation_responses = iter(
         (
+            HttpResponse(retryable_status, '{"error":{"message":"not ready"}}'),
             HttpResponse(retryable_status, '{"error":{"message":"not ready"}}'),
             HttpResponse(
                 200,
@@ -533,16 +540,17 @@ def test_recovers_missing_usage_without_reissuing_the_completion(
         api_key="secret",
         sender=send,
         generation_sender=get_generation,
-        retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
-        sleep=lambda _delay: None,
-        clock=iter((0.0, 0.1, 1.0, 1.2, 2.0, 2.3)).__next__,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_seconds=0.25),
+        sleep=delays.append,
+        clock=iter((0.0, 0.1, 1.0, 1.2, 2.0, 2.3, 3.0, 3.4)).__next__,
         now=lambda: NOW,
         observe_request=observations.append,
     )
 
     assert isinstance(result, CriterionAccepted)
     assert completion_calls == 1
-    assert generation_calls == 2
+    assert generation_calls == 3
+    assert delays == [0.25, 0.5]
     assert len(attempts) == 1
     assert attempts[0].status == "accepted"
     assert attempts[0].input_tokens == 12
@@ -551,12 +559,13 @@ def test_recovers_missing_usage_without_reissuing_the_completion(
     assert observations == [
         ProviderRequestObservation(latency_ms=100, usage_complete=False),
         ProviderRequestObservation(latency_ms=200),
+        ProviderRequestObservation(latency_ms=300),
         ProviderRequestObservation(
             input_tokens=12,
             output_tokens=4,
             cost_usd=Decimal("0.00012"),
             resolves_prior_usage=True,
-            latency_ms=300,
+            latency_ms=400,
         ),
     ]
 
