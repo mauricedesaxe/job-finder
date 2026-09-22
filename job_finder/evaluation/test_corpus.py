@@ -1,3 +1,5 @@
+import json
+from collections.abc import Mapping
 from decimal import Decimal
 import shutil
 import subprocess
@@ -18,8 +20,33 @@ from job_finder.evaluation.corpus import (
     load_evaluation_corpus,
     score_evaluation_corpus,
 )
+from job_finder.evaluation.evaluate import evaluate_job
+from job_finder.evaluation.jev import (
+    JEV_MODEL,
+    JevCriterionObservation,
+    JevHttpResponse,
+    JevSystemOneRequest,
+    evaluate_prompt,
+)
+from job_finder.evaluation.models import (
+    CriterionAccepted,
+    CriterionResult,
+    EvaluationResult,
+    Qualified,
+)
+from job_finder.evaluation.prompt_releases import (
+    PromptRelease,
+    PromptVersion,
+    build_prompt_release,
+    build_work_culture_candidate_release,
+)
+from job_finder.evaluation.relevance_releases import (
+    JevAtomicExecutionPolicy,
+    build_jev_atomic_policy,
+    build_work_culture_candidate_policy,
+)
+from job_finder.jobs.models import JobListing
 from scripts.evaluate_corpus import parse_arguments
-from job_finder.evaluation.models import Qualified, Rejected
 
 
 def test_loads_only_direct_evaluation_fixtures_by_default() -> None:
@@ -156,20 +183,24 @@ def test_recent_policy_fixtures_reach_model_evaluation_with_their_intended_outco
         staged_directory / "hype-copy-permanent-availability-product-role.md",
     )
     staged = {case.name: case for case in load_evaluation_corpus(root=tmp_path)}
-    evaluated: list[str] = []
+    baseline_release = build_prompt_release()
+    baseline_policy = build_jev_atomic_policy()
+    work_culture_release = build_work_culture_candidate_release(baseline_release)
+    work_culture_policy = build_work_culture_candidate_policy(baseline_policy)
 
     fine_tuning = evaluate_corpus_case(
         corpus["fine-tuning-existing-model-product-engineer"],
-        lambda _job: _record_qualified(evaluated, "fine-tuning"),
+        lambda job: _evaluate_fixture_with_atomic_policy(job, baseline_release, baseline_policy),
     )
     always_on = evaluate_corpus_case(
         staged["hype-copy-permanent-availability-product-role"],
-        lambda _job: _record_rejected(evaluated, "always-on"),
+        lambda job: _evaluate_fixture_with_atomic_policy(
+            job, work_culture_release, work_culture_policy
+        ),
     )
 
     assert fine_tuning.actual_outcome == "qualified"
     assert always_on.actual_outcome == "rejected"
-    assert evaluated == ["fine-tuning", "always-on"]
 
 
 def test_exposes_the_corpus_gate_as_a_module_command() -> None:
@@ -219,9 +250,65 @@ def _record_qualified(descriptions: list[str], description: str) -> Qualified:
     return Qualified(reason="Matched.", profile_name="test-profile")
 
 
-def _record_rejected(names: list[str], name: str) -> Rejected:
-    names.append(name)
-    return Rejected(reason="Policy rejection.")
+def _evaluate_fixture_with_atomic_policy(
+    job: JobListing,
+    release: PromptRelease,
+    policy: JevAtomicExecutionPolicy,
+) -> EvaluationResult:
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        criterion = version.definition.criterion
+        if criterion not in {"role-quality", "work-culture"}:
+            return CriterionAccepted(
+                prompt_name=version.definition.name,
+                passed=True,
+                reason="Unrelated criterion accepted by the fixture driver.",
+            )
+
+        state = values["job"].lower()
+
+        def send(
+            _url: str, _headers: Mapping[str, str], body: dict[str, object], _timeout: float
+        ) -> JevHttpResponse:
+            request = JevSystemOneRequest.model_validate(body)
+            probabilities = dict.fromkeys(request.questions, 0.1)
+            if criterion == "role-quality":
+                if "fine-tuning" in state:
+                    assert "fine-tuning methods for existing" in state
+                    assert "does not train new base or foundation models" in state
+            else:
+                assert "maximum intensity" in state
+                assert "personally available seven days a week" in state
+                probabilities.update(
+                    {
+                        "extreme_intensity_culture": 0.9,
+                        "permanent_personal_availability": 0.9,
+                    }
+                )
+            return JevHttpResponse(
+                status_code=200,
+                body=json.dumps(
+                    {
+                        "model": JEV_MODEL,
+                        "answers": {
+                            name: {"type": "noul", "noul": probability}
+                            for name, probability in probabilities.items()
+                        },
+                        "usage": {"input_tokens": 100, "output_tokens": len(probabilities)},
+                    }
+                ),
+            )
+
+        result = evaluate_prompt(
+            version,
+            values,
+            api_key="test",
+            sender=send,
+            execution_policy=policy,
+            clock=iter((0.0, 0.1)).__next__,
+        )
+        return result.result if isinstance(result, JevCriterionObservation) else result
+
+    return evaluate_job(job, release, evaluate, rates="USD per EUR: 1.00")
 
 
 def _result(name: str, expected: str, actual: str | None) -> EvaluationCorpusResult:

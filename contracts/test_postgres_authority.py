@@ -404,6 +404,7 @@ def test_run_stored_manifest_fails_sanitized_without_provider_keys_and_replays(
 
     assert isinstance(failed, FailedEvaluationExecution)
     assert failed.failure.code == "unexpected_exception"
+    assert failed.failure.error_type == "ValueError"
     assert "TYPESAFE_API_KEY" not in failed.failure.message
     assert replayed == failed
 
