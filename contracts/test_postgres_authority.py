@@ -23,8 +23,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 import job_finder.configuration_service as configuration_service_module
-import scripts.evaluate_manifest as evaluate_manifest_module
-from scripts.evaluate_manifest import run_stored_manifest
+import job_finder.evaluation.manifest_execution as manifest_execution_module
 import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.ats.models import CompensationObservation
 from job_finder.config import PostgresContractSettings
@@ -112,6 +111,7 @@ from job_finder.evaluation.models import (
     Rejected,
     ReleaseTarget,
 )
+from job_finder.evaluation.manifest_execution import run_stored_manifest
 from job_finder.jobs.decision_pipeline import (
     DecisionContext,
     PersistedDecision,
@@ -395,7 +395,7 @@ def test_run_stored_manifest_fails_sanitized_without_provider_keys_and_replays(
         assert observed_at.tzinfo is not None
         return rates
 
-    monkeypatch.setattr(evaluate_manifest_module, "fetch_exchange_rates", fixed_rates)
+    monkeypatch.setattr(manifest_execution_module, "fetch_exchange_rates", fixed_rates)
     with _connection(authority_schema) as connection:
         manifest_id, target, _seeded_rates = _seed_evaluation_execution_context(connection, now)
         command = EvaluateManifestCommand(
