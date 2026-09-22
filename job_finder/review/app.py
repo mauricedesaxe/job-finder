@@ -100,6 +100,13 @@ from job_finder.review.models import (
 from job_finder.review.operations import (
     ActionableWork,
     FailureSample,
+    JobReevaluationAccepted,
+    JobReevaluationActiveWork,
+    JobReevaluationCommand,
+    JobReevaluationKeyConflict,
+    JobReevaluationNotFound,
+    JobReevaluationSourceChanged,
+    JobReevaluationUnsupported,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,
@@ -150,6 +157,8 @@ _OPERATIONS_NOTICES = {
     "work-retried": "Work is ready for the next worker now.",
     "terminal-recovered": "Terminal work recovered with a fresh attempt budget.",
     "recovery-replayed": "This recovery request was already applied.",
+    "reevaluation-requested": "Reevaluation queued with the current release target.",
+    "reevaluation-replayed": "This reevaluation request was already queued.",
 }
 
 
@@ -367,6 +376,53 @@ def create_review_app(
                 )
             case WorkRecoveryNotFound():
                 return _work_recovery_not_found_response()
+            case _:
+                assert_never(result)
+
+    @app.route("/operations/reevaluation", methods=["POST"])
+    async def request_reevaluation(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        csrf_token = _verified_control_csrf_token(request, form)
+        if csrf_token is None:
+            return _operations_forbidden_response()
+        try:
+            command = JobReevaluationCommand(
+                idempotency_key=_required_control_form_text(form, "idempotency_key"),
+                expected_decision_id=_required_control_form_text(form, "expected_decision_id"),
+                expected_snapshot_id=_required_control_form_text(form, "expected_snapshot_id"),
+                actor=actor,
+                requested_at=now(),
+            )
+        except ValueError as error:
+            return _malformed_operations_response(str(error))
+        try:
+            result = operations.reevaluate(command)
+        except (OperationsUnavailable, psycopg.Error):
+            return _reevaluation_unavailable_response(csrf_token, command)
+        match result:
+            case JobReevaluationAccepted():
+                notice = "reevaluation-replayed" if result.replayed else "reevaluation-requested"
+                return RedirectResponse(f"/?notice={notice}", status_code=303)
+            case JobReevaluationKeyConflict():
+                return _operations_conflict_response(
+                    "This reevaluation request key belongs to another command."
+                )
+            case JobReevaluationSourceChanged():
+                return _operations_conflict_response(
+                    result.receipt.conflict_reason
+                    or "The source decision changed before this request."
+                )
+            case JobReevaluationActiveWork():
+                return _operations_conflict_response(
+                    result.receipt.conflict_reason
+                    or "This job already has active or unresolved work."
+                )
+            case JobReevaluationUnsupported():
+                return _operations_conflict_response(
+                    result.receipt.conflict_reason or "This job cannot be reevaluated safely."
+                )
+            case JobReevaluationNotFound():
+                return _reevaluation_not_found_response()
             case _:
                 assert_never(result)
 
@@ -1322,6 +1378,7 @@ def _job_card(item: ReviewItem, csrf_token: str) -> object:
             Small("Decision desk", cls="eyebrow"),
             H2("Make the call" if not item.reviewed else "Review the call"),
             _decision_form(item, csrf_token),
+            _reevaluation_form(item, csrf_token),
             cls="decision-panel",
         ),
         cls="workbench audit-card" if second_look else "workbench",
@@ -1411,6 +1468,39 @@ def _decision_form(item: ReviewItem, csrf_token: str) -> object:
     )
 
 
+def _reevaluation_form(item: ReviewItem, csrf_token: str) -> object:
+    return Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(
+            type="hidden",
+            name="expected_decision_id",
+            value=item.evaluation_id,
+        ),
+        Input(
+            type="hidden",
+            name="expected_snapshot_id",
+            value=item.snapshot_id,
+        ),
+        Input(
+            type="hidden",
+            name="idempotency_key",
+            value=secrets.token_urlsafe(32),
+        ),
+        Button(
+            "Re-evaluate this job",
+            type="submit",
+            cls="operation-button secondary",
+        ),
+        P(
+            "Runs this saved snapshot against the current release without changing prior history.",
+            cls="operation-help",
+        ),
+        action="/operations/reevaluation",
+        method="post",
+        cls="reevaluation-form",
+    )
+
+
 def _decision_button(label: str, value: str, current: str | None) -> object:
     return Button(
         label,
@@ -1481,6 +1571,47 @@ def _work_recovery_not_found_response() -> HTMLResponse:
         "The requested work item no longer exists.",
         action=A("Reload operations", href="/", cls="retry"),
         status_code=404,
+    )
+
+
+def _reevaluation_not_found_response() -> HTMLResponse:
+    return _state_response(
+        "Source decision was not found",
+        "The requested decision no longer exists.",
+        action=A("Back to review", href="/review", cls="retry"),
+        status_code=404,
+    )
+
+
+def _reevaluation_unavailable_response(
+    csrf_token: str, command: JobReevaluationCommand
+) -> HTMLResponse:
+    retry_form = Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(
+            type="hidden",
+            name="expected_decision_id",
+            value=command.expected_decision_id,
+        ),
+        Input(
+            type="hidden",
+            name="expected_snapshot_id",
+            value=command.expected_snapshot_id,
+        ),
+        Input(
+            type="hidden",
+            name="idempotency_key",
+            value=command.idempotency_key,
+        ),
+        Button("Retry the same request", type="submit", cls="retry"),
+        action="/operations/reevaluation",
+        method="post",
+    )
+    return _state_response(
+        "Reevaluation status is uncertain",
+        "The database did not confirm this request. Retry with the same key.",
+        action=retry_form,
+        status_code=503,
     )
 
 

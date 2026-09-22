@@ -46,6 +46,10 @@ from job_finder.review.models import (
 from job_finder.review.operations import (
     ActionableWork,
     FailureSample,
+    JobReevaluationAccepted,
+    JobReevaluationCommand,
+    JobReevaluationReceipt,
+    JobReevaluationResult,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,
@@ -307,7 +311,13 @@ def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/operations/run", "/operations/schedule", "/operations/recovery"]
+    "path",
+    [
+        "/operations/run",
+        "/operations/schedule",
+        "/operations/recovery",
+        "/operations/reevaluation",
+    ],
 )
 def test_operations_actions_require_the_owner_session_before_service_calls(path: str) -> None:
     calls: list[object] = []
@@ -319,6 +329,7 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
     operations = OperationsService(
         load=lambda: _operations_snapshot(),
         recover=lambda command: calls.append(command) or _applied_recovery(command),
+        reevaluate=lambda command: calls.append(command) or _accepted_reevaluation(command),
     )
     app = create_review_app(
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
@@ -645,6 +656,98 @@ def test_work_recovery_reports_a_stale_expected_state_as_conflict() -> None:
 
     assert response.status_code == 409
     assert "Observed completed" in response.text
+
+
+def test_job_detail_renders_an_exact_append_only_reevaluation_form() -> None:
+    item = _item(TODAY, "qualified")
+
+    response = _client(_queue(item)).get(f"/review/item/{item.id}")
+
+    assert response.status_code == 200
+    assert 'action="/operations/reevaluation"' in response.text
+    assert "Re-evaluate this job" in response.text
+    assert f'name="expected_decision_id" value="{item.evaluation_id}"' in response.text
+    assert f'name="expected_snapshot_id" value="{item.snapshot_id}"' in response.text
+    assert 'name="idempotency_key"' in response.text
+    assert "without changing prior history" in response.text
+
+
+def test_job_reevaluation_requires_csrf_before_calling_the_service() -> None:
+    calls: list[JobReevaluationCommand] = []
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        reevaluate=lambda command: calls.append(command) or _accepted_reevaluation(command),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.post(
+        "/operations/reevaluation",
+        data={
+            "expected_decision_id": "1" * 64,
+            "expected_snapshot_id": "2" * 64,
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_job_reevaluation_passes_an_exact_typed_command_and_redirects() -> None:
+    calls: list[JobReevaluationCommand] = []
+
+    def reevaluate(command: JobReevaluationCommand) -> JobReevaluationResult:
+        calls.append(command)
+        return _accepted_reevaluation(command)
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), reevaluate=reevaluate),
+    )
+
+    response = client.post(
+        "/operations/reevaluation",
+        data={
+            "csrf_token": _csrf(client),
+            "expected_decision_id": "1" * 64,
+            "expected_snapshot_id": "2" * 64,
+            "idempotency_key": "private-key",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/?notice=reevaluation-requested"
+    assert calls == [
+        JobReevaluationCommand(
+            idempotency_key="private-key",
+            expected_decision_id="1" * 64,
+            expected_snapshot_id="2" * 64,
+            actor="owner",
+            requested_at=NOW,
+        )
+    ]
+
+
+def test_uncertain_job_reevaluation_preserves_the_exact_retry_command() -> None:
+    client = _client(_queue())
+
+    response = client.post(
+        "/operations/reevaluation",
+        data={
+            "csrf_token": _csrf(client),
+            "expected_decision_id": "1" * 64,
+            "expected_snapshot_id": "2" * 64,
+            "idempotency_key": "the-same-private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Reevaluation status is uncertain" in response.text
+    assert 'action="/operations/reevaluation"' in response.text
+    assert response.text.count('name="idempotency_key" value="the-same-private-key"') == 1
+    assert 'name="expected_decision_id" value="' + "1" * 64 + '"' in response.text
+    assert 'name="expected_snapshot_id" value="' + "2" * 64 + '"' in response.text
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
@@ -1389,6 +1492,20 @@ def _operations_snapshot() -> OperationsSnapshot:
 def _applied_recovery(command: WorkRecoveryCommand) -> WorkRecoveryApplied:
     return WorkRecoveryApplied(
         receipt=_recovery_receipt(command, outcome="applied", prior_state=command.expected_state),
+        replayed=False,
+    )
+
+
+def _accepted_reevaluation(command: JobReevaluationCommand) -> JobReevaluationAccepted:
+    return JobReevaluationAccepted(
+        receipt=JobReevaluationReceipt(
+            idempotency_key=command.idempotency_key,
+            expected_decision_id=command.expected_decision_id,
+            expected_snapshot_id=command.expected_snapshot_id,
+            actor=command.actor,
+            requested_at=command.requested_at,
+            outcome="accepted",
+        ),
         replayed=False,
     )
 

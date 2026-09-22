@@ -82,6 +82,7 @@ from job_finder.pipeline.state import (
     fail_job_claim,
     fail_model_call_context,
     find_terminal_decision_id,
+    load_processing_run,
     register_discoveries,
     terminally_fail_job_claim,
 )
@@ -94,6 +95,8 @@ from job_finder.search_configuration import (
 
 POLICY_VERSION = "orchestration-v1"
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+_KEYWORDS: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...])
+_ATS_EVIDENCE: TypeAdapter[AtsEvidence] = TypeAdapter(AtsEvidence)
 SearchBoundary = Callable[[str, str], SearchResult]
 ScrapeBoundary = Callable[[str], ScrapeResult]
 AtsBoundary = Callable[[str, str | None], AtsEvidence]
@@ -241,11 +244,22 @@ def process_claimed_jobs(
             break
         claimed_count += 1
         try:
+            execution_run = run
+            execution_release = release
+            execution_relevance_policy = relevance_release.policy
+            if claim.reevaluation_pipeline_run_id is not None:
+                execution_run = load_processing_run(connection, claim.reevaluation_pipeline_run_id)
+                if execution_run.status != "running":
+                    raise RuntimeError("Reevaluation run is not active")
+                execution_release, execution_relevance = load_release_target(
+                    connection, execution_run.target
+                )
+                execution_relevance_policy = execution_relevance.policy
             outcome = _process_claim(
                 connection,
-                run,
-                release,
-                relevance_release.policy,
+                execution_run,
+                execution_release,
+                execution_relevance_policy,
                 claim,
                 boundaries,
                 openrouter_api_key=openrouter_api_key,
@@ -291,7 +305,7 @@ def _process_claim(
     now: Now,
 ) -> Literal["terminal", "terminal_error", "retry", "lease_lost"]:
     existing_decision_id = find_terminal_decision_id(connection, claim.job_id)
-    if existing_decision_id is not None:
+    if claim.reevaluation_request_key is None and existing_decision_id is not None:
         completed = complete_job_claim(
             connection,
             claim,
@@ -300,24 +314,22 @@ def _process_claim(
         )
         return "terminal" if completed else "lease_lost"
 
-    scrape = boundaries.scrape(claim.raw_url)
-    if isinstance(scrape, JinaUnavailable):
+    acquired = _load_claim_listing(connection, claim, boundaries, observed_at)
+    if isinstance(acquired, JinaUnavailable):
         return _schedule_retry(
-            connection, claim, scrape.error_code, scrape.reason, now(), retry_after
+            connection, claim, acquired.error_code, acquired.reason, now(), retry_after
         )
-    listing = parse_job_details(
-        scrape.markdown,
-        claim.raw_url,
-        claim.keyword,
-        scraped_on=observed_at.date(),
-        page_title=scrape.title,
-    )
+    listing, pinned_ats_evidence = acquired
     decision_context = DecisionContext(
         pipeline_run_id=run.id,
         prompt_release_id=run.prompt_release_id,
         policy_version=POLICY_VERSION,
         implementation_ref=run.implementation_ref,
         observed_at=observed_at,
+        relevance_release_id=run.target.relevance_release_id,
+        source_snapshot_id=claim.source_snapshot_id,
+        predecessor_decision_id=claim.predecessor_decision_id,
+        reevaluation_request_key=claim.reevaluation_request_key,
     )
     store = _claim_completing_store(connection, claim, now)
     company_policy = store.active_company_policy(
@@ -327,22 +339,13 @@ def _process_claim(
         _ = persist_suppressed_job(listing, company_policy, decision_context, store)
         return "terminal"
 
-    ats_evidence = (
-        boundaries.fetch_ats(listing.url, listing.title)
-        if enable_ats_enrichment
-        else AtsNotApplicable()
+    listing, ats_evidence, ats_json, body = _resolve_claim_ats(
+        claim,
+        listing,
+        pinned_ats_evidence,
+        boundaries,
+        enable_ats_enrichment=enable_ats_enrichment,
     )
-    ats_json = _JSON.validate_python(ats_evidence.model_dump(mode="json"))
-    ats_description = ats_evidence.description if isinstance(ats_evidence, AtsAvailable) else None
-    body = ats_description if ats_description is not None else listing.description
-    if isinstance(ats_evidence, AtsAvailable):
-        listing = listing.model_copy(
-            update={
-                "description": f"{format_ats_block(ats_evidence)}\n\n{body}",
-                "location": ats_evidence.location,
-            }
-        )
-
     ats_decision = ats_structural_filter(ats_evidence)
     if isinstance(ats_decision, StructuralRejection):
         _ = persist_rejected_job(
@@ -588,7 +591,7 @@ def _deduplicate(
 
 
 def _claim_completing_store(connection: Connection, claim: JobWorkClaim, now: Now) -> DecisionStore:
-    store = postgres_decision_store(connection)
+    store = postgres_decision_store(connection, excluded_job_id=claim.job_id)
 
     def persist(decision: TerminalDecision) -> PersistedDecision:
         with connection.transaction():
@@ -603,6 +606,100 @@ def _claim_completing_store(connection: Connection, claim: JobWorkClaim, now: No
         return persisted
 
     return replace(store, persist=persist)
+
+
+def _load_claim_listing(
+    connection: Connection,
+    claim: JobWorkClaim,
+    boundaries: PipelineBoundaries,
+    observed_at: datetime,
+) -> tuple[JobListing, JsonValue | None] | JinaUnavailable:
+    if claim.source_snapshot_id is not None:
+        return _load_reevaluation_listing(connection, claim.job_id, claim.source_snapshot_id)
+    scrape = boundaries.scrape(claim.raw_url)
+    if isinstance(scrape, JinaUnavailable):
+        return scrape
+    return (
+        parse_job_details(
+            scrape.markdown,
+            claim.raw_url,
+            claim.keyword,
+            scraped_on=observed_at.date(),
+            page_title=scrape.title,
+        ),
+        None,
+    )
+
+
+def _resolve_claim_ats(
+    claim: JobWorkClaim,
+    listing: JobListing,
+    pinned_evidence: JsonValue | None,
+    boundaries: PipelineBoundaries,
+    *,
+    enable_ats_enrichment: bool,
+) -> tuple[JobListing, AtsEvidence, JsonValue, str]:
+    if claim.source_snapshot_id is not None:
+        evidence = (
+            AtsNotApplicable()
+            if pinned_evidence is None
+            else _ATS_EVIDENCE.validate_python(pinned_evidence)
+        )
+        return (
+            listing,
+            evidence,
+            _JSON.validate_python(evidence.model_dump(mode="json")),
+            listing.description,
+        )
+
+    evidence = (
+        boundaries.fetch_ats(listing.url, listing.title)
+        if enable_ats_enrichment
+        else AtsNotApplicable()
+    )
+    evidence_json = _JSON.validate_python(evidence.model_dump(mode="json"))
+    ats_description = evidence.description if isinstance(evidence, AtsAvailable) else None
+    body = ats_description if ats_description is not None else listing.description
+    if isinstance(evidence, AtsAvailable):
+        listing = listing.model_copy(
+            update={
+                "description": f"{format_ats_block(evidence)}\n\n{body}",
+                "location": evidence.location,
+            }
+        )
+    return listing, evidence, evidence_json, body
+
+
+def _load_reevaluation_listing(
+    connection: Connection, job_id: UUID, snapshot_id: str
+) -> tuple[JobListing, JsonValue | None]:
+    row = connection.execute(
+        """
+        SELECT title, company, raw_url, source, description, location,
+               keywords, date_posted, observed_at, ats_evidence
+        FROM job_snapshots
+        WHERE id = %s AND job_id = %s
+        """,
+        (snapshot_id, job_id),
+    ).fetchone()
+    if row is None or not isinstance(row[8], datetime):
+        raise RuntimeError("Pinned reevaluation snapshot is missing or invalid")
+    keywords = _KEYWORDS.validate_python(row[6])
+    listing = JobListing.model_validate(
+        {
+            "title": row[0],
+            "company": row[1],
+            "url": row[2],
+            "source": row[3],
+            "description": row[4],
+            "location": row[5],
+            "keywords_matched": keywords,
+            "date_posted": row[7],
+            "date_scraped": row[8].date(),
+        }
+    )
+    ats_evidence = None if row[9] is None else _JSON.validate_python(row[9])
+    return listing, ats_evidence
 
 
 def _record_terminal_error(

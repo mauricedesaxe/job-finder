@@ -69,6 +69,10 @@ class JobWorkClaim(PipelineStateModel):
     owner_token: UUID
     attempt_count: int = Field(gt=0)
     lease_expires_at: datetime
+    reevaluation_request_key: str | None = None
+    source_snapshot_id: str | None = None
+    predecessor_decision_id: str | None = None
+    reevaluation_pipeline_run_id: UUID | None = None
 
 
 def prepare_orchestration_run(
@@ -261,7 +265,7 @@ def claim_next_job(
     if lease_for <= timedelta(0):
         raise ValueError("Job claim lease must be positive")
     with connection.transaction():
-        _ = connection.execute(
+        exhausted_rows = connection.execute(
             """
             UPDATE job_work_items
             SET state = 'terminal_error', owner_token = NULL, lease_expires_at = NULL,
@@ -276,6 +280,7 @@ def claim_next_job(
                 (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
                 OR (state = 'leased' AND lease_expires_at <= %s)
               )
+            RETURNING active_reevaluation_key
             """,
             (
                 claimed_at,
@@ -291,7 +296,16 @@ def claim_next_job(
                 claimed_at,
                 claimed_at,
             ),
-        )
+        ).fetchall()
+        for row in exhausted_rows:
+            if row[0] is not None:
+                _fail_reevaluation_for_request(
+                    connection,
+                    str(row[0]),
+                    claimed_at,
+                    "lease_expired",
+                    "Job work lease expired after the final attempt",
+                )
         row = connection.execute(
             """
             WITH candidate AS (
@@ -314,7 +328,7 @@ def claim_next_job(
             FROM candidate, jobs
             WHERE item.job_id = candidate.job_id AND jobs.id = item.job_id
             RETURNING item.job_id, jobs.raw_url, item.keyword, item.attempt_count,
-                      item.lease_expires_at
+                      item.lease_expires_at, item.active_reevaluation_key
             """,
             (
                 JOB_WORK_ATTEMPT_LIMIT,
@@ -326,6 +340,18 @@ def claim_next_job(
         ).fetchone()
     if row is None:
         return None
+    reevaluation = None
+    if row[5] is not None:
+        reevaluation = connection.execute(
+            """
+            SELECT source_snapshot_id, source_decision_id, reevaluation_pipeline_run_id
+            FROM job_reevaluation_requests
+            WHERE idempotency_key = %s AND outcome = 'accepted'
+            """,
+            (row[5],),
+        ).fetchone()
+        if reevaluation is None:
+            raise RuntimeError("Claimed reevaluation work has no accepted request")
     return JobWorkClaim.model_validate(
         {
             "job_id": row[0],
@@ -334,6 +360,10 @@ def claim_next_job(
             "owner_token": owner_token,
             "attempt_count": row[3],
             "lease_expires_at": row[4],
+            "reevaluation_request_key": row[5],
+            "source_snapshot_id": None if reevaluation is None else reevaluation[0],
+            "predecessor_decision_id": None if reevaluation is None else reevaluation[1],
+            "reevaluation_pipeline_run_id": None if reevaluation is None else reevaluation[2],
         }
     )
 
@@ -354,9 +384,19 @@ def complete_job_claim(
                 terminal_decision_id = %s, completed_at = %s, retry_at = NULL,
                 last_error = NULL
             WHERE job_id = %s AND state = 'leased' AND owner_token = %s
+              AND lease_expires_at > %s
             """,
-            (decision_id, completed_at, claim.job_id, claim.owner_token),
+            (decision_id, completed_at, claim.job_id, claim.owner_token, completed_at),
         ).rowcount
+        if changed == 1 and claim.reevaluation_pipeline_run_id is not None:
+            _ = connection.execute(
+                """
+                UPDATE pipeline_runs
+                SET status = 'completed', completed_at = %s, error = NULL
+                WHERE id = %s AND kind = 'reevaluation' AND status = 'running'
+                """,
+                (completed_at, claim.reevaluation_pipeline_run_id),
+            )
     return changed == 1
 
 
@@ -381,6 +421,7 @@ def fail_job_claim(
                 retry_at = %s, completed_at = %s, terminal_decision_id = NULL,
                 last_error = %s, last_failed_at = %s
             WHERE job_id = %s AND state = 'leased' AND owner_token = %s
+              AND lease_expires_at > %s
             """,
             (
                 "terminal_error" if exhausted else "failed",
@@ -396,8 +437,17 @@ def fail_job_claim(
                 failed_at,
                 claim.job_id,
                 claim.owner_token,
+                failed_at,
             ),
         ).rowcount
+        if changed == 1 and exhausted and claim.reevaluation_pipeline_run_id is not None:
+            _fail_reevaluation_run(
+                connection,
+                claim.reevaluation_pipeline_run_id,
+                failed_at,
+                error_code,
+                reason,
+            )
     if changed != 1:
         return "lease_lost"
     return "terminal_error" if exhausted else "retry"
@@ -420,6 +470,7 @@ def terminally_fail_job_claim(
                 retry_at = NULL, completed_at = %s, terminal_decision_id = NULL,
                 last_error = %s, last_failed_at = %s
             WHERE job_id = %s AND state = 'leased' AND owner_token = %s
+              AND lease_expires_at > %s
             """,
             (
                 completed_at,
@@ -433,8 +484,17 @@ def terminally_fail_job_claim(
                 completed_at,
                 claim.job_id,
                 claim.owner_token,
+                completed_at,
             ),
         ).rowcount
+        if changed == 1 and claim.reevaluation_pipeline_run_id is not None:
+            _fail_reevaluation_run(
+                connection,
+                claim.reevaluation_pipeline_run_id,
+                completed_at,
+                error_code,
+                reason,
+            )
     return changed == 1
 
 
@@ -451,6 +511,10 @@ def find_terminal_decision_id(connection: Connection, job_id: UUID) -> str | Non
         (job_id,),
     ).fetchone()
     return None if row is None else str(row[0])
+
+
+def load_processing_run(connection: Connection, run_id: UUID) -> OrchestrationRun:
+    return _load_run_by_id(connection, run_id)
 
 
 def ensure_model_call_context(
@@ -580,7 +644,7 @@ def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
                x.rates, x.source, x.observed_at
         FROM pipeline_runs r
         JOIN run_exchange_rate_snapshots x ON x.pipeline_run_id = r.id
-        WHERE r.id = %s AND r.kind = 'orchestration'
+        WHERE r.id = %s AND r.kind IN ('orchestration', 'reevaluation')
         """,
         (run_id,),
     ).fetchone()
@@ -618,3 +682,45 @@ def _digest(value: object) -> str:
 def _require_autocommit(connection: Connection) -> None:
     if not connection.autocommit:
         raise ValueError("Pipeline state operations require an autocommit connection")
+
+
+def _fail_reevaluation_run(
+    connection: Connection,
+    run_id: UUID,
+    completed_at: datetime,
+    error_code: str,
+    reason: str,
+) -> None:
+    _ = connection.execute(
+        """
+        UPDATE pipeline_runs
+        SET status = 'failed', completed_at = %s, error = %s
+        WHERE id = %s AND kind = 'reevaluation' AND status = 'running'
+        """,
+        (completed_at, Jsonb({"code": error_code, "reason": reason}), run_id),
+    )
+
+
+def _fail_reevaluation_for_request(
+    connection: Connection,
+    request_key: str,
+    completed_at: datetime,
+    error_code: str,
+    reason: str,
+) -> None:
+    _ = connection.execute(
+        """
+        UPDATE pipeline_runs run
+        SET status = 'failed', completed_at = %s, error = %s
+        FROM job_reevaluation_requests request
+        WHERE request.idempotency_key = %s
+          AND run.id = request.reevaluation_pipeline_run_id
+          AND run.kind = 'reevaluation'
+          AND run.status = 'running'
+        """,
+        (
+            completed_at,
+            Jsonb({"code": error_code, "reason": reason}),
+            request_key,
+        ),
+    )
