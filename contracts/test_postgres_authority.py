@@ -221,6 +221,7 @@ EXPECTED_MIGRATIONS = (
     "0025_release_target_promotion_decisions.sql",
     "0026_release_target_lifecycle.sql",
     "0027_work_recovery_receipts.sql",
+    "0028_append_only_job_reevaluations.sql",
 )
 
 
@@ -653,12 +654,13 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-5:] == (
+        assert apply_migrations(connection)[-6:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
             "0026_release_target_lifecycle.sql",
             "0027_work_recovery_receipts.sql",
+            "0028_append_only_job_reevaluations.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
@@ -737,6 +739,16 @@ def test_search_configuration_migration_preserves_every_legacy_row(
         expected["pipeline_runs"] = [
             {**row, "configuration_revision_id": None, "relevance_release_id": None}
             for row in cast(list[dict[str, object]], before["pipeline_runs"])
+        ]
+        expected["evaluation_decisions"] = [
+            {
+                **row,
+                "relevance_release_id": None,
+                "source_snapshot_id": None,
+                "predecessor_decision_id": None,
+                "reevaluation_request_key": None,
+            }
+            for row in cast(list[dict[str, object]], before["evaluation_decisions"])
         ]
         assert _table_contents(connection, legacy_tables) == expected
 

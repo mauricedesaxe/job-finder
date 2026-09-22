@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 from threading import Barrier
 
 import psycopg
@@ -15,8 +15,15 @@ import pytest
 
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
+from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
+from job_finder.configuration_service import load_published_active_search_configuration
+from job_finder.pipeline.state import claim_next_job, prepare_orchestration_run
 from job_finder.review.operations import (
+    JobReevaluationAccepted,
+    JobReevaluationActiveWork,
+    JobReevaluationCommand,
+    JobReevaluationKeyConflict,
     OperationsHealth,
     RecoveryAction,
     WorkRecoveryActiveLease,
@@ -27,6 +34,7 @@ from job_finder.review.operations import (
     WorkRecoveryStaleState,
     load_operations_snapshot,
     recover_work,
+    request_job_reevaluation,
 )
 
 
@@ -507,6 +515,347 @@ def test_operations_health_follows_real_postgres_state_transitions(
     assert [run.status for run in working.recent_runs] == ["running"]
     assert caught_up.health is OperationsHealth.CAUGHT_UP
     assert [run.status for run in caught_up.recent_runs] == ["completed"]
+
+
+def test_job_reevaluation_is_append_only_replay_safe_and_pins_the_active_target(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    job_id = uuid4()
+    snapshot_id = "a" * 64
+    decision_id = "b" * 64
+    review_item_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = prepare_orchestration_run(
+            connection,
+            idempotency_key="reevaluation-source",
+            implementation_ref="source-ref",
+            started_at=now - timedelta(hours=1),
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: ExchangeRateSnapshot(
+                rates={"EUR": Decimal("1.1")},
+                source="frankfurter",
+                observed_at=now - timedelta(hours=1),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/reevaluate', %s, %s)
+            """,
+            (job_id, now - timedelta(hours=1), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_snapshots (
+              id, job_id, content_digest, title, company, normalized_company,
+              normalized_title, source, raw_url, description, location, keywords,
+              observed_at
+            ) VALUES (%s, %s, %s, 'Applied AI Engineer', 'Acme', 'acme',
+              'applied ai engineer', 'other', 'https://example.com/reevaluate',
+              %s, 'Remote', '["python"]'::jsonb, %s)
+            """,
+            (snapshot_id, job_id, "c" * 64, "Build useful AI products. " * 30, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO evaluation_decisions (
+              id, snapshot_id, pipeline_run_id, prompt_release_id,
+              relevance_release_id, policy_version, outcome, matched_profile,
+              reason, created_at, decision_stage
+            ) VALUES (%s, %s, %s, %s, %s, 'orchestration-v1', 'qualified',
+              'applied-ai-product-engineer', 'Strong fit', %s, 'qualified')
+            """,
+            (
+                decision_id,
+                snapshot_id,
+                run.id,
+                run.target.prompt_release_id,
+                run.target.relevance_release_id,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO review_items (id, evaluation_id, review_day, lane, position, created_at)
+            VALUES (%s, %s, %s, 'qualified', 0, %s)
+            """,
+            (review_item_id, decision_id, now.date(), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO review_events (
+              id, review_item_id, decision, target_profile, primary_reason,
+              block_company, actor, created_at
+            ) VALUES (%s, %s, 'unsure', 'applied-ai-product-engineer', 'other',
+              false, 'owner', %s)
+            """,
+            (uuid4(), review_item_id, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, terminal_decision_id,
+              created_at, completed_at
+            ) VALUES (%s, %s, 'python', 'completed', %s, %s, %s)
+            """,
+            (job_id, run.id, decision_id, now - timedelta(hours=1), now),
+        )
+        command = JobReevaluationCommand(
+            idempotency_key="reevaluate-once",
+            expected_decision_id=decision_id,
+            expected_snapshot_id=snapshot_id,
+            actor="owner",
+            requested_at=now + timedelta(minutes=1),
+        )
+
+        accepted = request_job_reevaluation(connection, command)
+        replayed = request_job_reevaluation(
+            connection,
+            JobReevaluationCommand(
+                idempotency_key=command.idempotency_key,
+                expected_decision_id=decision_id,
+                expected_snapshot_id=snapshot_id,
+                actor="owner",
+                requested_at=now + timedelta(minutes=2),
+            ),
+        )
+        key_conflict = request_job_reevaluation(
+            connection,
+            JobReevaluationCommand(
+                idempotency_key=command.idempotency_key,
+                expected_decision_id="d" * 64,
+                expected_snapshot_id=snapshot_id,
+                actor="owner",
+                requested_at=now + timedelta(minutes=2),
+            ),
+        )
+        active_work = request_job_reevaluation(
+            connection,
+            JobReevaluationCommand(
+                idempotency_key="reevaluate-again",
+                expected_decision_id=decision_id,
+                expected_snapshot_id=snapshot_id,
+                actor="owner",
+                requested_at=now + timedelta(minutes=2),
+            ),
+        )
+
+        concurrent_job_id = uuid4()
+        concurrent_snapshot_id = "e" * 64
+        concurrent_decision_id = "f" * 64
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/concurrent-reevaluation', %s, %s)
+            """,
+            (concurrent_job_id, now - timedelta(hours=1), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_snapshots (
+              id, job_id, content_digest, title, company, normalized_company,
+              normalized_title, source, raw_url, description, location, keywords,
+              observed_at
+            ) VALUES (%s, %s, %s, 'ML Engineer', 'Beta', 'beta', 'ml engineer',
+              'other', 'https://example.com/concurrent-reevaluation', %s,
+              'Remote', '["python"]'::jsonb, %s)
+            """,
+            (
+                concurrent_snapshot_id,
+                concurrent_job_id,
+                "1" * 64,
+                "Build reliable ML products. " * 30,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO evaluation_decisions (
+              id, snapshot_id, pipeline_run_id, prompt_release_id,
+              relevance_release_id, policy_version, outcome, matched_profile,
+              reason, created_at, decision_stage
+            ) VALUES (%s, %s, %s, %s, %s, 'orchestration-v1', 'qualified',
+              'applied-ai-product-engineer', 'Strong fit', %s, 'qualified')
+            """,
+            (
+                concurrent_decision_id,
+                concurrent_snapshot_id,
+                run.id,
+                run.target.prompt_release_id,
+                run.target.relevance_release_id,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, terminal_decision_id,
+              created_at, completed_at
+            ) VALUES (%s, %s, 'python', 'completed', %s, %s, %s)
+            """,
+            (
+                concurrent_job_id,
+                run.id,
+                concurrent_decision_id,
+                now - timedelta(hours=1),
+                now,
+            ),
+        )
+        barrier = Barrier(2)
+
+        def concurrent_request(index: int) -> object:
+            with _connection(authority_schema) as concurrent_connection:
+                _ = barrier.wait()
+                return request_job_reevaluation(
+                    concurrent_connection,
+                    JobReevaluationCommand(
+                        idempotency_key=f"concurrent-reevaluation-{index}",
+                        expected_decision_id=concurrent_decision_id,
+                        expected_snapshot_id=concurrent_snapshot_id,
+                        actor="owner",
+                        requested_at=now + timedelta(minutes=3),
+                    ),
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            concurrent_results = tuple(executor.map(concurrent_request, range(2)))
+
+        assert isinstance(accepted, JobReevaluationAccepted)
+        assert accepted.replayed is False
+        assert accepted.receipt.prompt_release_id == run.target.prompt_release_id
+        assert accepted.receipt.relevance_release_id == run.target.relevance_release_id
+        assert accepted.receipt.source_pipeline_run_id == run.id
+        assert accepted.receipt.reevaluation_pipeline_run_id == uuid5(
+            NAMESPACE_URL, "job-reevaluation-run:reevaluate-once"
+        )
+        assert isinstance(replayed, JobReevaluationAccepted)
+        assert replayed.replayed is True
+        assert replayed.receipt == accepted.receipt
+        assert isinstance(key_conflict, JobReevaluationKeyConflict)
+        assert isinstance(active_work, JobReevaluationActiveWork)
+        assert active_work.receipt.observed_work_state == "pending"
+        assert (
+            sum(isinstance(result, JobReevaluationAccepted) for result in concurrent_results) == 1
+        )
+        assert (
+            sum(isinstance(result, JobReevaluationActiveWork) for result in concurrent_results) == 1
+        )
+
+        assert connection.execute(
+            """
+            SELECT state, attempt_count, terminal_decision_id, active_reevaluation_key
+            FROM job_work_items WHERE job_id = %s
+            """,
+            (job_id,),
+        ).fetchone() == ("pending", 0, None, command.idempotency_key)
+        expired_owner = uuid4()
+        connection.execute(
+            """
+            UPDATE job_work_items
+            SET state = 'leased', attempt_count = 3, owner_token = %s,
+                lease_expires_at = %s
+            WHERE job_id = %s
+            """,
+            (expired_owner, now + timedelta(minutes=3), job_id),
+        )
+        _ = claim_next_job(
+            connection,
+            owner_token=uuid4(),
+            claimed_at=now + timedelta(minutes=4),
+            lease_for=timedelta(minutes=1),
+        )
+        assert connection.execute(
+            """
+            SELECT state, last_error->>'code' FROM job_work_items WHERE job_id = %s
+            """,
+            (job_id,),
+        ).fetchone() == ("terminal_error", "lease_expired")
+        assert connection.execute(
+            "SELECT status, error->>'code' FROM pipeline_runs WHERE id = %s",
+            (accepted.receipt.reevaluation_pipeline_run_id,),
+        ).fetchone() == ("failed", "lease_expired")
+        with pytest.raises(psycopg.errors.CheckViolation, match="provenance is immutable"):
+            connection.execute(
+                "UPDATE pipeline_runs SET implementation_ref = 'tampered' WHERE id = %s",
+                (accepted.receipt.reevaluation_pipeline_run_id,),
+            )
+        assert connection.execute("SELECT count(*) FROM evaluation_decisions").fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM review_items").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM job_reevaluation_requests").fetchone() == (
+            4,
+        )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            connection.execute(
+                """
+                UPDATE job_work_items
+                SET active_reevaluation_key = %s
+                WHERE job_id = %s
+                """,
+                (command.idempotency_key, concurrent_job_id),
+            )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            connection.execute(
+                """
+                INSERT INTO evaluation_decisions (
+                  id, snapshot_id, pipeline_run_id, prompt_release_id,
+                  relevance_release_id, policy_version, outcome, matched_profile,
+                  reason, created_at, decision_stage, source_snapshot_id,
+                  predecessor_decision_id, reevaluation_request_key
+                ) VALUES (%s, %s, %s, %s, %s, 'orchestration-v1', 'qualified',
+                  'applied-ai-product-engineer', 'Invalid cross-link', %s, 'qualified',
+                  %s, %s, %s)
+                """,
+                (
+                    "2" * 64,
+                    snapshot_id,
+                    accepted.receipt.reevaluation_pipeline_run_id,
+                    accepted.receipt.prompt_release_id,
+                    accepted.receipt.relevance_release_id,
+                    now,
+                    snapshot_id,
+                    concurrent_decision_id,
+                    command.idempotency_key,
+                ),
+            )
+        with pytest.raises(
+            psycopg.errors.ForeignKeyViolation,
+            match="output must belong to the requested job",
+        ):
+            connection.execute(
+                """
+                INSERT INTO evaluation_decisions (
+                  id, snapshot_id, pipeline_run_id, prompt_release_id,
+                  relevance_release_id, policy_version, outcome, matched_profile,
+                  reason, created_at, decision_stage, source_snapshot_id,
+                  predecessor_decision_id, reevaluation_request_key
+                ) VALUES (%s, %s, %s, %s, %s, 'orchestration-v1', 'qualified',
+                  'applied-ai-product-engineer', 'Invalid output job', %s, 'qualified',
+                  %s, %s, %s)
+                """,
+                (
+                    "3" * 64,
+                    concurrent_snapshot_id,
+                    accepted.receipt.reevaluation_pipeline_run_id,
+                    accepted.receipt.prompt_release_id,
+                    accepted.receipt.relevance_release_id,
+                    now,
+                    snapshot_id,
+                    decision_id,
+                    command.idempotency_key,
+                ),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation, match="immutable"):
+            connection.execute(
+                """
+                UPDATE job_reevaluation_requests SET actor = 'tampered'
+                WHERE idempotency_key = %s
+                """,
+                (command.idempotency_key,),
+            )
 
 
 @contextmanager

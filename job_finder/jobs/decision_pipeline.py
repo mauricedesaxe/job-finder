@@ -20,6 +20,7 @@ from job_finder.evaluation.models import (
     PromptReleaseId,
     Qualified,
     RetryableOperationalError,
+    RelevanceReleaseId,
     TerminalOperationalError,
 )
 from job_finder.jobs.enrichment import EnrichedJob
@@ -74,6 +75,10 @@ class DecisionContext:
     policy_version: str
     implementation_ref: str
     observed_at: datetime
+    relevance_release_id: RelevanceReleaseId | None = None
+    source_snapshot_id: str | None = None
+    predecessor_decision_id: str | None = None
+    reevaluation_request_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,8 +209,10 @@ def _persist_pre_evaluation_decision(
             "reason": reason,
             "decision_stage": decision_stage,
             "prompt_release_id": str(context.prompt_release_id),
+            "relevance_release_id": context.relevance_release_id,
             "policy_version": context.policy_version,
             "implementation_ref": context.implementation_ref,
+            "reevaluation_request_key": context.reevaluation_request_key,
             "ats_evidence": ats_evidence,
         }
     )
@@ -241,6 +248,8 @@ def _persist_pre_evaluation_decision(
 
 def postgres_decision_store(
     connection: psycopg.Connection[tuple[object, ...]],
+    *,
+    excluded_job_id: UUID | None = None,
 ) -> DecisionStore:
     if not connection.autocommit:
         raise ValueError("Decision persistence requires an autocommit connection")
@@ -261,9 +270,10 @@ def postgres_decision_store(
             FROM job_snapshots s
             JOIN evaluation_decisions d ON d.snapshot_id = s.id
             WHERE s.normalized_company = %s AND d.outcome <> 'duplicate'
+              AND s.job_id IS DISTINCT FROM %s::UUID
             ORDER BY s.normalized_title, s.title
             """,
-            (normalized_company,),
+            (normalized_company, excluded_job_id),
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
@@ -488,27 +498,38 @@ def _insert_decision(
     snapshot_id: str,
 ) -> PersistedDecision:
     decision_id = _digest(
-        [snapshot_id, str(decision.context.prompt_release_id), decision.context.policy_version]
+        [
+            snapshot_id,
+            str(decision.context.prompt_release_id),
+            decision.context.relevance_release_id,
+            decision.context.policy_version,
+            decision.context.reevaluation_request_key,
+        ]
     )
     _ = connection.execute(
         """
         INSERT INTO evaluation_decisions (
-          id, snapshot_id, pipeline_run_id, prompt_release_id, policy_version,
-          outcome, matched_profile, reason, created_at, decision_stage
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (snapshot_id, prompt_release_id, policy_version) DO NOTHING
+          id, snapshot_id, pipeline_run_id, prompt_release_id, relevance_release_id,
+          policy_version, outcome, matched_profile, reason, created_at, decision_stage,
+          source_snapshot_id, predecessor_decision_id, reevaluation_request_key
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
         """,
         (
             decision_id,
             snapshot_id,
             decision.context.pipeline_run_id,
             decision.context.prompt_release_id,
+            decision.context.relevance_release_id,
             decision.context.policy_version,
             decision.outcome,
             decision.matched_profile,
             decision.reason,
             decision.context.observed_at,
             decision.decision_stage,
+            decision.context.source_snapshot_id,
+            decision.context.predecessor_decision_id,
+            decision.context.reevaluation_request_key,
         ),
     )
     row = connection.execute(
@@ -517,12 +538,17 @@ def _insert_decision(
                s.title, s.company, s.description, s.location, d.decision_stage
         FROM evaluation_decisions d
         JOIN job_snapshots s ON s.id = d.snapshot_id
-        WHERE d.snapshot_id = %s AND d.prompt_release_id = %s AND d.policy_version = %s
+        WHERE d.snapshot_id = %s AND d.prompt_release_id = %s
+          AND d.relevance_release_id IS NOT DISTINCT FROM %s
+          AND d.policy_version = %s
+          AND d.reevaluation_request_key IS NOT DISTINCT FROM %s
         """,
         (
             snapshot_id,
             decision.context.prompt_release_id,
+            decision.context.relevance_release_id,
             decision.context.policy_version,
+            decision.context.reevaluation_request_key,
         ),
     ).fetchone()
     if row is None:
@@ -618,8 +644,10 @@ def _terminal_input_digest(
         "listing": listing.model_dump(mode="json"),
         "evaluation": evaluation.model_dump(mode="json"),
         "prompt_release_id": str(context.prompt_release_id),
+        "relevance_release_id": context.relevance_release_id,
         "policy_version": context.policy_version,
         "implementation_ref": context.implementation_ref,
+        "reevaluation_request_key": context.reevaluation_request_key,
         "ats_evidence": ats_evidence,
     }
     return _digest(value)

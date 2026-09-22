@@ -8,6 +8,7 @@ import pytest
 
 from job_finder.review.operations import (
     ActionableWork,
+    JobReevaluationCommand,
     OperationsHealth,
     OperationsSnapshot,
     OperationsUnavailable,
@@ -149,3 +150,24 @@ def test_unknown_operations_service_rejects_mutation() -> None:
 
     with pytest.raises(OperationsUnavailable, match="unavailable"):
         service.recover(command)
+
+    reevaluation = JobReevaluationCommand(
+        idempotency_key="safe-unavailable-reevaluation",
+        expected_decision_id="a" * 64,
+        expected_snapshot_id="b" * 64,
+        actor="owner",
+        requested_at=NOW,
+    )
+    with pytest.raises(OperationsUnavailable, match="unavailable"):
+        service.reevaluate(reevaluation)
+
+
+def test_reevaluation_command_requires_exact_content_identities() -> None:
+    with pytest.raises(ValueError, match="decision id"):
+        JobReevaluationCommand(
+            idempotency_key="invalid",
+            expected_decision_id="not-a-digest",
+            expected_snapshot_id="b" * 64,
+            actor="owner",
+            requested_at=NOW,
+        )

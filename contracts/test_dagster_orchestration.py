@@ -42,6 +42,12 @@ from job_finder.pipeline.state import (
     prepare_orchestration_run,
     register_discoveries,
 )
+from job_finder.review.operations import (
+    JobReevaluationAccepted,
+    JobReevaluationCommand,
+    JobReevaluationUnsupported,
+    request_job_reevaluation,
+)
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     SupportedSearchSource,
@@ -1282,6 +1288,246 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
         assert cast(int, output_tokens) > 0
         assert cost_usd is not None
         assert response_model == JEV_MODEL
+
+
+def test_reevaluation_processes_the_pinned_snapshot_without_rewriting_history(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    raw_url = "https://jobs.lever.co/acme/reevaluate"
+    long_description = "Build reliable AI products with a remote team. " * 20
+
+    def sender(outputs: Iterator[tuple[str, Mapping[str, object]]]):
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            tool_name, output = next(outputs)
+            return _model_response(tool_name, output)
+
+        return send
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        source_run = _prepare_run(connection, "dagster:reevaluation-source", now)
+        _ = register_discoveries(
+            connection,
+            run_id=source_run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        first = process_claimed_jobs(
+            connection,
+            source_run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                fetch_ats=lambda _url, _title: AtsAvailable(
+                    source="ashby",
+                    description=long_description,
+                    location="Remote",
+                    locations=("Remote",),
+                    workplace_type="Remote",
+                    country="US",
+                ),
+                model_sender=sender(
+                    iter(
+                        (
+                            (
+                                "enrich_job",
+                                {
+                                    "title": "Senior Product Engineer",
+                                    "company": "Acme",
+                                    "description": long_description,
+                                    "location": "Remote",
+                                },
+                            ),
+                        )
+                    )
+                ),
+                jev_sender=_qualifying_jev_call,
+            ),
+            openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
+            owner_token=uuid4(),
+            observed_at=now,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=True,
+            now=lambda: now,
+        )
+        source = connection.execute(
+            """
+            SELECT d.id, d.snapshot_id, i.id, s.job_id
+            FROM evaluation_decisions d
+            JOIN job_snapshots s ON s.id = d.snapshot_id
+            JOIN review_items i ON i.evaluation_id = d.id
+            WHERE s.raw_url = %s
+            """,
+            (raw_url,),
+        ).fetchone()
+        assert source is not None
+        source_decision_id = str(source[0])
+        source_snapshot_id = str(source[1])
+        source_review_item_id = source[2]
+        job_id = source[3]
+        connection.execute(
+            """
+            INSERT INTO review_events (
+              id, review_item_id, decision, target_profile, primary_reason,
+              block_company, actor, created_at
+            ) VALUES (%s, %s, 'unsure', 'early-stage-product-engineer', 'other',
+              false, 'owner', %s)
+            """,
+            (uuid4(), source_review_item_id, now),
+        )
+        request = request_job_reevaluation(
+            connection,
+            JobReevaluationCommand(
+                idempotency_key="reevaluate-qualified-job",
+                expected_decision_id=source_decision_id,
+                expected_snapshot_id=source_snapshot_id,
+                actor="owner",
+                requested_at=now + timedelta(minutes=1),
+            ),
+        )
+        assert isinstance(request, JobReevaluationAccepted)
+
+        second = process_claimed_jobs(
+            connection,
+            source_run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: pytest.fail("reevaluation reached the Jina reader"),
+                fetch_ats=lambda _url, _title: pytest.fail("reevaluation reached ATS"),
+                model_sender=sender(
+                    iter(
+                        (
+                            (
+                                "enrich_job",
+                                {
+                                    "title": "Senior Product Engineer",
+                                    "company": "Acme",
+                                    "description": long_description,
+                                    "location": "Remote",
+                                },
+                            ),
+                            (
+                                "check_duplicate",
+                                {"isDuplicate": False, "matchedTitle": None},
+                            ),
+                        )
+                    )
+                ),
+                jev_sender=_qualifying_jev_call,
+            ),
+            openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
+            owner_token=uuid4(),
+            observed_at=now + timedelta(minutes=2),
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=True,
+            now=lambda: now + timedelta(minutes=2),
+        )
+        latest_decision = connection.execute(
+            "SELECT terminal_decision_id FROM job_work_items WHERE job_id = %s",
+            (job_id,),
+        ).fetchone()
+        assert latest_decision is not None
+        connection.execute(
+            """
+            INSERT INTO snapshot_corrections (snapshot_id, reason, created_at)
+            VALUES (%s, 'Manual correction', %s)
+            """,
+            (source_snapshot_id, now + timedelta(minutes=3)),
+        )
+        unsupported = request_job_reevaluation(
+            connection,
+            JobReevaluationCommand(
+                idempotency_key="reevaluate-corrected-snapshot",
+                expected_decision_id=str(latest_decision[0]),
+                expected_snapshot_id=source_snapshot_id,
+                actor="owner",
+                requested_at=now + timedelta(minutes=3),
+            ),
+        )
+        assert isinstance(unsupported, JobReevaluationUnsupported)
+        assert unsupported.receipt.conflict_code == "corrected_snapshot"
+        decisions = connection.execute(
+            """
+            SELECT id, snapshot_id, prompt_release_id, relevance_release_id,
+                   source_snapshot_id, predecessor_decision_id,
+                   reevaluation_request_key, pipeline_run_id, outcome
+            FROM evaluation_decisions
+            WHERE snapshot_id = %s
+            ORDER BY created_at, id
+            """,
+            (source_snapshot_id,),
+        ).fetchall()
+        work = connection.execute(
+            """
+            SELECT state, terminal_decision_id, active_reevaluation_key
+            FROM job_work_items WHERE job_id = %s
+            """,
+            (job_id,),
+        ).fetchone()
+        review_counts = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM review_items),
+                   (SELECT count(*) FROM review_events)
+            """
+        ).fetchone()
+        reevaluation_run = connection.execute(
+            """
+            SELECT status, prompt_release_id, relevance_release_id
+            FROM pipeline_runs WHERE id = %s
+            """,
+            (request.receipt.reevaluation_pipeline_run_id,),
+        ).fetchone()
+        reevaluation_model_calls = connection.execute(
+            """
+            SELECT count(*) FROM model_call_attempts
+            WHERE pipeline_run_id = %s
+            """,
+            (request.receipt.reevaluation_pipeline_run_id,),
+        ).fetchone()
+
+    assert first.terminal_count == 1
+    assert second.terminal_count == 1
+    assert len(decisions) == 2
+    original = next(row for row in decisions if str(row[0]) == source_decision_id)
+    reevaluated = next(row for row in decisions if str(row[0]) != source_decision_id)
+    assert original[4:7] == (None, None, None)
+    assert reevaluated[1] == source_snapshot_id
+    assert reevaluated[2] == request.receipt.prompt_release_id
+    assert reevaluated[3] == request.receipt.relevance_release_id
+    assert reevaluated[4:7] == (
+        source_snapshot_id,
+        source_decision_id,
+        request.receipt.idempotency_key,
+    )
+    assert reevaluated[7] == request.receipt.reevaluation_pipeline_run_id
+    assert reevaluated[8] == "qualified"
+    assert work == (
+        "completed",
+        reevaluated[0],
+        request.receipt.idempotency_key,
+    )
+    assert review_counts == (2, 1)
+    assert reevaluation_run == (
+        "completed",
+        request.receipt.prompt_release_id,
+        request.receipt.relevance_release_id,
+    )
+    assert reevaluation_model_calls is not None
+    assert int(str(reevaluation_model_calls[0])) > 0
 
 
 def test_profile_stage_rejection_runs_every_criterion_before_rejecting(
