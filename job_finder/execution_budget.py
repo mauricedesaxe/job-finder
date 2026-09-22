@@ -246,12 +246,41 @@ def admit_scheduled_execution(
     idempotency_key: str,
     requested_at: datetime,
 ) -> ExecutionAdmission:
+    return _admit_execution(
+        connection,
+        idempotency_key=idempotency_key,
+        requested_at=requested_at,
+        required_stage=OnboardingStage.COMPLETE,
+    )
+
+
+def admit_onboarding_test_execution(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    requested_at: datetime,
+) -> ExecutionAdmission:
+    return _admit_execution(
+        connection,
+        idempotency_key=idempotency_key,
+        requested_at=requested_at,
+        required_stage=OnboardingStage.TEST_SEARCH,
+    )
+
+
+def _admit_execution(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    requested_at: datetime,
+    required_stage: OnboardingStage,
+) -> ExecutionAdmission:
     period_start = date(requested_at.year, requested_at.month, 1)
     with connection.transaction():
         owner_row = connection.execute(
             "SELECT stage FROM owner_onboarding WHERE singleton_id = 1 FOR UPDATE"
         ).fetchone()
-        if owner_row is None or OnboardingStage(str(owner_row[0])) is not OnboardingStage.COMPLETE:
+        if owner_row is None or OnboardingStage(str(owner_row[0])) is not required_stage:
             return ExecutionBlocked(reason="onboarding_incomplete")
         existing = connection.execute(
             """
