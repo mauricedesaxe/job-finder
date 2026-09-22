@@ -344,6 +344,18 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
             idempotency_key="legacy-without-budget",
             requested_at=datetime(2026, 9, 22, tzinfo=UTC),
         ) == ExecutionBlocked(reason="budget_not_configured")
+        _ = _seed_initial_configuration_publication(connection, datetime(2026, 9, 22, tzinfo=UTC))
+        _ = connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 0, %s, 'test')
+            """,
+            (
+                INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+                datetime(2026, 9, 22, tzinfo=UTC),
+            ),
+        )
     budget_result = postgres_budget_setup_service(lambda: _connection(authority_schema)).save(
         0,
         Decimal("20"),
