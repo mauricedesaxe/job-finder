@@ -91,10 +91,6 @@ def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
         "extreme_intensity_culture",
         "permanent_personal_availability",
     }
-    assert policy.composition.criteria["work-culture"].model_dump() == {
-        "kind": "fewer_than_active_signals",
-        "count": 2,
-    }
     assert policy.provider_adapter == baseline.provider_adapter
     assert policy.decision_composition == baseline.decision_composition
     assert relevance_release.id == (

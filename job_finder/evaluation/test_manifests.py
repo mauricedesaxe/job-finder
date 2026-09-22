@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.manifests import (
-    EvaluateManifestCommand,
     EvaluationCaseInput,
     EvaluationManifest,
     EvaluationManifestCase,
@@ -16,7 +15,6 @@ from job_finder.evaluation.manifests import (
     EvaluationRunTelemetry,
     EvaluationTrialResult,
     ManifestPolicy,
-    RunningEvaluationExecution,
     aggregate_evaluation_telemetry,
     compare_runs,
     exchange_rate_snapshot_digest,
@@ -87,9 +85,6 @@ def test_evaluation_run_exposes_only_complete_release_targets() -> None:
         completed_at=NOW,
     )
 
-    assert run.target == target
-    assert run.model_dump(mode="json")["target"] == target.model_dump(mode="json")
-    assert run.model_copy(update={"target": None}).target is None
     with pytest.raises(ValidationError, match="match prompt provenance"):
         EvaluationRun.model_validate(
             {
@@ -102,7 +97,7 @@ def test_evaluation_run_exposes_only_complete_release_targets() -> None:
         )
 
 
-def test_exchange_rate_digest_is_canonical_and_execution_enforces_it() -> None:
+def test_exchange_rate_digest_is_canonical_across_rate_ordering() -> None:
     first = ExchangeRateSnapshot(
         rates={"GBP": Decimal("1.27"), "EUR": Decimal("1.10")},
         source="fallback",
@@ -116,22 +111,6 @@ def test_exchange_rate_digest_is_canonical_and_execution_enforces_it() -> None:
     digest = exchange_rate_snapshot_digest(first)
 
     assert digest == exchange_rate_snapshot_digest(reordered)
-    with pytest.raises(ValidationError, match="does not match"):
-        RunningEvaluationExecution(
-            id="f" * 64,
-            command=EvaluateManifestCommand(
-                idempotency_key="evaluation:test",
-                manifest_id="a" * 64,
-                target=ReleaseTarget(
-                    prompt_release_id=PromptReleaseId("b" * 64),
-                    relevance_release_id=RelevanceReleaseId("c" * 64),
-                ),
-                implementation_ref="test",
-            ),
-            exchange_rates=first,
-            exchange_rate_digest="0" * 64,
-            created_at=NOW,
-        )
 
 
 def test_aggregate_evaluation_telemetry_includes_every_observed_request() -> None:

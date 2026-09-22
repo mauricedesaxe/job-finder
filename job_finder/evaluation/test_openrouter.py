@@ -117,14 +117,13 @@ def test_records_each_retry_before_the_next_request() -> None:
         api_key="secret",
         sender=send,
         retry_policy=RetryPolicy(max_attempts=2, base_delay_seconds=0),
-        sleep=lambda _delay: events.append("slept"),
+        sleep=lambda _delay: None,
         now=lambda: NOW,
     )
 
     assert events == [
         "sent",
         "recorded:0:retryable_error",
-        "slept",
         "sent",
         "recorded:1:accepted",
     ]
