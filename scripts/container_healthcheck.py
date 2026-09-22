@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import urllib.request
 
@@ -11,13 +10,12 @@ def main() -> int:
     if sys.argv[1:] == ["dagster-webserver"]:
         request = urllib.request.Request(
             "http://127.0.0.1:3000/graphql",
-            data=json.dumps({"query": "{ repositoriesOrError { __typename } }"}).encode(),
+            data=b'{"query":"{ repositoriesOrError { __typename } }"}',
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=2) as response:
-            payload = json.load(response)
-        result = payload.get("data", {}).get("repositoriesOrError", {})
-        return 0 if result.get("__typename") == "RepositoryConnection" else 1
+            body = response.read()
+        return 0 if b'"RepositoryConnection"' in body else 1
     if sys.argv[1:] == ["dagster-daemon"]:
         with DagsterInstance.get() as instance:
             statuses = instance.get_daemon_statuses()
