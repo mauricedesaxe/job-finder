@@ -123,6 +123,7 @@ from job_finder.review.operations import (
     WorkRecoveryStaleState,
     unknown_operations_service,
 )
+from job_finder.review.onboarding import OnboardingProgressService
 from job_finder.review.owner_access import (
     MAXIMUM_PASSWORD_INPUT_LENGTH,
     MAXIMUM_PASSWORD_LENGTH,
@@ -187,6 +188,7 @@ def create_review_app(
     *,
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
+    onboarding_progress_service: OnboardingProgressService | None = None,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     control_service: ControlPlaneService | None = None,
@@ -894,10 +896,20 @@ def create_review_app(
         except (MalformedConfigurationForm, ValidationError) as error:
             return _malformed_configuration_response(str(error))
         try:
-            result = configuration_service.activate(command)
+            result = (
+                configuration_service.activate(command)
+                if onboarding_progress_service is None
+                else onboarding_progress_service.activate_preferences(command)
+            )
         except psycopg.Error:
             return _configuration_unavailable_response()
         if isinstance(result, ConfigurationActivated):
+            try:
+                owner_state = owner_access_service.load_state()
+            except (psycopg.Error, RuntimeError):
+                return _configuration_unavailable_response()
+            if owner_state.stage is OnboardingStage.BUDGET:
+                return RedirectResponse("/setup/budget", status_code=303)
             return RedirectResponse("/configuration?notice=activated", status_code=303)
         if isinstance(result, ActiveConfigurationChanged):
             observed = result.active_configuration.active

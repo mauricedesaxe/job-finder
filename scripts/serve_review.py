@@ -15,6 +15,7 @@ from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.control_plane import dagster_control_plane_service
 from job_finder.review.operations import postgres_operations_service
+from job_finder.review.onboarding import postgres_onboarding_progress_service
 from job_finder.review.owner_access import (
     OnboardingStage,
     import_legacy_owner_password,
@@ -73,6 +74,7 @@ def create_app() -> FastHTML:
         settings,
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
+        onboarding_progress_service=postgres_onboarding_progress_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
         control_service=dagster_control_plane_service(dagster),
