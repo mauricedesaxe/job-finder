@@ -390,7 +390,12 @@ def test_run_stored_manifest_fails_sanitized_without_provider_keys_and_replays(
     rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.11")}, source="fallback", observed_at=now)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setattr(evaluate_manifest_module, "fetch_exchange_rates", lambda observed_at: rates)
+
+    def fixed_rates(*, observed_at: datetime) -> ExchangeRateSnapshot:
+        assert observed_at == now
+        return rates
+
+    monkeypatch.setattr(evaluate_manifest_module, "fetch_exchange_rates", fixed_rates)
     with _connection(authority_schema) as connection:
         manifest_id, target, _seeded_rates = _seed_evaluation_execution_context(connection, now)
         command = EvaluateManifestCommand(

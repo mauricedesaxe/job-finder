@@ -9,8 +9,8 @@ import sys
 import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
-from typing import TextIO
 from pathlib import Path
+from typing import TextIO, cast
 from uuid import UUID
 
 import pytest
@@ -59,7 +59,10 @@ load_from:
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+        address = cast(tuple[object, ...], probe.getsockname())
+        port = address[1]
+        assert isinstance(port, int)
+        return port
 
 
 def _run_now_command(*, job_name: str = "job_finder") -> RunNowCommand:
@@ -137,7 +140,12 @@ def _wait_until_ready(webserver: subprocess.Popen[bytes], port: int, log: TextIO
             response = requests.post(
                 graphql_url, json={"query": "{ repositoriesOrError { __typename } }"}, timeout=5
             )
-            if response.status_code == 200 and response.json().get("data") is not None:
+            payload = cast(object, response.json())
+            if (
+                response.status_code == 200
+                and isinstance(payload, dict)
+                and cast(Mapping[str, object], payload).get("data") is not None
+            ):
                 return graphql_url
         except requests.RequestException:
             pass
@@ -158,15 +166,24 @@ def _run_tags(settings: DagsterControlSettings, run_id: str) -> Mapping[str, str
         },
         timeout=30,
     )
-    payload: object = response.json()
+    payload = cast(object, response.json())
     assert isinstance(payload, dict)
-    data = payload.get("data")
+    data = cast(Mapping[str, object], payload).get("data")
     assert isinstance(data, dict)
-    run = data.get("runOrError")
+    run = cast(Mapping[str, object], data).get("runOrError")
     assert isinstance(run, dict)
-    tags = run.get("tags")
+    tags = cast(Mapping[str, object], run).get("tags")
     assert isinstance(tags, list)
-    return {tag["key"]: tag["value"] for tag in tags if isinstance(tag, dict)}
+    result: dict[str, str] = {}
+    for raw_tag in cast(list[object], tags):
+        assert isinstance(raw_tag, dict)
+        tag = cast(Mapping[str, object], raw_tag)
+        key = tag.get("key")
+        value = tag.get("value")
+        assert isinstance(key, str)
+        assert isinstance(value, str)
+        result[key] = value
+    return result
 
 
 def test_run_now_launches_a_real_dagster_run_with_owner_provenance(

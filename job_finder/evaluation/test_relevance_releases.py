@@ -12,6 +12,7 @@ from job_finder.evaluation.prompt_releases import (
 )
 from job_finder.evaluation.relevance_releases import (
     CodeArtifactIdentity,
+    FewerThanActiveSignals,
     GeminiExecutionPolicy,
     JevAtomicExecutionPolicy,
     JevFaithfulExecutionPolicy,
@@ -91,6 +92,9 @@ def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
         "extreme_intensity_culture",
         "permanent_personal_availability",
     }
+    work_culture_rule = policy.composition.criteria["work-culture"]
+    assert isinstance(work_culture_rule, FewerThanActiveSignals)
+    assert work_culture_rule.count == 2
     assert policy.provider_adapter == baseline.provider_adapter
     assert policy.decision_composition == baseline.decision_composition
     assert relevance_release.id == (
