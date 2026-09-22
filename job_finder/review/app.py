@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Literal, assert_never, cast
 from urllib.parse import quote
 from uuid import UUID
@@ -63,6 +64,11 @@ from job_finder.configuration_service import (
     PublishConfigurationCommand,
     PublishDraftChanged,
     SaveDraftCommand,
+)
+from job_finder.execution_budget import (
+    BudgetChanged,
+    BudgetSetupService,
+    BudgetSetupState,
 )
 from job_finder.review.configuration_editor import (
     apply_configuration_edit,
@@ -189,6 +195,7 @@ def create_review_app(
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
     onboarding_progress_service: OnboardingProgressService | None = None,
+    budget_setup_service: BudgetSetupService | None = None,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     control_service: ControlPlaneService | None = None,
@@ -199,7 +206,7 @@ def create_review_app(
     controls = control_service or unavailable_control_plane_service()
 
     def require_owner(request: Request) -> Response | None:
-        return _require_owner(request, owner_access_service)
+        return _require_owner(request, owner_access_service, budget_setup_service)
 
     app = FastHTML(
         before=Beforeware(
@@ -435,6 +442,93 @@ def create_review_app(
     def login_form(request: Request) -> HTMLResponse:
         return HTMLResponse(
             _document(_login_content(_safe_next(request.query_params.get("next", "/"))))
+        )
+
+    @app.route("/setup/budget", methods=["GET"])
+    def budget_setup_form(request: Request) -> HTMLResponse:
+        if budget_setup_service is None:
+            return _state_response(
+                "Budget setup is unavailable",
+                "Execution budget storage is not configured for this deployment.",
+                status_code=503,
+            )
+        try:
+            initial = budget_setup_service.inspect(25)
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Budget setup is unavailable",
+                "Budget state could not be loaded. Try again after the database recovers.",
+                status_code=503,
+            )
+        return HTMLResponse(_document(_budget_setup_content(_ensure_csrf_token(request), initial)))
+
+    @app.route("/setup/budget", methods=["POST"])
+    async def budget_setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if not _valid_csrf(request, _form_text(form, "csrf_token")):
+            return _state_response(
+                "Budget setup failed",
+                "This setup form expired. Reload and try again.",
+                status_code=403,
+            )
+        if budget_setup_service is None:
+            return _state_response(
+                "Budget setup is unavailable",
+                "Execution budget storage is not configured for this deployment.",
+                status_code=503,
+            )
+        try:
+            expected_version = int(_form_text(form, "expected_version"))
+            monthly_limit = Decimal(_form_text(form, "monthly_limit_usd"))
+            run_limit = Decimal(_form_text(form, "run_allowance_usd"))
+            max_jobs = int(_form_text(form, "max_jobs_per_run"))
+            result = budget_setup_service.save(
+                expected_version,
+                monthly_limit,
+                run_limit,
+                max_jobs,
+                actor,
+                now(),
+            )
+        except (InvalidOperation, ValueError):
+            return _state_response(
+                "Budget setup failed",
+                "Enter positive amounts; the run allowance cannot exceed the monthly budget.",
+                status_code=400,
+            )
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Budget setup is unavailable",
+                "The budget was not confirmed. Reload and try again.",
+                status_code=503,
+            )
+        if isinstance(result, BudgetChanged):
+            try:
+                current = budget_setup_service.inspect(max_jobs)
+            except (psycopg.Error, RuntimeError):
+                return _state_response(
+                    "Budget setup is unavailable",
+                    "Current budget state could not be reloaded.",
+                    status_code=503,
+                )
+            return HTMLResponse(
+                _document(
+                    _budget_setup_content(
+                        _ensure_csrf_token(request),
+                        current,
+                        "The budget changed in another session. Review the current limits.",
+                    )
+                ),
+                status_code=409,
+            )
+        return RedirectResponse("/setup/test-search", status_code=303)
+
+    @app.route("/setup/test-search", methods=["GET"])
+    def test_search_setup() -> HTMLResponse:
+        return _state_response(
+            "Ready for a bounded test search",
+            "Provider credentials, preferences, and budget are active. The test search is next.",
+            status_code=200,
         )
 
     @app.route("/login", methods=["POST"])
@@ -1100,7 +1194,11 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
-def _require_owner(request: Request, owner_access: OwnerAccessService) -> Response | None:
+def _require_owner(
+    request: Request,
+    owner_access: OwnerAccessService,
+    budget_setup: BudgetSetupService | None,
+) -> Response | None:
     if ".." in request.url.path.split("/"):
         return Response(status_code=404)
     try:
@@ -1140,6 +1238,21 @@ def _require_owner(request: Request, owner_access: OwnerAccessService) -> Respon
         if request.url.path == "/logout" or request.url.path.startswith(allowed_prefix):
             return None
         return RedirectResponse(onboarding_path, status_code=303)
+    if (
+        budget_setup is not None
+        and request.session.get("authenticated") is True
+        and request.url.path not in ("/logout", "/setup/budget")
+    ):
+        try:
+            policy = budget_setup.inspect(25).policy
+        except (psycopg.Error, RuntimeError):
+            return _state_response(
+                "Budget setup is unavailable",
+                "Budget state could not be loaded. Try again after the database recovers.",
+                status_code=503,
+            )
+        if policy is None:
+            return RedirectResponse("/setup/budget", status_code=303)
     if request.url.path == "/setup":
         destination = "/" if request.session.get("authenticated") is True else "/login"
         return RedirectResponse(destination, status_code=303)
@@ -1173,10 +1286,13 @@ def _provider_setup_content(
     error: str | None = None,
 ) -> object:
     labels = {
-        ProviderKind.JINA: ("Jina", "Searches job boards and reads job pages."),
+        ProviderKind.JINA: (
+            "Jina",
+            "Searches job boards and reads job pages. Validation sends one search and one reader request.",
+        ),
         ProviderKind.OPENROUTER: (
             "OpenRouter",
-            "Enriches and deduplicates jobs with structured model calls.",
+            "Enriches and deduplicates jobs. Validation makes one small paid model request.",
         ),
         ProviderKind.TYPESAFE: (
             "Typesafe",
@@ -1237,6 +1353,87 @@ def _provider_setup_content(
             Button("Continue to preferences", type="submit", disabled=not snapshot.ready),
             action="/setup/providers/continue",
             method="post",
+        ),
+        cls="configuration-shell",
+    )
+
+
+def _budget_setup_content(
+    csrf_token: str,
+    state: BudgetSetupState,
+    error: str | None = None,
+) -> object:
+    policy = state.policy
+    estimate = state.estimate
+    return Main(
+        Div(
+            Small("JF / FIRST RUN", cls="eyebrow"),
+            H1("Put a hard admission limit on scheduled work."),
+            P(
+                "Each run that starts provider work consumes its full USD allowance. "
+                + "Idle queue checks consume nothing. Set provider account limits to cap the bill.",
+                cls="login-intro",
+            ),
+            cls="review-header",
+        ),
+        P(error, cls="error", role="alert") if error else None,
+        Section(
+            Small("CURRENT EXECUTION BOUND", cls="eyebrow"),
+            H2(f"{estimate.search_queries} searches per discovery run"),
+            P(
+                f"At {estimate.jobs_per_run} jobs, the current prompts allow up to "
+                + f"{estimate.maximum_provider_attempts} provider attempts including retries."
+            ),
+            cls="editor-section",
+        ),
+        Form(
+            Input(
+                type="hidden",
+                name="csrf_token",
+                value=csrf_token,
+            ),
+            Input(
+                type="hidden",
+                name="expected_version",
+                value=str(0 if policy is None else policy.version),
+            ),
+            Label(
+                "Monthly admission budget (USD)",
+                Input(
+                    type="number",
+                    name="monthly_limit_usd",
+                    value="20.00" if policy is None else str(policy.monthly_limit_usd),
+                    min="0.01",
+                    step="0.01",
+                    required=True,
+                ),
+            ),
+            Label(
+                "USD allowance consumed per admitted run",
+                Input(
+                    type="number",
+                    name="run_allowance_usd",
+                    value="2.00" if policy is None else str(policy.run_allowance_usd),
+                    min="0.01",
+                    step="0.01",
+                    required=True,
+                ),
+            ),
+            Label(
+                "Maximum jobs processed per run",
+                Input(
+                    type="number",
+                    name="max_jobs_per_run",
+                    value=str(estimate.jobs_per_run),
+                    min="1",
+                    max="1000",
+                    required=True,
+                ),
+            ),
+            Button("Save budget and prepare test", type="submit", cls="primary-action"),
+            action="/setup/budget",
+            method="post",
+            cls="editor-section",
         ),
         cls="configuration-shell",
     )

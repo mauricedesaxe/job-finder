@@ -92,6 +92,15 @@ from job_finder.evaluation.prompt_releases import (
     bootstrap_prompt_release,
     load_prompt_release,
 )
+from job_finder.execution_budget import (
+    BudgetSaved,
+    ExecutionAdmitted,
+    ExecutionBlocked,
+    admit_scheduled_execution,
+    postgres_budget_setup_service,
+    reserve_discovery,
+    reserve_job_capacity,
+)
 from job_finder.evaluation.release_targets import (
     ActivateReleaseTargetCommand,
     ActiveReleaseTargetChanged,
@@ -195,6 +204,7 @@ from job_finder.provider_credentials import (
     ProviderValidation,
     credential_cipher,
     postgres_provider_setup_service,
+    resolve_execution_provider_credentials,
 )
 
 
@@ -243,6 +253,7 @@ EXPECTED_MIGRATIONS = (
     "0028_append_only_job_reevaluations.sql",
     "0029_owner_onboarding.sql",
     "0030_provider_credentials.sql",
+    "0031_execution_budget.sql",
 )
 
 
@@ -327,6 +338,28 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     assert "legacy secure owner password" not in str(stored[0])
     assert service.authenticate("legacy secure owner password") is True
     assert service.authenticate("different owner password") is False
+    with _connection(authority_schema) as connection:
+        assert admit_scheduled_execution(
+            connection,
+            idempotency_key="legacy-without-budget",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        ) == ExecutionBlocked(reason="budget_not_configured")
+    budget_result = postgres_budget_setup_service(lambda: _connection(authority_schema)).save(
+        0,
+        Decimal("20"),
+        Decimal("2"),
+        25,
+        "owner",
+        datetime(2026, 9, 22, tzinfo=UTC),
+    )
+    assert isinstance(budget_result, BudgetSaved)
+    assert budget_result.owner_state.stage is OnboardingStage.COMPLETE
+    with _connection(authority_schema) as connection:
+        assert admit_scheduled_execution(
+            connection,
+            idempotency_key="legacy-with-budget",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        ) == ExecutionAdmitted(max_jobs=25)
 
 
 def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
@@ -391,6 +424,14 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
     assert service.inspect().ready
     assert service.resolve(ProviderKind.JINA).get_secret_value() == "jina-secret-value"
     with _connection(authority_schema) as connection:
+        runtime_credentials = resolve_execution_provider_credentials(
+            connection,
+            cipher=cipher,
+            jina_fallback=None,
+            openrouter_fallback=None,
+            typesafe_fallback=None,
+        )
+        assert runtime_credentials.jina.get_secret_value() == "jina-secret-value"
         rows = connection.execute(
             "SELECT nonce, ciphertext FROM provider_credentials ORDER BY provider"
         ).fetchall()
@@ -415,6 +456,65 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
 
     assert isinstance(activation, ConfigurationActivated)
     assert owner.load_state().stage is OnboardingStage.BUDGET
+
+    budget = postgres_budget_setup_service(lambda: _connection(authority_schema))
+    budget_result = budget.save(
+        0,
+        Decimal("3"),
+        Decimal("2"),
+        10,
+        "owner",
+        datetime(2026, 9, 22, tzinfo=UTC),
+    )
+    assert isinstance(budget_result, BudgetSaved)
+    assert owner.load_state().stage is OnboardingStage.TEST_SEARCH
+    with _connection(authority_schema) as connection:
+        _ = connection.execute(
+            """
+            UPDATE owner_onboarding
+            SET stage = 'complete', updated_at = CURRENT_TIMESTAMP
+            WHERE singleton_id = 1
+            """
+        )
+
+    barrier = Barrier(2)
+
+    def admit(index: int) -> object:
+        _ = barrier.wait()
+        with _connection(authority_schema) as connection:
+            return admit_scheduled_execution(
+                connection,
+                idempotency_key=f"scheduled-run-{index}",
+                requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        admissions = tuple(executor.map(admit, range(2)))
+
+    assert sum(isinstance(result, ExecutionAdmitted) for result in admissions) == 1
+    assert sum(isinstance(result, ExecutionBlocked) for result in admissions) == 1
+    with _connection(authority_schema) as connection:
+        reservation_row = connection.execute(
+            "SELECT idempotency_key FROM execution_budget_reservations"
+        ).fetchone()
+        assert reservation_row is not None
+        reservation_key = cast(str, reservation_row[0])
+        assert reserve_discovery(connection, reservation_key)
+        assert not reserve_discovery(connection, reservation_key)
+        assert reserve_job_capacity(connection, reservation_key) == 10
+        assert reserve_job_capacity(connection, reservation_key) == 0
+        _ = connection.execute(
+            """
+            UPDATE execution_budget_policy
+            SET max_search_queries_per_run = 1, version = version + 1
+            WHERE singleton_id = 1
+            """
+        )
+        assert admit_scheduled_execution(
+            connection,
+            idempotency_key="configuration-over-policy",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        ) == ExecutionBlocked(reason="configuration_exceeds_policy")
 
 
 def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
@@ -833,7 +933,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-8:] == (
+        assert apply_migrations(connection)[-9:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
@@ -842,6 +942,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
             "0028_append_only_job_reevaluations.sql",
             "0029_owner_onboarding.sql",
             "0030_provider_credentials.sql",
+            "0031_execution_budget.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)

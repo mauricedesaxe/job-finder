@@ -20,6 +20,13 @@ from job_finder.config import DatabaseSettings, LangfuseSettings, OrchestrationS
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exchange_rates
+from job_finder.execution_budget import (
+    ExecutionBlocked,
+    admit_scheduled_execution,
+    reserve_discovery,
+    reserve_job_capacity,
+    settle_execution_budget,
+)
 from job_finder.evaluation.langfuse import (
     ProjectionDelivered,
     ProjectionFailed,
@@ -28,6 +35,7 @@ from job_finder.evaluation.langfuse import (
     deliver_next_projection,
 )
 from job_finder.pipeline.orchestration import (
+    DiscoverySummary,
     PipelineBoundaries,
     ProcessingSummary,
     discover_jobs,
@@ -40,6 +48,11 @@ from job_finder.pipeline.state import (
     complete_orchestration_run,
     fail_orchestration_run,
     prepare_orchestration_run,
+)
+from job_finder.provider_credentials import (
+    ExecutionProviderCredentials,
+    credential_cipher,
+    resolve_execution_provider_credentials,
 )
 from job_finder.review.postgres import enqueue_rejected_audit_sample
 
@@ -57,30 +70,66 @@ class JobFinderResource(ConfigurableResource["JobFinderResource"]):
 
 @asset(
     pool="job_finder_pipeline",
-    retry_policy=RetryPolicy(max_retries=2, delay=60),
 )
 def job_finder_cycle(
     context: AssetExecutionContext, job_finder: JobFinderResource
 ) -> dict[str, int]:
-    settings = OrchestrationSettings.from_environment()
     observed_at = datetime.now(UTC)
-    boundaries = production_boundaries(jina_api_key=settings.jina_api_key)
     with job_finder.connection() as connection:
-        run = _prepare_run(connection, context, settings, observed_at)
+        run_key = f"dagster:{context.run.run_id}"
+        admission = admit_scheduled_execution(
+            connection, idempotency_key=run_key, requested_at=observed_at
+        )
+        if isinstance(admission, ExecutionBlocked):
+            metadata = {"blocked": 1}
+            context.add_output_metadata({**metadata, "reason": admission.reason})
+            return metadata
+        settings = OrchestrationSettings.from_environment()
+        credentials = _provider_credentials(connection, settings)
+        boundaries = production_boundaries(jina_api_key=credentials.jina.get_secret_value())
+        run: OrchestrationRun | None = None
+        work_started = False
         try:
-            discovery = discover_jobs(
-                connection,
-                run,
-                boundaries,
-                discovered_at=observed_at,
-                max_workers=settings.search_worker_count,
+            run = _prepare_run(connection, context, settings, observed_at)
+            work_started = True
+            if reserve_discovery(connection, run_key):
+                discovery = discover_jobs(
+                    connection,
+                    run,
+                    boundaries,
+                    discovered_at=observed_at,
+                    max_workers=settings.search_worker_count,
+                )
+                discovery.require_complete()
+            else:
+                discovery = DiscoverySummary(
+                    query_count=0,
+                    unavailable_query_count=0,
+                    discovered_count=0,
+                    new_work_count=0,
+                )
+            processing = _process_admitted_batch(
+                connection, run_key, run, boundaries, credentials, settings, observed_at
             )
-            discovery.require_complete()
-            processing = _process_batch(connection, run, boundaries, settings, observed_at)
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
+            settle_execution_budget(
+                connection,
+                idempotency_key=run_key,
+                pipeline_run_id=run.id,
+                settled_at=datetime.now(UTC),
+                consume_allowance=True,
+            )
             ping_heartbeat(settings.discovery_heartbeat_url)
         except Exception as error:
-            _fail_run(connection, run, error)
+            if run is not None:
+                _fail_run(connection, run, error)
+            settle_execution_budget(
+                connection,
+                idempotency_key=run_key,
+                pipeline_run_id=None if run is None else run.id,
+                settled_at=datetime.now(UTC),
+                consume_allowance=work_started,
+            )
             raise
     metadata = {
         "queries": discovery.query_count,
@@ -95,22 +144,50 @@ def job_finder_cycle(
 
 @asset(
     pool="job_finder_pipeline",
-    retry_policy=RetryPolicy(max_retries=2, delay=60),
 )
 def job_work_queue_cycle(
     context: AssetExecutionContext, job_finder: JobFinderResource
 ) -> dict[str, int]:
-    settings = OrchestrationSettings.from_environment()
     observed_at = datetime.now(UTC)
-    boundaries = production_boundaries(jina_api_key=settings.jina_api_key)
     with job_finder.connection() as connection:
-        run = _prepare_run(connection, context, settings, observed_at)
+        run_key = f"dagster:{context.run.run_id}"
+        admission = admit_scheduled_execution(
+            connection, idempotency_key=run_key, requested_at=observed_at
+        )
+        if isinstance(admission, ExecutionBlocked):
+            metadata = {"blocked": 1}
+            context.add_output_metadata({**metadata, "reason": admission.reason})
+            return metadata
+        settings = OrchestrationSettings.from_environment()
+        credentials = _provider_credentials(connection, settings)
+        boundaries = production_boundaries(jina_api_key=credentials.jina.get_secret_value())
+        run: OrchestrationRun | None = None
+        work_started = False
         try:
-            processing = _process_batch(connection, run, boundaries, settings, observed_at)
+            run = _prepare_run(connection, context, settings, observed_at)
+            work_started = True
+            processing = _process_admitted_batch(
+                connection, run_key, run, boundaries, credentials, settings, observed_at
+            )
             complete_orchestration_run(connection, run.id, completed_at=datetime.now(UTC))
+            settle_execution_budget(
+                connection,
+                idempotency_key=run_key,
+                pipeline_run_id=run.id,
+                settled_at=datetime.now(UTC),
+                consume_allowance=processing.claimed_count > 0,
+            )
             ping_heartbeat(settings.work_queue_heartbeat_url)
         except Exception as error:
-            _fail_run(connection, run, error)
+            if run is not None:
+                _fail_run(connection, run, error)
+            settle_execution_budget(
+                connection,
+                idempotency_key=run_key,
+                pipeline_run_id=None if run is None else run.id,
+                settled_at=datetime.now(UTC),
+                consume_allowance=work_started,
+            )
             raise
     metadata = _processing_metadata(processing)
     context.add_output_metadata(metadata)
@@ -182,25 +259,54 @@ def _prepare_run(
     )
 
 
-def _process_batch(
+def _process_admitted_batch(
     connection: Connection,
+    run_key: str,
     run: OrchestrationRun,
     boundaries: PipelineBoundaries,
+    credentials: ExecutionProviderCredentials,
     settings: OrchestrationSettings,
     observed_at: datetime,
 ) -> ProcessingSummary:
+    admitted_max_jobs = reserve_job_capacity(connection, run_key)
+    if not admitted_max_jobs:
+        return ProcessingSummary(
+            claimed_count=0,
+            terminal_count=0,
+            terminal_error_count=0,
+            retry_scheduled_count=0,
+            lease_lost_count=0,
+        )
     return process_claimed_jobs(
         connection,
         run,
         boundaries,
-        openrouter_api_key=settings.openrouter_api_key,
-        typesafe_api_key=settings.typesafe_api_key,
+        openrouter_api_key=credentials.openrouter.get_secret_value(),
+        typesafe_api_key=credentials.typesafe.get_secret_value(),
         owner_token=uuid4(),
         observed_at=observed_at,
-        max_items=settings.work_batch_size,
+        max_items=min(settings.work_batch_size, admitted_max_jobs),
         lease_for=timedelta(seconds=settings.work_lease_seconds),
         retry_after=timedelta(seconds=settings.work_retry_seconds),
         enable_ats_enrichment=settings.enable_ats_enrichment,
+    )
+
+
+def _provider_credentials(
+    connection: Connection,
+    settings: OrchestrationSettings,
+) -> ExecutionProviderCredentials:
+    cipher = (
+        None
+        if settings.credential_encryption_key is None
+        else credential_cipher(settings.credential_encryption_key)
+    )
+    return resolve_execution_provider_credentials(
+        connection,
+        cipher=cipher,
+        jina_fallback=settings.jina_api_key,
+        openrouter_fallback=settings.openrouter_api_key,
+        typesafe_fallback=settings.typesafe_api_key,
     )
 
 

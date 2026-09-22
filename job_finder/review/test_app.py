@@ -13,6 +13,13 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
+from job_finder.execution_budget import (
+    BudgetSaved,
+    BudgetSetupService,
+    BudgetSetupState,
+    ExecutionBudgetPolicy,
+    ExecutionEstimate,
+)
 from job_finder.provider_credentials import (
     ProviderCapability,
     ProviderCredentialState,
@@ -1326,6 +1333,16 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
         authenticate=lambda _password: False,
         bootstrap=bootstrap,
     )
+
+    def replace_provider(
+        _provider: ProviderKind,
+        _secret: SecretStr,
+        _generation: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> Never:
+        pytest.fail("provider credential was unexpectedly replaced")
+
     provider_setup = ProviderSetupService(
         inspect=lambda: ProviderSetupSnapshot(
             credentials=tuple(
@@ -1333,7 +1350,7 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
                 for provider in ProviderKind
             )
         ),
-        replace=lambda *_args: pytest.fail("provider credential was unexpectedly replaced"),
+        replace=replace_provider,
         advance=lambda: pytest.fail("provider setup unexpectedly advanced"),
         resolve=lambda _provider: pytest.fail("provider credential was unexpectedly resolved"),
     )
@@ -1484,6 +1501,120 @@ def test_provider_setup_never_echoes_credentials_and_advances_when_ready() -> No
     assert completed.status_code == 303
     assert completed.headers["location"] == "/configuration"
     assert client.get("/review", follow_redirects=False).headers["location"] == "/configuration"
+
+
+def test_budget_setup_shows_bounds_and_advances_to_test_search() -> None:
+    owner_state = [OwnerAccessState(stage=OnboardingStage.BUDGET, has_password=True)]
+    estimate = ExecutionEstimate(
+        search_queries=12,
+        jobs_per_run=25,
+        logical_model_calls_per_job=8,
+        maximum_provider_attempts=1600,
+    )
+
+    def save_budget(
+        expected_version: int,
+        monthly_limit: Decimal,
+        run_limit: Decimal,
+        max_jobs: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> BudgetSaved:
+        policy = ExecutionBudgetPolicy(
+            version=expected_version + 1,
+            monthly_limit_usd=monthly_limit,
+            run_allowance_usd=run_limit,
+            max_jobs_per_run=max_jobs,
+            max_search_queries_per_run=estimate.search_queries,
+            max_provider_attempts_per_run=estimate.maximum_provider_attempts,
+        )
+        owner_state[0] = OwnerAccessState(stage=OnboardingStage.TEST_SEARCH, has_password=True)
+        return BudgetSaved(policy=policy, owner_state=owner_state[0])
+
+    budget = BudgetSetupService(
+        inspect=lambda _max_jobs: BudgetSetupState(policy=None, estimate=estimate),
+        save=save_budget,
+    )
+    owner = OwnerAccessService(
+        load_state=lambda: owner_state[0],
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=owner,
+            budget_setup_service=budget,
+            now=lambda: NOW,
+        )
+    )
+    _authenticate(client)
+    page = client.get("/setup/budget")
+    csrf_token = _csrf(client)
+
+    completed = client.post(
+        "/setup/budget",
+        data={
+            "csrf_token": csrf_token,
+            "expected_version": "0",
+            "monthly_limit_usd": "20.00",
+            "run_allowance_usd": "2.00",
+            "max_jobs_per_run": "25",
+        },
+        follow_redirects=False,
+    )
+
+    assert "12 searches per discovery run" in page.text
+    assert "1600 provider attempts" in page.text
+    assert completed.status_code == 303
+    assert completed.headers["location"] == "/setup/test-search"
+    assert "Ready for a bounded test search" in client.get("/setup/test-search").text
+
+
+def test_completed_upgrade_without_a_budget_is_routed_to_budget_setup() -> None:
+    estimate = ExecutionEstimate(
+        search_queries=12,
+        jobs_per_run=25,
+        logical_model_calls_per_job=8,
+        maximum_provider_attempts=1600,
+    )
+
+    def save_budget(
+        _expected_version: int,
+        _monthly_limit: Decimal,
+        _run_allowance: Decimal,
+        _max_jobs: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> Never:
+        pytest.fail("budget was unexpectedly saved")
+
+    budget = BudgetSetupService(
+        inspect=lambda _max_jobs: BudgetSetupState(policy=None, estimate=estimate),
+        save=save_budget,
+    )
+    owner = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(stage=OnboardingStage.COMPLETE, has_password=True),
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            _configuration_service(),
+            SETTINGS,
+            owner_access_service=owner,
+            budget_setup_service=budget,
+        )
+    )
+    _authenticate(client)
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup/budget"
 
 
 def test_legacy_install_fails_closed_until_password_import() -> None:
