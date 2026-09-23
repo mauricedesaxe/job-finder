@@ -111,7 +111,7 @@ OWNER_ACCESS = OwnerAccessService(
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
 
 
-def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None:
+def test_the_operations_page_shows_truthful_owner_operations_status() -> None:
     snapshot = OperationsSnapshot(
         health=OperationsHealth.ACTION_REQUIRED,
         queues=QueueCounts(pending=2, leased=1, retrying=3, completed=20, terminal_error=1),
@@ -154,7 +154,7 @@ def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None
     )
     client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
 
-    response = client.get("/")
+    response = client.get("/operations")
 
     assert response.status_code == 200
     assert "Action required" in response.text
@@ -172,9 +172,29 @@ def test_the_authenticated_home_shows_truthful_owner_operations_status() -> None
     assert "OpenRouter did not respond" in response.text
     assert "Dagster could not be reached." in response.text
     assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
-    assert 'aria-current="page">Operations' in response.text
-    assert 'href="/review"' in response.text
-    assert 'href="/configuration"' in response.text
+    assert 'aria-current="page" class="shell-link">Operations</a>' in response.text
+    assert 'href="/" class="shell-link">Review</a>' in response.text
+    assert 'href="/configuration" class="shell-link">Search setup</a>' in response.text
+    assert 'aria-current="page">Operations<' not in response.text
+    assert "just now" in response.text
+    assert 'title="2026-09-10 12:00 UTC"' in response.text
+
+
+def test_the_review_queue_is_the_landing_page() -> None:
+    item = _item(TODAY, "qualified")
+
+    response = _client(_queue(item)).get("/")
+
+    assert response.status_code == 200
+    assert "Jobs waiting for review" in response.text
+    assert 'href="/" aria-current="page" class="shell-link">Review</a>' in response.text
+
+
+def test_the_old_review_url_redirects_to_the_landing_page() -> None:
+    response = _client(_queue()).get("/review", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
 
 
 def test_the_operations_home_renders_bounded_recovery_commands() -> None:
@@ -206,7 +226,7 @@ def test_the_operations_home_renders_bounded_recovery_commands() -> None:
     )
     client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
 
-    response = client.get("/")
+    response = client.get("/operations")
 
     assert response.status_code == 200
     assert response.text.count('action="/operations/recovery"') == 2
@@ -237,7 +257,7 @@ def test_the_operations_home_reports_database_unavailability() -> None:
 
     client = _client(_queue(), operations=OperationsService(load=unavailable))
 
-    response = client.get("/")
+    response = client.get("/operations")
 
     assert response.status_code == 503
     assert "Operations status is unavailable" in response.text
@@ -294,12 +314,12 @@ def test_the_operations_home_reports_database_unavailability() -> None:
         ),
     ],
 )
-def test_the_owner_home_renders_each_operations_health_state(
+def test_the_operations_page_renders_each_operations_health_state(
     snapshot: OperationsSnapshot, heading: str
 ) -> None:
     client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
 
-    response = client.get("/")
+    response = client.get("/operations")
 
     assert response.status_code == 200
     assert heading in response.text
@@ -313,7 +333,7 @@ def test_the_owner_home_renders_each_operations_health_state(
 def test_the_operations_home_renders_all_live_schedule_controls() -> None:
     client = _client(_queue(), controls=_control_service())
 
-    response = client.get("/")
+    response = client.get("/operations")
 
     assert response.status_code == 200
     for definition in CONTROL_DEFINITIONS:
@@ -321,7 +341,8 @@ def test_the_operations_home_renders_all_live_schedule_controls() -> None:
         assert definition.cadence in response.text
         assert f'value="{definition.job_name}"' in response.text
         assert f'value="{definition.schedule_name}"' in response.text
-    assert "Next: 2026-09-21 13:00 UTC" in response.text
+    assert "in 11 days" in response.text
+    assert 'title="2026-09-21 13:00 UTC"' in response.text
     assert response.text.count('action="/operations/run"') == 4
     assert response.text.count('action="/operations/schedule"') == 4
 
@@ -505,7 +526,7 @@ def test_schedule_change_redirects_after_a_verified_pause() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/?notice=schedule-paused"
+    assert response.headers["location"] == "/operations?notice=schedule-paused"
 
 
 def test_schedule_resume_redirects_and_the_home_renders_the_notice() -> None:
@@ -625,7 +646,7 @@ def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/?notice=work-retried"
+    assert response.headers["location"] == "/operations?notice=work-retried"
     assert calls == [
         WorkRecoveryCommand(
             idempotency_key="private-key",
@@ -751,7 +772,7 @@ def test_job_reevaluation_passes_an_exact_typed_command_and_redirects() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/?notice=reevaluation-requested"
+    assert response.headers["location"] == "/operations?notice=reevaluation-requested"
     assert calls == [
         JobReevaluationCommand(
             idempotency_key="private-key",
@@ -789,7 +810,7 @@ def test_the_queue_renders_day_sections_newest_first() -> None:
     newer = _item(TODAY, "qualified", value=2)
     queue = ReviewQueue(items=(newer, older), reviewed_counts={YESTERDAY: 4})
 
-    response = _client(queue).get("/review")
+    response = _client(queue).get("/")
 
     assert response.status_code == 200
     assert "Thursday, September 10" in response.text
@@ -805,7 +826,7 @@ def test_qualified_items_precede_the_rejected_audit_within_a_day() -> None:
     audit = _item(TODAY, "rejected_audit", value=1)
     qualified = _item(TODAY, "qualified", value=2)
 
-    response = _client(_queue(qualified, audit)).get("/review")
+    response = _client(_queue(qualified, audit)).get("/")
 
     assert response.text.index("Applied AI Engineer 2") < response.text.index(
         "Applied AI Engineer 1"
@@ -816,7 +837,7 @@ def test_pending_rows_carry_the_lane_and_link_to_the_job_page() -> None:
     item = _item(TODAY, "qualified")
     audit = _item(TODAY, "rejected_audit", value=2)
 
-    response = _client(_queue(item, audit)).get("/review")
+    response = _client(_queue(item, audit)).get("/")
 
     assert "New result" in response.text
     assert "Second look" in response.text
@@ -829,7 +850,7 @@ def test_pending_rows_carry_the_lane_and_link_to_the_job_page() -> None:
 
 
 def test_an_empty_queue_renders_a_single_message() -> None:
-    response = _client(_queue()).get("/review")
+    response = _client(_queue()).get("/")
 
     assert "No jobs waiting for review." in response.text
     assert "September 10" not in response.text
@@ -845,7 +866,7 @@ def test_a_job_page_links_back_and_walks_the_queue() -> None:
 
     assert response.status_code == 200
     assert "← All jobs" in response.text
-    assert 'href="/review"' in response.text
+    assert 'href="/"' in response.text
     assert "2 of 3 waiting" in response.text
     assert 'class="workbench"' in response.text
     assert 'class="evidence-panel"' in response.text
@@ -882,7 +903,7 @@ def test_the_login_uses_the_editorial_split_and_route_line() -> None:
 
 
 def test_the_theme_follows_the_system_color_scheme() -> None:
-    response = _client(_queue()).get("/review")
+    response = _client(_queue()).get("/")
 
     assert '<meta name="color-scheme" content="light dark">' in response.text
     assert "color-scheme: light dark" in response.text
@@ -985,7 +1006,7 @@ def test_a_day_section_renders_reviewed_jobs_after_the_waiting_ones() -> None:
     decided = _decided(_item(TODAY, "qualified", value=2), "reject", "Wrong location.")
     queue = ReviewQueue(items=(waiting,), reviewed_items=(decided,), reviewed_counts={TODAY: 1})
 
-    response = _client(queue).get("/review")
+    response = _client(queue).get("/")
 
     assert response.status_code == 200
     assert "1 waiting · 1 reviewed" in response.text
@@ -1005,7 +1026,7 @@ def test_a_fully_reviewed_day_still_renders_its_section() -> None:
     decided = _decided(_item(TODAY, "qualified", value=1), "pursue")
     queue = ReviewQueue(reviewed_items=(decided,), reviewed_counts={TODAY: 1})
 
-    response = _client(queue).get("/review")
+    response = _client(queue).get("/")
 
     assert response.status_code == 200
     assert "Thursday, September 10" in response.text
@@ -1124,7 +1145,7 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/review"
+    assert response.headers["location"] == "/"
     assert submissions == [
         ReviewSubmission(
             review_item_id=item.id,

@@ -76,11 +76,11 @@ from job_finder.review.configuration_editor import (
     ConfigurationEditorService,
     MalformedConfigurationForm,
     RawConfigurationForm,
-    authenticated_masthead,
     configuration_page,
     parse_configuration_form,
     publication_retry_page,
 )
+from job_finder.review.shell import sidebar_page, timestamp
 from job_finder.review.control_plane import (
     CONTROL_DEFINITIONS,
     ControlConflict,
@@ -540,6 +540,22 @@ def create_review_app(
     @app.route("/", methods=["GET"])
     def home(request: Request) -> HTMLResponse:
         try:
+            queue = service.review_queue()
+        except psycopg.Error:
+            return _unavailable_response()
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        return HTMLResponse(_document(sidebar_page("review", csrf_token, _review_page(queue))))
+
+    @app.route("/review", methods=["GET"])
+    def review_page(request: Request) -> Response:
+        _ = request
+        return RedirectResponse("/", status_code=303)
+
+    @app.route("/operations", methods=["GET"])
+    def operations_page(request: Request) -> HTMLResponse:
+        try:
             snapshot = operations.load()
         except psycopg.Error:
             return _state_response(
@@ -556,12 +572,17 @@ def create_review_app(
             control_snapshot = None
         return HTMLResponse(
             _document(
-                _operations_page(
-                    snapshot,
-                    control_snapshot,
+                sidebar_page(
+                    "operations",
                     csrf_token,
-                    run_key=secrets.token_urlsafe(32),
-                    notice=_OPERATIONS_NOTICES.get(request.query_params.get("notice", "")),
+                    _operations_page(
+                        snapshot,
+                        control_snapshot,
+                        csrf_token,
+                        run_key=secrets.token_urlsafe(32),
+                        notice=_OPERATIONS_NOTICES.get(request.query_params.get("notice", "")),
+                        now=now(),
+                    ),
                 ),
                 title="Job Finder operations",
             )
@@ -591,7 +612,7 @@ def create_review_app(
             return _operations_unavailable_response(str(error))
         if isinstance(result, RunStarted):
             notice = "run-replayed" if result.replayed else "run-started"
-            return RedirectResponse(f"/?notice={notice}", status_code=303)
+            return RedirectResponse(f"/operations?notice={notice}", status_code=303)
         if isinstance(result, ControlConflict):
             return _operations_conflict_response(result.reason)
         if isinstance(result, RunLaunchUncertain):
@@ -634,7 +655,7 @@ def create_review_app(
                 if result.status is ScheduleStatus.RUNNING
                 else "schedule-paused"
             )
-            return RedirectResponse(f"/?notice={notice}", status_code=303)
+            return RedirectResponse(f"/operations?notice={notice}", status_code=303)
         if isinstance(result, ScheduleStateConflict):
             return _operations_conflict_response(
                 "Schedule state changed before this request. "
@@ -680,7 +701,7 @@ def create_review_app(
                     if command.action is RecoveryAction.RETRY_NOW
                     else "terminal-recovered"
                 )
-                return RedirectResponse(f"/?notice={notice}", status_code=303)
+                return RedirectResponse(f"/operations?notice={notice}", status_code=303)
             case WorkRecoveryKeyConflict():
                 return _operations_conflict_response(
                     "This recovery request key belongs to another command."
@@ -722,7 +743,7 @@ def create_review_app(
         match result:
             case JobReevaluationAccepted():
                 notice = "reevaluation-replayed" if result.replayed else "reevaluation-requested"
-                return RedirectResponse(f"/?notice={notice}", status_code=303)
+                return RedirectResponse(f"/operations?notice={notice}", status_code=303)
             case JobReevaluationKeyConflict():
                 return _operations_conflict_response(
                     "This reevaluation request key belongs to another command."
@@ -745,17 +766,6 @@ def create_review_app(
                 return _reevaluation_not_found_response()
             case _:
                 assert_never(result)
-
-    @app.route("/review", methods=["GET"])
-    def review_page(request: Request) -> HTMLResponse:
-        try:
-            queue = service.review_queue()
-        except psycopg.Error:
-            return _unavailable_response()
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
-            return HTMLResponse(status_code=401)
-        return HTMLResponse(_document(_review_page(queue, csrf_token)))
 
     @app.route("/configuration", methods=["GET"])
     def configuration(request: Request) -> HTMLResponse:
@@ -1042,8 +1052,12 @@ def create_review_app(
         if item is None:
             return _item_not_found_response()
         if item.reviewed:
-            return HTMLResponse(_document(_revision_page(item, csrf_token)))
-        return HTMLResponse(_document(_item_page(queue.items, item, csrf_token)))
+            return HTMLResponse(
+                _document(sidebar_page("review", csrf_token, _revision_page(item, csrf_token)))
+            )
+        return HTMLResponse(
+            _document(sidebar_page("review", csrf_token, _item_page(queue.items, item, csrf_token)))
+        )
 
     @app.route("/logout", methods=["POST"])
     async def logout(request: Request) -> HTMLResponse | RedirectResponse:
@@ -1554,9 +1568,8 @@ def _login_content(next_url: str, error: str | None = None) -> object:
     )
 
 
-def _review_page(queue: ReviewQueue, csrf_token: str) -> object:
-    return Main(
-        authenticated_masthead(csrf_token, current="review"),
+def _review_page(queue: ReviewQueue) -> object:
+    return Div(
         Div(
             Small("Review queue", cls="eyebrow"),
             H1("Jobs waiting for review"),
@@ -1574,6 +1587,7 @@ def _operations_page(
     *,
     run_key: str,
     notice: str | None,
+    now: datetime,
 ) -> object:
     health_title, health_detail = {
         OperationsHealth.CAUGHT_UP: (
@@ -1586,20 +1600,23 @@ def _operations_page(
         ),
         OperationsHealth.ACTION_REQUIRED: (
             "Action required",
-            "A terminal failure or the latest pipeline run needs attention.",
+            "Terminal failures or a failed pipeline run need attention. Open the failures "
+            + "panel to recover or dismiss them.",
         ),
         OperationsHealth.UNKNOWN: (
             "Status unknown",
             "No pipeline run or queued work has been recorded yet.",
         ),
     }[snapshot.health]
-    return Main(
-        authenticated_masthead(csrf_token, current="operations"),
+    return Div(
         P(notice, cls="operations-notice", role="status") if notice else None,
         Div(
             Small("Owner operations", cls="eyebrow"),
             H1(health_title),
             P(health_detail, cls="operations-intro"),
+            A("Open failures ↓", href="#failures", cls="health-link")
+            if snapshot.health is OperationsHealth.ACTION_REQUIRED
+            else None,
             cls=f"operations-header health-{snapshot.health.value}",
         ),
         Div(
@@ -1631,24 +1648,29 @@ def _operations_page(
                 cls="operations-panel spend-panel",
             ),
             Div(
-                _schedule_controls(controls, csrf_token, run_key),
+                _schedule_controls(controls, csrf_token, run_key, now=now),
                 cls="operations-panel",
             ),
             cls="operations-grid",
         ),
-        _runs_panel(snapshot.recent_runs),
+        _runs_panel(snapshot.recent_runs, now=now),
         _work_recovery_panel(
             snapshot.actionable_work,
             snapshot.actionable_work_total,
             csrf_token,
+            now=now,
         ),
-        _failures_panel(snapshot.failures),
+        _failures_panel(snapshot.failures, now=now),
         cls="review-shell operations-shell",
     )
 
 
 def _schedule_controls(
-    snapshot: ControlPlaneSnapshot | None, csrf_token: str, run_key: str
+    snapshot: ControlPlaneSnapshot | None,
+    csrf_token: str,
+    run_key: str,
+    *,
+    now: datetime,
 ) -> tuple[object, ...]:
     if snapshot is None:
         return (
@@ -1675,13 +1697,18 @@ def _schedule_controls(
             cls="operations-muted",
         ),
         Ul(
-            *(_schedule_row(schedule, csrf_token, run_key) for schedule in snapshot.schedules),
+            *(
+                _schedule_row(schedule, csrf_token, run_key, now=now)
+                for schedule in snapshot.schedules
+            ),
             cls="schedule-list",
         ),
     )
 
 
-def _schedule_row(schedule: ScheduleView, csrf_token: str, run_key: str) -> object:
+def _schedule_row(
+    schedule: ScheduleView, csrf_token: str, run_key: str, *, now: datetime
+) -> object:
     desired = (
         ScheduleStatus.STOPPED
         if schedule.status is ScheduleStatus.RUNNING
@@ -1698,11 +1725,12 @@ def _schedule_row(schedule: ScheduleView, csrf_token: str, run_key: str) -> obje
             ),
             P(schedule.definition.cadence, cls="schedule-cadence"),
             P(
-                f"Next: {_format_timestamp(schedule.next_tick)}"
-                if schedule.next_tick is not None
-                else "Next tick unavailable while stopped",
+                "Next: ",
+                timestamp(schedule.next_tick, now=now),
                 cls="schedule-next",
-            ),
+            )
+            if schedule.next_tick is not None
+            else P("Next tick unavailable while stopped", cls="schedule-next"),
             Div(
                 Form(
                     Input(type="hidden", name="csrf_token", value=csrf_token),
@@ -1770,9 +1798,9 @@ def _count_phrase(value: int, singular: str, plural: str) -> str:
     return f"{value} {singular if value == 1 else plural}"
 
 
-def _runs_panel(runs: tuple[PipelineRunSummary, ...]) -> object:
+def _runs_panel(runs: tuple[PipelineRunSummary, ...], *, now: datetime) -> object:
     rows = (
-        Ul(*(_run_row(run) for run in runs), cls="operations-list")
+        Ul(*(_run_row(run, now=now) for run in runs), cls="operations-list")
         if runs
         else P("No pipeline runs recorded.", cls="operations-empty")
     )
@@ -1784,20 +1812,24 @@ def _runs_panel(runs: tuple[PipelineRunSummary, ...]) -> object:
     )
 
 
-def _run_row(run: PipelineRunSummary) -> object:
-    timing = _format_timestamp(run.started_at)
+def _run_row(run: PipelineRunSummary, *, now: datetime) -> object:
     if run.completed_at is not None:
         elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
-        timing = f"{timing} · {_format_duration(elapsed)}"
+        timing = (timestamp(run.started_at, now=now), f" · {_format_duration(elapsed)}")
+    else:
+        timing = (timestamp(run.started_at, now=now),)
     return Li(
         Div(Strong(run.kind.replace("_", " ").title()), Span(run.status, cls="run-status")),
-        Small(timing),
+        Small(*timing),
     )
 
 
-def _failures_panel(failures: tuple[FailureSample, ...]) -> object:
+def _failures_panel(failures: tuple[FailureSample, ...], *, now: datetime) -> object:
     rows = (
-        Ul(*(_failure_row(failure) for failure in failures), cls="operations-list failure-list")
+        Ul(
+            *(_failure_row(failure, now=now) for failure in failures),
+            cls="operations-list failure-list",
+        )
         if failures
         else P("No recent failures recorded.", cls="operations-empty")
     )
@@ -1805,13 +1837,16 @@ def _failures_panel(failures: tuple[FailureSample, ...]) -> object:
         Small("Bounded sample", cls="eyebrow"),
         H2("Recent failures"),
         rows,
+        id="failures",
         cls="operations-section",
     )
 
 
-def _work_recovery_panel(work: tuple[ActionableWork, ...], total: int, csrf_token: str) -> object:
+def _work_recovery_panel(
+    work: tuple[ActionableWork, ...], total: int, csrf_token: str, *, now: datetime
+) -> object:
     rows = (
-        Ul(*(_work_recovery_row(item, csrf_token) for item in work), cls="recovery-list")
+        Ul(*(_work_recovery_row(item, csrf_token, now=now) for item in work), cls="recovery-list")
         if work
         else P("No failed work needs recovery.", cls="operations-empty")
     )
@@ -1833,12 +1868,12 @@ def _work_recovery_panel(work: tuple[ActionableWork, ...], total: int, csrf_toke
     )
 
 
-def _work_recovery_row(item: ActionableWork, csrf_token: str) -> object:
+def _work_recovery_row(item: ActionableWork, csrf_token: str, *, now: datetime) -> object:
     action = RecoveryAction.RETRY_NOW if item.state == "failed" else RecoveryAction.RECOVER_TERMINAL
+    marker = item.retry_at if item.retry_at is not None else item.failed_at
     timing = (
-        f"Scheduled retry: {_format_timestamp(item.retry_at)}"
-        if item.retry_at is not None
-        else f"Terminal since: {_format_timestamp(item.failed_at)}"
+        "Scheduled retry: ",
+        timestamp(marker, now=now),
     )
     return Li(
         Div(
@@ -1847,7 +1882,7 @@ def _work_recovery_row(item: ActionableWork, csrf_token: str) -> object:
         ),
         Small(str(item.job_id), cls="recovery-id"),
         P(item.failure_summary),
-        Small(timing),
+        Small(*timing),
         Form(
             Input(type="hidden", name="csrf_token", value=csrf_token),
             Input(type="hidden", name="job_id", value=str(item.job_id)),
@@ -1874,15 +1909,11 @@ def _work_recovery_row(item: ActionableWork, csrf_token: str) -> object:
     )
 
 
-def _failure_row(failure: FailureSample) -> object:
+def _failure_row(failure: FailureSample, *, now: datetime) -> object:
     return Li(
-        Div(Strong(failure.source.title()), Span(_format_timestamp(failure.occurred_at))),
+        Div(Strong(failure.source.title()), timestamp(failure.occurred_at, now=now)),
         P(failure.summary),
     )
-
-
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _format_duration(total_seconds: int) -> str:
@@ -1966,9 +1997,9 @@ def _item_page(items: tuple[ReviewItem, ...], item: ReviewItem, csrf_token: str)
     position = next(i for i, candidate in enumerate(items) if candidate.id == item.id)
     previous_item = items[position - 1] if position > 0 else None
     next_item = items[position + 1] if position + 1 < len(items) else None
-    return Main(
+    return Div(
         Div(
-            A("← All jobs", href="/review", cls="back-link"),
+            A("← All jobs", href="/", cls="back-link"),
             Span(f"{position + 1} of {len(items)} waiting", cls="position-marker"),
             Div(
                 _item_arrow("← Prev", previous_item),
@@ -1989,9 +2020,9 @@ def _item_arrow(glyph: str, target: ReviewItem | None) -> object:
 
 
 def _revision_page(item: ReviewItem, csrf_token: str) -> object:
-    return Main(
+    return Div(
         Div(
-            A("← All jobs", href="/review", cls="back-link"),
+            A("← All jobs", href="/", cls="back-link"),
             Span("Revision", cls="position-marker"),
             cls="item-topbar",
         ),
@@ -2170,7 +2201,7 @@ def _unavailable_response() -> HTMLResponse:
     return _state_response(
         "Review is unavailable",
         "The database could not load this review. Your previous decisions are unchanged.",
-        action=A("Retry", href="/review", cls="retry"),
+        action=A("Retry", href="/", cls="retry"),
         status_code=503,
     )
 
@@ -2233,7 +2264,7 @@ def _reevaluation_not_found_response() -> HTMLResponse:
     return _state_response(
         "Source decision was not found",
         "The requested decision no longer exists.",
-        action=A("Back to review", href="/review", cls="retry"),
+        action=A("Back to review", href="/", cls="retry"),
         status_code=404,
     )
 
@@ -2348,7 +2379,7 @@ def _conflict_response(reason: str) -> HTMLResponse:
     return _state_response(
         "This review changed",
         reason,
-        action=A("Back to the review", href="/review", cls="retry"),
+        action=A("Back to the review", href="/", cls="retry"),
         status_code=409,
     )
 
@@ -2357,7 +2388,7 @@ def _item_not_found_response() -> HTMLResponse:
     return _state_response(
         "Review item not found",
         "This job is not part of the review.",
-        action=A("Back to the review", href="/review", cls="retry"),
+        action=A("Back to the review", href="/", cls="retry"),
         status_code=404,
     )
 
@@ -2474,7 +2505,7 @@ def _successor_url(items: tuple[ReviewItem, ...], position: int) -> str:
     following = items[position + 1 :]
     if following:
         return _item_url(following[0].id)
-    return "/review"
+    return "/"
 
 
 def _find_item(queue: ReviewQueue, item_id: UUID) -> ReviewItem | None:
@@ -2535,7 +2566,7 @@ button, select, textarea, input { font: inherit; }
 h1, h2 { margin: 0; font-family: Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
 h1 { max-width: 14ch; font-size: clamp(2.4rem, 7vw, 5.2rem); line-height: 0.9; }
 h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
-.eyebrow, .status-kicker, .masthead-label, .why-label, .metadata-strip small {
+.eyebrow, .status-kicker, .shell-label, .why-label, .metadata-strip small {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   font-size: 0.72rem;
@@ -2543,11 +2574,19 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 }
 .eyebrow { display: block; margin-bottom: 0.7rem; }
 .review-shell { width: min(100% - 2rem, 1180px); margin: 0 auto; padding: 1.25rem 0 5rem; }
-.masthead { display: flex; align-items: center; justify-content: space-between; min-height: 56px; border: 2px solid var(--line); background: var(--panel); }
-.masthead > div { display: flex; align-items: center; }
+.app-shell { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
+.app-content { min-width: 0; }
+.sidebar { position: sticky; top: 0; display: flex; flex-direction: column; align-self: start; height: 100vh; border-right: 2px solid var(--line); background: var(--panel); }
+.sidebar-head { display: flex; align-items: center; min-height: 56px; border-bottom: 2px solid var(--line); }
 .wordmark { display: grid; place-items: center; align-self: stretch; min-width: 58px; padding: 0.6rem; background: var(--inverse-bg); color: var(--acid); font-size: 1.35rem; }
-.masthead-label { padding: 0 0.85rem; }
-.logout { min-width: 88px; min-height: 52px; border: 0; border-left: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
+.shell-label { padding: 0 0.85rem; }
+.shell-nav { display: grid; gap: 0.35rem; padding: 0.75rem; }
+.shell-link { display: flex; align-items: center; min-height: 44px; padding: 0 0.75rem; border: 2px solid transparent; font-weight: 900; text-decoration: none; }
+.shell-link:hover, .shell-link:focus-visible { border-color: var(--line); background: var(--acid); color: var(--accent-ink); }
+.shell-link[aria-current="page"] { border-color: var(--line); background: var(--inverse-bg); color: var(--acid); }
+.sidebar > form { margin-top: auto; padding: 0.75rem; }
+.logout { width: 100%; min-height: 44px; border: 2px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font-weight: 900; }
+.logout:hover, .logout:focus-visible { background: var(--acid); color: var(--accent-ink); }
 .review-header { padding: clamp(2rem, 6vw, 5rem) 0 1.5rem; }
 .review-header .eyebrow { width: fit-content; padding: 0.25rem 0.4rem; background: var(--acid); color: var(--accent-ink); }
 .day-section { margin-top: 2.4rem; }
@@ -2626,6 +2665,8 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-header.health-caught_up { box-shadow: 8px 8px 0 var(--acid); }
 .operations-header.health-working, .operations-header.health-unknown { box-shadow: 8px 8px 0 var(--caution); }
 .operations-header.health-action_required { background: var(--caution); color: var(--accent-ink); }
+.health-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 1.25rem; padding: 0 1rem; border: 2px solid var(--line); background: var(--inverse-bg); color: var(--acid); font-weight: 900; text-decoration: none; }
+.health-link:hover, .health-link:focus-visible { background: var(--acid); color: var(--accent-ink); }
 .operations-notice { margin: 1.25rem 0 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
 .operations-intro { max-width: 54ch; margin: 1rem 0 0; font-size: 1.08rem; line-height: 1.55; }
 .operations-metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 2rem; border: 2px solid var(--line); background: var(--panel); }
@@ -2685,6 +2726,14 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 }
 @media (max-width: 760px) {
   .review-shell { width: min(100% - 1rem, 1180px); padding-top: 0.5rem; }
+  .app-shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; flex-direction: row; align-items: center; gap: 0.5rem; border-right: 0; border-bottom: 2px solid var(--line); }
+  .sidebar-head { border-bottom: 0; }
+  .shell-label { display: none; }
+  .shell-nav { display: flex; flex: 1; gap: 0.4rem; padding: 0.5rem; overflow-x: auto; }
+  .shell-link { white-space: nowrap; }
+  .sidebar > form { margin: 0 0.5rem 0 0; padding: 0; }
+  .logout { width: auto; min-width: 84px; }
   .login-shell { grid-template-columns: 1fr; }
   .login-editorial { min-height: 48vh; padding: 2rem 1rem; }
   .workbench { grid-template-columns: 1fr; box-shadow: 5px 5px 0 var(--shadow); }
@@ -2709,7 +2758,6 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .schedule-actions { grid-template-columns: 1fr; }
 }
 @media (max-width: 360px) {
-  .masthead-label { display: none; }
   .evidence-panel, .decision-panel, .login-card { padding: 1rem; }
   .item-nav-link { min-width: 64px; padding: 0 0.35rem; }
 }
