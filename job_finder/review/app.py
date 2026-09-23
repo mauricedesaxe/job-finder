@@ -107,6 +107,7 @@ from job_finder.review.models import (
 )
 from job_finder.review.operations import (
     ActionableWork,
+    DismissalAction,
     FailureSample,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
@@ -121,6 +122,12 @@ from job_finder.review.operations import (
     OperationsUnavailable,
     PipelineRunSummary,
     RecoveryAction,
+    WorkDismissalApplied,
+    WorkDismissalActiveLease,
+    WorkDismissalCommand,
+    WorkDismissalKeyConflict,
+    WorkDismissalNotFound,
+    WorkDismissalStaleState,
     WorkRecoveryActiveLease,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
@@ -179,11 +186,17 @@ _OPERATIONS_NOTICES = {
     "schedule-paused": "Schedule paused.",
     "schedule-resumed": "Schedule resumed.",
     "schedule-replayed": "Schedule already had the requested state.",
+    "reevaluation-requested": "Reevaluation queued with the current release target.",
+    "reevaluation-replayed": "This reevaluation request was already queued.",
+}
+_FAILURES_NOTICES = {
     "work-retried": "Work is ready for the next worker now.",
     "terminal-recovered": "Terminal work recovered with a fresh attempt budget.",
     "recovery-replayed": "This recovery request was already applied.",
-    "reevaluation-requested": "Reevaluation queued with the current release target.",
-    "reevaluation-replayed": "This reevaluation request was already queued.",
+    "work-dismissed": "Dismissed. It stays quiet unless this work fails again.",
+    "dismiss-replayed": "This dismissal request was already applied.",
+    "dismiss-undone": "Dismissal undone. The failure needs attention again.",
+    "dismiss-undo-replayed": "This undo request was already applied.",
 }
 
 
@@ -701,7 +714,7 @@ def create_review_app(
                     if command.action is RecoveryAction.RETRY_NOW
                     else "terminal-recovered"
                 )
-                return RedirectResponse(f"/operations?notice={notice}", status_code=303)
+                return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
             case WorkRecoveryKeyConflict():
                 return _operations_conflict_response(
                     "This recovery request key belongs to another command."
@@ -717,6 +730,80 @@ def create_review_app(
                 )
             case WorkRecoveryNotFound():
                 return _work_recovery_not_found_response()
+            case _:
+                assert_never(result)
+
+    @app.route("/operations/failures", methods=["GET"])
+    def failures_page(request: Request) -> HTMLResponse:
+        try:
+            snapshot = operations.load()
+        except psycopg.Error:
+            return _state_response(
+                "Operations status is unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        notice = _FAILURES_NOTICES.get(request.query_params.get("notice", ""))
+        return HTMLResponse(
+            _document(
+                sidebar_page(
+                    "operations",
+                    csrf_token,
+                    _failures_page(snapshot, csrf_token, notice=notice, now=now()),
+                ),
+                title="Failures and recovery",
+            )
+        )
+
+    @app.route("/operations/dismiss", methods=["POST"])
+    async def dismiss_operation(request: Request) -> HTMLResponse | RedirectResponse:
+        form = await request.form()
+        if _verified_control_csrf_token(request, form) is None:
+            return _operations_forbidden_response()
+        try:
+            action = DismissalAction(_required_control_form_text(form, "action"))
+            command = WorkDismissalCommand(
+                idempotency_key=_required_control_form_text(form, "idempotency_key"),
+                job_id=UUID(_required_control_form_text(form, "job_id")),
+                action=action,
+                expected_attempt_count=int(
+                    _required_control_form_text(form, "expected_attempt_count")
+                ),
+                actor=actor,
+                requested_at=now(),
+            )
+        except ValueError as error:
+            return _malformed_operations_response(str(error))
+        try:
+            result = operations.dismiss(command)
+        except (OperationsUnavailable, psycopg.Error):
+            return _operations_unavailable_response("Work dismissal is unavailable")
+        match result:
+            case WorkDismissalApplied():
+                if command.action is DismissalAction.DISMISS:
+                    notice = "dismiss-replayed" if result.replayed else "work-dismissed"
+                else:
+                    notice = "dismiss-undo-replayed" if result.replayed else "dismiss-undone"
+                return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
+            case WorkDismissalKeyConflict():
+                return _operations_conflict_response(
+                    "This dismissal request key belongs to another command."
+                )
+            case WorkDismissalActiveLease():
+                return _operations_conflict_response(
+                    "This work item was actively leased when the command was recorded and was not changed."
+                )
+            case WorkDismissalStaleState():
+                return _operations_conflict_response(
+                    "The work item changed before this request. Reload and try again."
+                )
+            case WorkDismissalNotFound():
+                return _operations_conflict_response(
+                    "This work item (or its dismissal) no longer exists."
+                )
             case _:
                 assert_never(result)
 
@@ -1614,7 +1701,7 @@ def _operations_page(
             Small("Owner operations", cls="eyebrow"),
             H1(health_title),
             P(health_detail, cls="operations-intro"),
-            A("Open failures ↓", href="#failures", cls="health-link")
+            A("Open failures →", href="/operations/failures", cls="health-link")
             if snapshot.health is OperationsHealth.ACTION_REQUIRED
             else None,
             cls=f"operations-header health-{snapshot.health.value}",
@@ -1654,11 +1741,19 @@ def _operations_page(
             cls="operations-grid",
         ),
         _runs_panel(snapshot.recent_runs, now=now),
-        _work_recovery_panel(
-            snapshot.actionable_work,
-            snapshot.actionable_work_total,
-            csrf_token,
-            now=now,
+        Div(
+            Small("Failed work", cls="eyebrow"),
+            H2("Failures and recovery"),
+            P(
+                _count_phrase(
+                    snapshot.queues.retrying + snapshot.queues.terminal_error,
+                    "item failed or hit a terminal error.",
+                    "items failed or hit a terminal error.",
+                ),
+                cls="operations-muted",
+            ),
+            A("Open failures and recovery →", href="/operations/failures", cls="health-link"),
+            cls="operations-section",
         ),
         _failures_panel(snapshot.failures, now=now),
         cls="review-shell operations-shell",
@@ -1842,38 +1937,94 @@ def _failures_panel(failures: tuple[FailureSample, ...], *, now: datetime) -> ob
     )
 
 
-def _work_recovery_panel(
-    work: tuple[ActionableWork, ...], total: int, csrf_token: str, *, now: datetime
+def _failures_page(
+    snapshot: OperationsSnapshot,
+    csrf_token: str,
+    *,
+    notice: str | None,
+    now: datetime,
 ) -> object:
+    attention = tuple(item for item in snapshot.actionable_work if not item.dismissed)
+    dismissed = tuple(item for item in snapshot.actionable_work if item.dismissed)
+    undisplayed = snapshot.actionable_work_total - len(snapshot.actionable_work)
+    return Div(
+        P(notice, cls="operations-notice", role="status") if notice else None,
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1("Failures and recovery"),
+            P(
+                "Work that failed or hit a terminal error. Recovering re-runs it; "
+                + "dismissing only quiets the alert.",
+                cls="operations-intro",
+            ),
+            cls="operations-header",
+        ),
+        Div(
+            _metric("Retrying", snapshot.queues.retrying, "retrying", "retrying"),
+            _metric(
+                "Terminal",
+                snapshot.queues.terminal_error,
+                "terminal error",
+                "terminal errors",
+            ),
+            _metric(
+                "Dismissed",
+                snapshot.dismissed_terminal,
+                "dismissed",
+                "dismissed",
+            ),
+            cls="operations-metrics",
+            aria_label="Failed work",
+        ),
+        Div(
+            Small("Needs attention", cls="eyebrow"),
+            H2("Failed work"),
+            _recovery_rows(attention, csrf_token, now=now),
+            cls="operations-section",
+        ),
+        Div(
+            Small("Quieted on purpose", cls="eyebrow"),
+            H2("Dismissed"),
+            Ul(
+                *(_dismissed_row(item, csrf_token, now=now) for item in dismissed),
+                cls="recovery-list",
+            )
+            if dismissed
+            else P("Nothing is dismissed.", cls="operations-empty"),
+            cls="operations-section",
+        )
+        if dismissed
+        else None,
+        P(
+            f"Showing the newest {len(snapshot.actionable_work)} of "
+            + f"{snapshot.actionable_work_total}; recover these to reveal older work.",
+            cls="operations-muted",
+        )
+        if undisplayed > 0
+        else None,
+        cls="review-shell operations-shell",
+    )
+
+
+def _recovery_rows(work: tuple[ActionableWork, ...], csrf_token: str, *, now: datetime) -> object:
     rows = (
         Ul(*(_work_recovery_row(item, csrf_token, now=now) for item in work), cls="recovery-list")
         if work
         else P("No failed work needs recovery.", cls="operations-empty")
     )
-    return Div(
-        Small("Explicit bounded targets", cls="eyebrow"),
-        H2("Work recovery"),
-        P(
-            "Retry delayed work now or give terminal work one fresh bounded attempt budget.",
-            cls="operations-muted",
-        ),
-        P(
-            f"Showing the newest {len(work)} of {total}; recover these to reveal older work.",
-            cls="operations-muted",
-        )
-        if total > len(work)
-        else None,
-        rows,
-        cls="operations-section",
-    )
+    return rows
 
 
 def _work_recovery_row(item: ActionableWork, csrf_token: str, *, now: datetime) -> object:
-    action = RecoveryAction.RETRY_NOW if item.state == "failed" else RecoveryAction.RECOVER_TERMINAL
     marker = item.retry_at if item.retry_at is not None else item.failed_at
     timing = (
-        "Scheduled retry: ",
+        "Scheduled retry: " if item.retry_at is not None else "Terminal since: ",
         timestamp(marker, now=now),
+    )
+    help_text = (
+        "Sends it back to the worker on the next tick."
+        if item.state == "failed"
+        else "Re-runs it with a fresh attempt budget. Past decisions stay put."
     )
     return Li(
         Div(
@@ -1883,11 +2034,30 @@ def _work_recovery_row(item: ActionableWork, csrf_token: str, *, now: datetime) 
         Small(str(item.job_id), cls="recovery-id"),
         P(item.failure_summary),
         Small(*timing),
+        P(help_text, cls="operations-muted"),
+        Div(
+            _recovery_form(item, csrf_token),
+            _dismiss_form(item, csrf_token, DismissalAction.DISMISS, "Dismiss")
+            if item.state == "terminal_error"
+            else None,
+            cls="schedule-actions",
+        ),
+    )
+
+
+def _dismissed_row(item: ActionableWork, csrf_token: str, *, now: datetime) -> object:
+    return Li(
+        Div(
+            Strong("Terminal"),
+            Span(f"Attempt {item.attempt_count}", cls="run-status"),
+        ),
+        Small(str(item.job_id), cls="recovery-id"),
+        P(item.failure_summary),
+        Small("Terminal since: ", timestamp(item.failed_at, now=now)),
         Form(
             Input(type="hidden", name="csrf_token", value=csrf_token),
             Input(type="hidden", name="job_id", value=str(item.job_id)),
-            Input(type="hidden", name="action", value=action.value),
-            Input(type="hidden", name="expected_state", value=item.state),
+            Input(type="hidden", name="action", value=DismissalAction.UNDO_DISMISS.value),
             Input(
                 type="hidden",
                 name="expected_attempt_count",
@@ -1898,14 +2068,60 @@ def _work_recovery_row(item: ActionableWork, csrf_token: str, *, now: datetime) 
                 name="idempotency_key",
                 value=secrets.token_urlsafe(32),
             ),
-            Button(
-                "Retry now" if action is RecoveryAction.RETRY_NOW else "Recover terminal work",
-                type="submit",
-                cls="operation-button",
-            ),
-            action="/operations/recovery",
+            Button("Undo dismissal", type="submit", cls="operation-button secondary"),
+            action="/operations/dismiss",
             method="post",
         ),
+    )
+
+
+def _recovery_form(item: ActionableWork, csrf_token: str) -> object:
+    action = RecoveryAction.RETRY_NOW if item.state == "failed" else RecoveryAction.RECOVER_TERMINAL
+    return Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="job_id", value=str(item.job_id)),
+        Input(type="hidden", name="action", value=action.value),
+        Input(type="hidden", name="expected_state", value=item.state),
+        Input(
+            type="hidden",
+            name="expected_attempt_count",
+            value=str(item.attempt_count),
+        ),
+        Input(
+            type="hidden",
+            name="idempotency_key",
+            value=secrets.token_urlsafe(32),
+        ),
+        Button(
+            "Retry now" if action is RecoveryAction.RETRY_NOW else "Recover terminal work",
+            type="submit",
+            cls="operation-button",
+        ),
+        action="/operations/recovery",
+        method="post",
+    )
+
+
+def _dismiss_form(
+    item: ActionableWork, csrf_token: str, action: DismissalAction, label: str
+) -> object:
+    return Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="job_id", value=str(item.job_id)),
+        Input(type="hidden", name="action", value=action.value),
+        Input(
+            type="hidden",
+            name="expected_attempt_count",
+            value=str(item.attempt_count),
+        ),
+        Input(
+            type="hidden",
+            name="idempotency_key",
+            value=secrets.token_urlsafe(32),
+        ),
+        Button(label, type="submit", cls="operation-button secondary"),
+        action="/operations/dismiss",
+        method="post",
     )
 
 

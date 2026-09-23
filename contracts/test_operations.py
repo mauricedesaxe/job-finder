@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from threading import Barrier
 
 import psycopg
@@ -20,12 +20,19 @@ from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.pipeline.state import claim_next_job, prepare_orchestration_run
 from job_finder.review.operations import (
+    DismissalAction,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
     JobReevaluationCommand,
     JobReevaluationKeyConflict,
     OperationsHealth,
     RecoveryAction,
+    WorkDismissalApplied,
+    WorkDismissalCommand,
+    WorkDismissalKeyConflict,
+    WorkDismissalNotFound,
+    WorkDismissalResult,
+    WorkDismissalStaleState,
     WorkRecoveryActiveLease,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
@@ -33,6 +40,7 @@ from job_finder.review.operations import (
     WorkRecoveryResult,
     WorkRecoveryStaleState,
     load_operations_snapshot,
+    dismiss_work,
     recover_work,
     request_job_reevaluation,
 )
@@ -477,6 +485,143 @@ def test_work_recovery_is_atomic_replay_safe_and_preserves_prior_evidence(
                 """,
                 (uuid4(), now),
             )
+
+
+def test_work_dismissal_is_atomic_replay_safe_and_undoable(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    terminal_job_id = uuid4()
+    retrying_job_id = uuid4()
+    terminal_error = {
+        "retryability": "terminal",
+        "code": "invalid_job",
+        "reason": "Job is invalid",
+    }
+    retry_error = {
+        "retryability": "retryable",
+        "code": "provider_timeout",
+        "reason": "Provider did not respond",
+    }
+
+    def dismiss(job_id: UUID, attempt_count: int, key: str) -> WorkDismissalResult:
+        return dismiss_work(
+            connection,
+            WorkDismissalCommand(
+                idempotency_key=key,
+                job_id=job_id,
+                action=DismissalAction.DISMISS,
+                expected_attempt_count=attempt_count,
+                actor="owner",
+                requested_at=now,
+            ),
+        )
+
+    def undo(job_id: UUID, attempt_count: int, key: str) -> WorkDismissalResult:
+        return dismiss_work(
+            connection,
+            WorkDismissalCommand(
+                idempotency_key=key,
+                job_id=job_id,
+                action=DismissalAction.UNDO_DISMISS,
+                expected_attempt_count=attempt_count,
+                actor="owner",
+                requested_at=now + timedelta(minutes=1),
+            ),
+        )
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at, completed_at
+            ) VALUES (%s, %s, 'processing', 'dismissal-contract', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"dismissal:{run_id}", release.id, now - timedelta(hours=1), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/dismiss-terminal', %s, %s),
+                   (%s, 'https://example.com/dismiss-retrying', %s, %s)
+            """,
+            (
+                terminal_job_id,
+                now,
+                now,
+                retrying_job_id,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, attempt_count,
+              retry_at, last_error, last_failed_at, created_at
+            ) VALUES (%s, %s, 'python', 'terminal_error', 3, NULL, %s, %s, %s),
+                     (%s, %s, 'python', 'failed', 1, %s, %s, %s, %s)
+            """,
+            (
+                terminal_job_id,
+                run_id,
+                Jsonb(terminal_error),
+                now - timedelta(hours=1),
+                now - timedelta(hours=1),
+                retrying_job_id,
+                run_id,
+                now + timedelta(hours=2),
+                Jsonb(retry_error),
+                now - timedelta(hours=1),
+                now - timedelta(hours=1),
+            ),
+        )
+
+        before = load_operations_snapshot(connection)
+        assert before.health is OperationsHealth.ACTION_REQUIRED
+        assert before.dismissed_terminal == 0
+
+        applied = dismiss(terminal_job_id, 3, "dismiss-terminal")
+        assert isinstance(applied, WorkDismissalApplied)
+        assert applied.replayed is False
+
+        replayed = dismiss(terminal_job_id, 3, "dismiss-terminal")
+        assert isinstance(replayed, WorkDismissalApplied)
+        assert replayed.replayed is True
+
+        key_conflict = dismiss(retrying_job_id, 3, "dismiss-terminal")
+        assert isinstance(key_conflict, WorkDismissalKeyConflict)
+
+        mid = load_operations_snapshot(connection)
+        assert mid.health is OperationsHealth.CAUGHT_UP
+        assert mid.dismissed_terminal == 1
+        assert mid.actionable_work[0].dismissed is True
+
+        stale_undo = undo(terminal_job_id, 2, "undo-stale")
+        assert isinstance(stale_undo, WorkDismissalStaleState)
+
+        applied_undo = undo(terminal_job_id, 3, "undo-terminal")
+        assert isinstance(applied_undo, WorkDismissalApplied)
+
+        replayed_undo = undo(terminal_job_id, 3, "undo-terminal")
+        assert isinstance(replayed_undo, WorkDismissalApplied)
+        assert replayed_undo.replayed is True
+
+        after = load_operations_snapshot(connection)
+        assert after.health is OperationsHealth.ACTION_REQUIRED
+        assert after.dismissed_terminal == 0
+        assert after.actionable_work[0].dismissed is False
+
+        stale_state = dismiss(retrying_job_id, 1, "dismiss-retrying")
+        assert isinstance(stale_state, WorkDismissalStaleState)
+
+        not_found = dismiss(uuid4(), 0, "dismiss-missing")
+        assert isinstance(not_found, WorkDismissalNotFound)
 
 
 def test_operations_health_follows_real_postgres_state_transitions(
