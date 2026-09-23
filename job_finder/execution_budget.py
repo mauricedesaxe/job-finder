@@ -74,6 +74,14 @@ class ExecutionBlocked(ExecutionBudgetModel):
 
 ExecutionAdmission: TypeAlias = ExecutionAdmitted | ExecutionBlocked
 
+_SCHEDULABLE_ONBOARDING_STAGES = frozenset(
+    {OnboardingStage.COMPLETE, OnboardingStage.LEGACY_OWNER_IMPORT}
+)
+
+
+def owner_may_run_scheduled_execution(stage: OnboardingStage | None) -> bool:
+    return stage in _SCHEDULABLE_ONBOARDING_STAGES
+
 
 @dataclass(frozen=True)
 class BudgetSetupService:
@@ -251,7 +259,9 @@ def admit_scheduled_execution(
         owner_row = connection.execute(
             "SELECT stage FROM owner_onboarding WHERE singleton_id = 1 FOR UPDATE"
         ).fetchone()
-        if owner_row is None or OnboardingStage(str(owner_row[0])) is not OnboardingStage.COMPLETE:
+        if owner_row is None or not owner_may_run_scheduled_execution(
+            OnboardingStage(str(owner_row[0]))
+        ):
             return ExecutionBlocked(reason="onboarding_incomplete")
         existing = connection.execute(
             """

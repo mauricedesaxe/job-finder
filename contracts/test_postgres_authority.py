@@ -254,6 +254,7 @@ EXPECTED_MIGRATIONS = (
     "0029_owner_onboarding.sql",
     "0030_provider_credentials.sql",
     "0031_execution_budget.sql",
+    "0032_legacy_execution_budget.sql",
 )
 
 
@@ -339,11 +340,6 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     assert service.authenticate("legacy secure owner password") is True
     assert service.authenticate("different owner password") is False
     with _connection(authority_schema) as connection:
-        assert admit_scheduled_execution(
-            connection,
-            idempotency_key="legacy-without-budget",
-            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
-        ) == ExecutionBlocked(reason="budget_not_configured")
         _ = _seed_initial_configuration_publication(connection, datetime(2026, 9, 22, tzinfo=UTC))
         _ = connection.execute(
             """
@@ -356,8 +352,13 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
                 datetime(2026, 9, 22, tzinfo=UTC),
             ),
         )
+        assert admit_scheduled_execution(
+            connection,
+            idempotency_key="legacy-without-owner-budget",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        ) == ExecutionAdmitted(max_jobs=100)
     budget_result = postgres_budget_setup_service(lambda: _connection(authority_schema)).save(
-        0,
+        1,
         Decimal("20"),
         Decimal("2"),
         25,
@@ -945,7 +946,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
         with pytest.raises(psycopg.errors.CheckViolation, match="review_events_note_check"):
             record_review(connection, long_note)
 
-        assert apply_migrations(connection)[-9:] == (
+        assert apply_migrations(connection)[-10:] == (
             "0023_unbounded_review_event_notes.sql",
             "0024_evaluation_run_executions.sql",
             "0025_release_target_promotion_decisions.sql",
@@ -955,6 +956,7 @@ def test_unbounded_review_note_migration_preserves_feedback_and_accepts_long_not
             "0029_owner_onboarding.sql",
             "0030_provider_credentials.sql",
             "0031_execution_budget.sql",
+            "0032_legacy_execution_budget.sql",
         )
         saved_long = record_review(connection, long_note)
         assert isinstance(saved_long, ReviewSaved)
