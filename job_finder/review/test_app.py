@@ -70,6 +70,7 @@ from job_finder.review.operations import (
     JobReevaluationResult,
     OperationsHealth,
     OperationsService,
+    PipelineRunStatus,
     OperationsSnapshot,
     PipelineRunSummary,
     QueueCounts,
@@ -80,6 +81,9 @@ from job_finder.review.operations import (
     WorkDismissalCommand,
     WorkDismissalReceipt,
     WorkDismissalResult,
+    RunDetail,
+    RunListItem,
+    RunsService,
     WorkItemState,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
@@ -1775,6 +1779,7 @@ def _client(
     submit: Submitter = _saved,
     *,
     operations: OperationsService | None = None,
+    runs: RunsService | None = None,
     controls: ControlPlaneService | None = None,
 ) -> TestClient:
     service = ReviewService(review_queue=lambda: queue, submit=submit)
@@ -1785,6 +1790,7 @@ def _client(
             SETTINGS,
             owner_access_service=OWNER_ACCESS,
             operations_service=operations,
+            runs_service=runs,
             control_service=controls,
             now=lambda: NOW,
         )
@@ -2034,6 +2040,68 @@ def test_dismissal_requires_csrf_before_calling_the_service() -> None:
 
     assert response.status_code == 403
     assert calls == []
+
+
+def _run_item(
+    *,
+    value: int = 1,
+    kind: str = "orchestration",
+    status: PipelineRunStatus = "completed",
+    idle: bool = False,
+) -> RunListItem:
+    return RunListItem(
+        id=UUID(int=value),
+        kind=kind,
+        status=status,
+        started_at=NOW,
+        completed_at=NOW if status != "running" else None,
+        discoveries=0 if idle else 4,
+        processing_attempts=0 if idle else 5,
+        processed_jobs=0 if idle else 3,
+        model_calls=0 if idle else 2,
+        known_cost_usd=Decimal("0.5010") if not idle else Decimal(0),
+        error_summary=None,
+    )
+
+
+def test_the_runs_page_labels_idle_ticks_and_links_runs() -> None:
+    runs = RunsService(
+        list=lambda _limit: (_run_item(value=1, idle=True), _run_item(value=2, kind="discovery")),
+        detail=lambda _run_id: RunDetail(
+            item=_run_item(value=2, kind="discovery"),
+            parameters={},
+            unknown_cost_calls=1,
+            keywords=(),
+            attempts=(),
+            models=(),
+            decisions=(),
+        ),
+    )
+    client = _client(_queue(), runs=runs)
+
+    listing = client.get("/operations/runs")
+
+    assert listing.status_code == 200
+    assert "Idle tick — nothing was due." in listing.text
+    assert "4 discovered · 3 processed · 2 model calls" in listing.text
+    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
+
+    detail = client.get("/operations/runs/00000000-0000-0000-0000-000000000002")
+
+    assert detail.status_code == 200
+    assert "Discovery" in detail.text
+    assert "No jobs were discovered by this run." in detail.text
+    assert "1 call returned no usage, so it has no recorded cost." in detail.text
+    assert 'href="/operations/runs"' in detail.text
+
+
+def test_an_unknown_run_id_renders_the_not_found_page() -> None:
+    client = _client(_queue(), runs=RunsService())
+
+    response = client.get("/operations/runs/not-a-uuid")
+
+    assert response.status_code == 404
+    assert "Run not found" in response.text
 
 
 def _applied_dismissal(command: WorkDismissalCommand) -> WorkDismissalApplied:

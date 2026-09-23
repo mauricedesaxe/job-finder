@@ -32,6 +32,7 @@ from job_finder.review.operations import (
     WorkDismissalKeyConflict,
     WorkDismissalNotFound,
     WorkDismissalResult,
+    RunNotFound,
     WorkDismissalStaleState,
     WorkRecoveryActiveLease,
     WorkRecoveryApplied,
@@ -40,6 +41,8 @@ from job_finder.review.operations import (
     WorkRecoveryResult,
     WorkRecoveryStaleState,
     load_operations_snapshot,
+    load_pipeline_runs,
+    load_run_detail,
     dismiss_work,
     recover_work,
     request_job_reevaluation,
@@ -1018,3 +1021,131 @@ def _connection(
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
         yield connection
+
+
+def test_pipeline_run_reads_expose_counts_costs_and_children(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    idle_run_id = uuid4()
+    job_id = uuid4()
+    attempt_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        prompt_name, prompt_version_id = connection.execute(
+            """
+            SELECT prompt_name, prompt_version_id
+            FROM prompt_release_members
+            WHERE release_id = %s
+            ORDER BY prompt_name
+            LIMIT 1
+            """,
+            (release.id,),
+        ).fetchone() or pytest.fail("bootstrap release has no members")
+        for run, key, started, completed, kind in (
+            (
+                run_id,
+                f"runs:{run_id}",
+                now - timedelta(minutes=10),
+                now - timedelta(minutes=9),
+                "orchestration",
+            ),
+            (
+                idle_run_id,
+                f"runs:{idle_run_id}",
+                now - timedelta(minutes=5),
+                now - timedelta(minutes=5),
+                "orchestration",
+            ),
+        ):
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref, prompt_release_id,
+                  parameters, status, started_at, completed_at
+                ) VALUES (%s, %s, %s, 'runs-contract', %s, '{"source": "contract"}'::jsonb,
+                  'completed', %s, %s)
+                """,
+                (run, key, kind, release.id, started, completed),
+            )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/runs-contract', %s, %s)
+            """,
+            (job_id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_discoveries (pipeline_run_id, job_id, keyword, domain, discovered_at)
+            VALUES (%s, %s, 'python', 'example.com', %s)
+            """,
+            (run_id, job_id, now - timedelta(minutes=10)),
+        )
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, job_id, operation_key, attempt_number,
+              input_digest, status, started_at, completed_at
+            ) VALUES (%s, %s, %s, 'evaluation', 0, %s, 'completed', %s, %s)
+            """,
+            (
+                attempt_id,
+                run_id,
+                job_id,
+                "c" * 64,
+                now - timedelta(minutes=9),
+                now - timedelta(minutes=9),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_call_attempts (
+              id, processing_attempt_id, pipeline_run_id, prompt_release_id,
+              request_id, attempt_number, operation_key, prompt_name,
+              prompt_version_id, input_digest, requested_model, provider,
+              status, parsed_output, raw_response, input_tokens, output_tokens,
+              cost_usd, latency_ms, observed_at, response_model, request_messages
+            ) VALUES (
+              %s, %s, %s, %s, %s, 0, 'evaluation', %s, %s, %s,
+              'test-model', 'typesafe', 'accepted', '{}'::jsonb, '{}'::jsonb,
+              10, 5, 0.25000000, 40, %s, 'test-model', '[]'::jsonb
+            )
+            """,
+            (
+                uuid4(),
+                attempt_id,
+                run_id,
+                release.id,
+                "d" * 64,
+                prompt_name,
+                prompt_version_id,
+                "c" * 64,
+                now - timedelta(minutes=9),
+            ),
+        )
+
+        items = load_pipeline_runs(connection, limit=10)
+        by_id = {item.id: item for item in items}
+        working = by_id[run_id]
+        idle = by_id[idle_run_id]
+        assert working.idle_tick is False
+        assert working.discoveries == 1
+        assert working.processed_jobs == 1
+        assert working.model_calls == 1
+        assert working.known_cost_usd == Decimal("0.25")
+        assert idle.idle_tick is True
+
+        detail = load_run_detail(connection, run_id)
+        assert detail.item.model_calls == 1
+        assert detail.unknown_cost_calls == 0
+        assert detail.keywords[0].keyword == "python"
+        assert detail.models[0].model == "test-model"
+        assert detail.models[0].known_cost_usd == Decimal("0.25")
+        assert detail.models[0].max_latency_ms == 40
+
+        with pytest.raises(RunNotFound):
+            load_run_detail(connection, uuid4())

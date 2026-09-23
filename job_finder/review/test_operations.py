@@ -9,6 +9,7 @@ import pytest
 from job_finder.review.operations import (
     ActionableWork,
     JobReevaluationCommand,
+    RunListItem,
     OperationsHealth,
     OperationsSnapshot,
     OperationsUnavailable,
@@ -194,3 +195,24 @@ def test_a_snapshot_rejects_more_dismissals_than_terminal_work() -> None:
             failures=(),
             dismissed_terminal=2,
         )
+
+
+def test_completed_orchestration_runs_without_work_are_idle_ticks() -> None:
+    def item(discoveries: int, processing_attempts: int) -> RunListItem:
+        return RunListItem(
+            id=UUID(int=1),
+            kind="orchestration",
+            status="completed",
+            started_at=NOW,
+            completed_at=NOW,
+            discoveries=discoveries,
+            processing_attempts=processing_attempts,
+            processed_jobs=0,
+            model_calls=0,
+            known_cost_usd=Decimal(0),
+            error_summary=None,
+        )
+
+    assert item(0, 0).idle_tick is True
+    assert item(2, 0).idle_tick is False
+    assert item(0, 1).idle_tick is False
