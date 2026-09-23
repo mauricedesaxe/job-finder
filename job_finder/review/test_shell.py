@@ -1,3 +1,4 @@
+# pyright: reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false
 from __future__ import annotations
 
 from datetime import UTC, datetime
