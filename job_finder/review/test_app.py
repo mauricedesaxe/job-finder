@@ -62,6 +62,7 @@ from job_finder.review.models import (
 )
 from job_finder.review.operations import (
     ActionableWork,
+    DismissalAction,
     FailureSample,
     JobReevaluationAccepted,
     JobReevaluationCommand,
@@ -75,6 +76,10 @@ from job_finder.review.operations import (
     RecoveryAction,
     RecoveryOutcome,
     SpendSummary,
+    WorkDismissalApplied,
+    WorkDismissalCommand,
+    WorkDismissalReceipt,
+    WorkDismissalResult,
     WorkItemState,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
@@ -220,7 +225,7 @@ def test_the_old_review_url_redirects_to_the_landing_page() -> None:
     assert response.headers["location"] == "/"
 
 
-def test_the_operations_home_renders_bounded_recovery_commands() -> None:
+def test_the_failures_page_renders_bounded_recovery_commands() -> None:
     snapshot = OperationsSnapshot(
         health=OperationsHealth.ACTION_REQUIRED,
         queues=QueueCounts(retrying=1, terminal_error=1),
@@ -249,12 +254,15 @@ def test_the_operations_home_renders_bounded_recovery_commands() -> None:
     )
     client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
 
-    response = client.get("/operations")
+    response = client.get("/operations/failures")
 
     assert response.status_code == 200
     assert response.text.count('action="/operations/recovery"') == 2
+    assert response.text.count('action="/operations/dismiss"') == 1
     assert "Retry now" in response.text
     assert "Recover terminal work" in response.text
+    assert "Dismiss" in response.text
+    assert "Re-runs it with a fresh attempt budget. Past decisions stay put." in response.text
     assert 'name="expected_attempt_count" value="2"' in response.text
     assert "Showing the newest 2 of 5" in response.text
 
@@ -393,6 +401,7 @@ def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
         "/operations/run",
         "/operations/schedule",
         "/operations/recovery",
+        "/operations/dismiss",
         "/operations/reevaluation",
     ],
 )
@@ -407,6 +416,7 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
         load=lambda: _operations_snapshot(),
         recover=lambda command: calls.append(command) or _applied_recovery(command),
         reevaluate=lambda command: calls.append(command) or _accepted_reevaluation(command),
+        dismiss=lambda command: calls.append(command) or _applied_dismissal(command),
     )
     app = create_review_app(
         ReviewService(review_queue=lambda: _queue(), submit=_saved),
@@ -669,7 +679,7 @@ def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/operations?notice=work-retried"
+    assert response.headers["location"] == "/operations/failures?notice=work-retried"
     assert calls == [
         WorkRecoveryCommand(
             idempotency_key="private-key",
@@ -1905,6 +1915,142 @@ def _operations_snapshot() -> OperationsSnapshot:
         spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
         recent_runs=(),
         failures=(),
+    )
+
+
+def test_the_failures_page_separates_dismissed_work_and_offers_undo() -> None:
+    snapshot = OperationsSnapshot(
+        health=OperationsHealth.CAUGHT_UP,
+        queues=QueueCounts(completed=9, terminal_error=1),
+        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
+        recent_runs=(),
+        failures=(),
+        actionable_work=(
+            ActionableWork(
+                job_id=UUID(int=32),
+                state="terminal_error",
+                attempt_count=3,
+                retry_at=None,
+                failed_at=NOW,
+                failure_summary="invalid_job: Job is invalid",
+                dismissed=True,
+            ),
+        ),
+        actionable_work_total=1,
+        dismissed_terminal=1,
+    )
+    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+
+    response = client.get("/operations/failures")
+
+    assert response.status_code == 200
+    assert "Dismissed" in response.text
+    assert "1 dismissed" in response.text
+    assert "Undo dismissal" in response.text
+    assert 'name="action" value="undo_dismiss"' in response.text
+    assert "No failed work needs recovery." in response.text
+
+
+def test_dismissal_passes_an_exact_typed_command_and_redirects() -> None:
+    calls: list[WorkDismissalCommand] = []
+
+    def dismiss(command: WorkDismissalCommand) -> WorkDismissalResult:
+        calls.append(command)
+        return _applied_dismissal(command)
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), dismiss=dismiss),
+    )
+
+    response = client.post(
+        "/operations/dismiss",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=32)),
+            "action": "dismiss",
+            "expected_attempt_count": "3",
+            "idempotency_key": "private-key",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/operations/failures?notice=work-dismissed"
+    assert calls == [
+        WorkDismissalCommand(
+            idempotency_key="private-key",
+            job_id=UUID(int=32),
+            action=DismissalAction.DISMISS,
+            expected_attempt_count=3,
+            actor="owner",
+            requested_at=NOW,
+        )
+    ]
+
+
+def test_dismiss_undo_redirects_with_its_own_notice() -> None:
+    client = _client(
+        _queue(),
+        operations=OperationsService(
+            load=lambda: _operations_snapshot(),
+            dismiss=lambda command: _applied_dismissal(command),
+        ),
+    )
+
+    response = client.post(
+        "/operations/dismiss",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=32)),
+            "action": "undo_dismiss",
+            "expected_attempt_count": "3",
+            "idempotency_key": "private-key",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/operations/failures?notice=dismiss-undone"
+
+
+def test_dismissal_requires_csrf_before_calling_the_service() -> None:
+    calls: list[WorkDismissalCommand] = []
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        dismiss=lambda command: calls.append(command) or _applied_dismissal(command),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.post(
+        "/operations/dismiss",
+        data={
+            "job_id": str(UUID(int=32)),
+            "action": "dismiss",
+            "expected_attempt_count": "3",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+def _applied_dismissal(command: WorkDismissalCommand) -> WorkDismissalApplied:
+    return WorkDismissalApplied(
+        receipt=WorkDismissalReceipt(
+            idempotency_key=command.idempotency_key,
+            job_id=command.job_id,
+            action=command.action,
+            expected_attempt_count=command.expected_attempt_count,
+            actor=command.actor,
+            requested_at=command.requested_at,
+            outcome="applied",
+            prior_state="terminal_error",
+            prior_attempt_count=command.expected_attempt_count,
+            resulting_attempt_count=command.expected_attempt_count,
+        ),
+        replayed=False,
     )
 
 

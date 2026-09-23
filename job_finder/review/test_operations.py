@@ -171,3 +171,26 @@ def test_reevaluation_command_requires_exact_content_identities() -> None:
             actor="owner",
             requested_at=NOW,
         )
+
+
+def test_dismissed_terminal_work_does_not_require_action_by_itself() -> None:
+    assert (
+        operations_health(QueueCounts(terminal_error=2), (), dismissed_terminal=2)
+        is OperationsHealth.CAUGHT_UP
+    )
+    assert (
+        operations_health(QueueCounts(terminal_error=2), (), dismissed_terminal=1)
+        is OperationsHealth.ACTION_REQUIRED
+    )
+
+
+def test_a_snapshot_rejects_more_dismissals_than_terminal_work() -> None:
+    with pytest.raises(ValueError):
+        OperationsSnapshot(
+            health=operations_health(QueueCounts(terminal_error=1), (), 2),
+            queues=QueueCounts(terminal_error=1),
+            spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
+            recent_runs=(),
+            failures=(),
+            dismissed_terminal=2,
+        )
