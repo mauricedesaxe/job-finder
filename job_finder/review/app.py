@@ -2175,11 +2175,7 @@ def _reevaluation_form(item: ReviewItem, csrf_token: str) -> object:
         Button(
             "Re-evaluate this job",
             type="submit",
-            cls="operation-button secondary",
-        ),
-        P(
-            "Runs this saved snapshot against the current release without changing prior history.",
-            cls="operation-help",
+            cls="decision",
         ),
         action="/operations/reevaluation",
         method="post",
@@ -2574,6 +2570,8 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 }
 .eyebrow { display: block; margin-bottom: 0.7rem; }
 .review-shell { width: min(100% - 2rem, 1180px); margin: 0 auto; padding: 1.25rem 0 5rem; }
+.reevaluation-form { margin-top: 1.25rem; }
+.reevaluation-form > .decision { width: 100%; }
 .app-shell { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
 .app-content { min-width: 0; }
 .sidebar { position: sticky; top: 0; display: flex; flex-direction: column; align-self: start; height: 100vh; border-right: 2px solid var(--line); background: var(--panel); }

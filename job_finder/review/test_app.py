@@ -747,7 +747,7 @@ def test_job_detail_renders_an_exact_append_only_reevaluation_form() -> None:
     assert f'name="expected_decision_id" value="{item.evaluation_id}"' in response.text
     assert f'name="expected_snapshot_id" value="{item.snapshot_id}"' in response.text
     assert 'name="idempotency_key"' in response.text
-    assert "without changing prior history" in response.text
+    assert "without changing prior history" not in response.text
 
 
 def test_job_reevaluation_requires_csrf_before_calling_the_service() -> None:
