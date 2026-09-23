@@ -122,6 +122,10 @@ from job_finder.review.operations import (
     OperationsUnavailable,
     PipelineRunSummary,
     RecoveryAction,
+    RunDetail,
+    RunListItem,
+    RunNotFound,
+    RunsService,
     WorkDismissalApplied,
     WorkDismissalActiveLease,
     WorkDismissalCommand,
@@ -211,11 +215,13 @@ def create_review_app(
     budget_setup_service: BudgetSetupService | None = None,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
+    runs_service: RunsService | None = None,
     control_service: ControlPlaneService | None = None,
     actor: str = "owner",
     now: DateTimeClock = lambda: datetime.now(UTC),
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
+    runs = runs_service or RunsService()
     controls = control_service or unavailable_control_plane_service()
 
     def require_owner(request: Request) -> Response | None:
@@ -732,6 +738,60 @@ def create_review_app(
                 return _work_recovery_not_found_response()
             case _:
                 assert_never(result)
+
+    @app.route("/operations/runs", methods=["GET"])
+    def pipeline_runs_page(request: Request) -> HTMLResponse:
+        try:
+            run_items = runs.list(50)
+        except psycopg.Error:
+            return _state_response(
+                "Pipeline runs are unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        return HTMLResponse(
+            _document(
+                sidebar_page(
+                    "operations",
+                    csrf_token,
+                    _runs_page(run_items, now=now()),
+                ),
+                title="Pipeline runs",
+            )
+        )
+
+    @app.route("/operations/runs/{run_id}", methods=["GET"])
+    def run_detail_page(run_id: str, request: Request) -> HTMLResponse:
+        try:
+            parsed_id = UUID(run_id)
+        except ValueError:
+            return _run_not_found_response()
+        try:
+            detail = runs.detail(parsed_id)
+        except RunNotFound:
+            return _run_not_found_response()
+        except psycopg.Error:
+            return _state_response(
+                "Pipeline runs are unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        return HTMLResponse(
+            _document(
+                sidebar_page(
+                    "operations",
+                    csrf_token,
+                    _run_detail_page(detail, now=now()),
+                ),
+                title="Pipeline run",
+            )
+        )
 
     @app.route("/operations/failures", methods=["GET"])
     def failures_page(request: Request) -> HTMLResponse:
@@ -1914,8 +1974,14 @@ def _run_row(run: PipelineRunSummary, *, now: datetime) -> object:
     else:
         timing = (timestamp(run.started_at, now=now),)
     return Li(
-        Div(Strong(run.kind.replace("_", " ").title()), Span(run.status, cls="run-status")),
-        Small(*timing),
+        A(
+            Div(
+                Strong(run.kind.replace("_", " ").title()),
+                Span(run.status, cls="run-status"),
+            ),
+            Small(*timing),
+            href=f"/operations/runs/{run.id}",
+        ),
     )
 
 
@@ -2122,6 +2188,201 @@ def _dismiss_form(
         Button(label, type="submit", cls="operation-button secondary"),
         action="/operations/dismiss",
         method="post",
+    )
+
+
+def _runs_page(items: tuple[RunListItem, ...], *, now: datetime) -> object:
+    return Div(
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1("Pipeline runs"),
+            P(
+                "Every scheduled and on-demand run. A 0-second orchestration tick "
+                + "is an idle tick — nothing was due.",
+                cls="operations-intro",
+            ),
+            cls="operations-header",
+        ),
+        Div(
+            Small("Latest runs", cls="eyebrow"),
+            H2("Runs"),
+            Ul(
+                *(_run_list_row(item, now=now) for item in items),
+                cls="operations-list run-list",
+            )
+            if items
+            else P("No pipeline runs recorded.", cls="operations-empty"),
+            cls="operations-section",
+        ),
+        cls="review-shell operations-shell",
+    )
+
+
+def _run_list_row(item: RunListItem, *, now: datetime) -> object:
+    timing = (timestamp(item.started_at, now=now),)
+    if item.completed_at is not None:
+        elapsed = max(0, int((item.completed_at - item.started_at).total_seconds()))
+        timing = (timestamp(item.started_at, now=now), f" · {_format_duration(elapsed)}")
+    headline = (
+        "Idle tick — nothing was due."
+        if item.idle_tick
+        else " · ".join(
+            (
+                f"{item.discoveries} discovered",
+                f"{item.processed_jobs} processed",
+                f"{item.model_calls} model calls",
+            )
+        )
+    )
+    return Li(
+        A(
+            Div(
+                Div(
+                    Strong(item.kind.replace("_", " ").title()),
+                    Span(item.status, cls="run-status"),
+                ),
+                Small(*timing),
+                P(headline, cls="operations-muted"),
+                Div(Strong("Open run →"), cls="run-link-hint"),
+                cls="run-row",
+            ),
+            href=f"/operations/runs/{item.id}",
+            cls="run-link",
+        ),
+    )
+
+
+def _run_detail_page(detail: RunDetail, *, now: datetime) -> object:
+    item = detail.item
+    timing = (timestamp(item.started_at, now=now),)
+    if item.completed_at is not None:
+        elapsed = max(0, int((item.completed_at - item.started_at).total_seconds()))
+        timing = (timestamp(item.started_at, now=now), f" · {_format_duration(elapsed)}")
+    return Div(
+        Div(
+            Small("Pipeline run", cls="eyebrow"),
+            H1(item.kind.replace("_", " ").title()),
+            P(
+                Span(item.status, cls="run-status"),
+                " · ",
+                *timing,
+                cls="operations-intro",
+            ),
+            P(
+                "Idle tick — nothing was due, so this run completed instantly."
+                if item.idle_tick
+                else " · ".join(
+                    (
+                        f"{item.discoveries} jobs discovered",
+                        f"{item.processed_jobs} jobs processed",
+                        f"{item.model_calls} model calls",
+                        f"${item.known_cost_usd:,.4f} recorded spend",
+                    )
+                ),
+                cls="operations-muted",
+            ),
+            P(item.error_summary, cls="operations-notice") if item.error_summary else None,
+            A("← All runs", href="/operations/runs", cls="back-link"),
+            cls="operations-header",
+        ),
+        Div(
+            Small("Search keywords", cls="eyebrow"),
+            H2("Discoveries"),
+            Ul(
+                *(
+                    Li(Div(Strong(k.keyword), Span(f"{k.jobs} jobs")), cls="discovery-row")
+                    for k in detail.keywords
+                ),
+                cls="operations-list",
+            )
+            if detail.keywords
+            else P("No jobs were discovered by this run.", cls="operations-empty"),
+            cls="operations-section",
+        ),
+        Div(
+            Small("Per model and outcome", cls="eyebrow"),
+            H2("Model calls"),
+            Ul(
+                *(
+                    Li(
+                        Div(
+                            Div(
+                                Strong(m.model),
+                                Span(m.status, cls="run-status"),
+                            ),
+                            Small(
+                                f"{m.calls} calls · {m.input_tokens} in / {m.output_tokens} out"
+                                + f" · up to {m.max_latency_ms} ms · ${m.known_cost_usd:,.4f}"
+                            ),
+                        )
+                        for m in detail.models
+                    ),
+                ),
+                cls="operations-list",
+            )
+            if detail.models
+            else P("No model calls were made by this run.", cls="operations-empty"),
+            P(
+                _count_phrase(
+                    detail.unknown_cost_calls,
+                    "call returned no usage, so it has no recorded cost.",
+                    "calls returned no usage, so they have no recorded cost.",
+                ),
+                cls="operations-muted",
+            )
+            if detail.unknown_cost_calls
+            else None,
+            cls="operations-section",
+        ),
+        Div(
+            Small("Decisions recorded by this run", cls="eyebrow"),
+            H2("Decisions"),
+            Ul(
+                *(Li(Div(Strong(d.outcome.title()), Span(str(d.count)))) for d in detail.decisions),
+                cls="operations-list",
+            )
+            if detail.decisions
+            else P("No decisions were recorded by this run.", cls="operations-empty"),
+            cls="operations-section",
+        ),
+        Div(
+            Small("Up to 200 attempts", cls="eyebrow"),
+            H2("Processing attempts"),
+            Ul(
+                *(
+                    Li(
+                        Div(
+                            Div(
+                                Strong(a.operation_key),
+                                Span(
+                                    f"attempt {a.attempt_number} · {a.status}",
+                                    cls="run-status",
+                                ),
+                            ),
+                            Small(str(a.job_id), cls="recovery-id")
+                            if a.job_id is not None
+                            else None,
+                            P(a.error_summary, cls="operations-muted") if a.error_summary else None,
+                        )
+                        for a in detail.attempts
+                    ),
+                ),
+                cls="operations-list",
+            )
+            if detail.attempts
+            else P("No processing attempts were recorded by this run.", cls="operations-empty"),
+            cls="operations-section",
+        ),
+        cls="review-shell operations-shell",
+    )
+
+
+def _run_not_found_response() -> HTMLResponse:
+    return _state_response(
+        "Run not found",
+        "This pipeline run does not exist.",
+        action=A("Back to the runs", href="/operations/runs", cls="retry"),
+        status_code=404,
     )
 
 
@@ -2901,6 +3162,11 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-list li > div { display: flex; justify-content: space-between; gap: 1rem; }
 .operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
 .run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
+.run-link { display: block; text-decoration: none; }
+.run-link:hover, .run-link:focus-visible { background: var(--acid); color: var(--accent-ink); }
+.run-row { display: grid; gap: 0.2rem; }
+.run-link-hint { font-weight: 900; font-size: 0.8rem; }
+.discovery-row > div { display: flex; justify-content: space-between; gap: 1rem; }
 .failure-list p { margin-bottom: 0; overflow-wrap: anywhere; }
 .schedule-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
 .schedule-list > li { padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
