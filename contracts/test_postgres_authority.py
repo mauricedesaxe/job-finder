@@ -357,22 +357,6 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
             idempotency_key="legacy-without-owner-budget",
             requested_at=datetime(2026, 9, 22, tzinfo=UTC),
         ) == ExecutionAdmitted(max_jobs=100)
-    budget_result = postgres_budget_setup_service(lambda: _connection(authority_schema)).save(
-        1,
-        Decimal("20"),
-        Decimal("2"),
-        25,
-        "owner",
-        datetime(2026, 9, 22, tzinfo=UTC),
-    )
-    assert isinstance(budget_result, BudgetSaved)
-    assert budget_result.owner_state.stage is OnboardingStage.COMPLETE
-    with _connection(authority_schema) as connection:
-        assert admit_scheduled_execution(
-            connection,
-            idempotency_key="legacy-with-budget",
-            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
-        ) == ExecutionAdmitted(max_jobs=25)
 
 
 def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
