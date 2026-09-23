@@ -603,7 +603,8 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
         # only removes its ACTION_REQUIRED contribution
         assert mid.health is OperationsHealth.WORKING
         assert mid.dismissed_terminal == 1
-        assert mid.actionable_work[0].dismissed is True
+        mid_terminal = next(item for item in mid.actionable_work if item.state == "terminal_error")
+        assert mid_terminal.dismissed is True
 
         stale_undo = undo(terminal_job_id, 2, "undo-stale")
         assert isinstance(stale_undo, WorkDismissalStaleState)
@@ -618,7 +619,10 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
         after = load_operations_snapshot(connection)
         assert after.health is OperationsHealth.ACTION_REQUIRED
         assert after.dismissed_terminal == 0
-        assert after.actionable_work[0].dismissed is False
+        after_terminal = next(
+            item for item in after.actionable_work if item.state == "terminal_error"
+        )
+        assert after_terminal.dismissed is False
 
         stale_state = dismiss(retrying_job_id, 1, "dismiss-retrying")
         assert isinstance(stale_state, WorkDismissalStaleState)
