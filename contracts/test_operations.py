@@ -563,9 +563,9 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
             """
             INSERT INTO job_work_items (
               job_id, discovery_run_id, keyword, state, attempt_count,
-              retry_at, last_error, last_failed_at, created_at
-            ) VALUES (%s, %s, 'python', 'terminal_error', 3, NULL, %s, %s, %s),
-                     (%s, %s, 'python', 'failed', 1, %s, %s, %s, %s)
+              retry_at, last_error, last_failed_at, created_at, completed_at
+            ) VALUES (%s, %s, 'python', 'terminal_error', 3, NULL, %s, %s, %s, %s),
+                     (%s, %s, 'python', 'failed', 1, %s, %s, %s, %s, NULL)
             """,
             (
                 terminal_job_id,
@@ -573,6 +573,7 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
                 Jsonb(terminal_error),
                 now - timedelta(hours=1),
                 now - timedelta(hours=1),
+                now - timedelta(minutes=5),
                 retrying_job_id,
                 run_id,
                 now + timedelta(hours=2),
