@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from typing import Literal
 
 from fasthtml.common import (
     A,
@@ -57,6 +56,7 @@ from job_finder.configuration_service import (
     validate_search_configuration,
 )
 from job_finder.discovery.catalog import SupportedSearchSource
+from job_finder.review.shell import sidebar_page
 from job_finder.search_configuration import (
     Connection,
     SearchConfiguration,
@@ -233,32 +233,6 @@ def transform_rows(raw: RawConfigurationForm, action: str) -> RawConfigurationFo
     return replace(raw, target_profiles=_transform(raw.target_profiles, index, direction))
 
 
-def authenticated_masthead(
-    csrf_token: str, *, current: Literal["operations", "review", "configuration"]
-) -> object:
-    return Div(
-        Div(Strong("JF", cls="wordmark"), Small("Owner workbench", cls="masthead-label")),
-        Nav(
-            A("Operations", href="/", aria_current="page" if current == "operations" else None),
-            A("Review", href="/review", aria_current="page" if current == "review" else None),
-            A(
-                "Search setup",
-                href="/configuration",
-                aria_current="page" if current == "configuration" else None,
-            ),
-            aria_label="Owner workbench",
-            cls="masthead-nav",
-        ),
-        Form(
-            Input(type="hidden", name="csrf_token", value=csrf_token),
-            Button("Sign out", type="submit", cls="logout"),
-            action="/logout",
-            method="post",
-        ),
-        cls="masthead",
-    )
-
-
 def configuration_page(
     state: ConfigurationEditorState,
     raw: RawConfigurationForm,
@@ -274,83 +248,86 @@ def configuration_page(
     expanded_rows = expanded or frozenset()
     issues = () if validation is None else validation.issues
     dirty = raw != RawConfigurationForm.from_draft(state.draft)
-    return Section(
-        authenticated_masthead(csrf_token, current="configuration"),
-        Div(
-            Small("Search setup", cls="eyebrow"),
-            H1("Shape the search, then publish on purpose."),
+    return sidebar_page(
+        "configuration",
+        csrf_token,
+        Section(
+            Div(
+                Small("Search setup", cls="eyebrow"),
+                H1("Shape the search, then publish on purpose."),
+                P(
+                    "Edit and preview freely. Saving updates the shared draft. "
+                    + "Publishing freezes that saved draft, and activation is a separate choice.",
+                    cls="configuration-intro",
+                ),
+                cls="configuration-header",
+            ),
+            _notice(notice) if notice else None,
+            P(alert, cls="configuration-alert", role="alert") if alert else None,
+            _validation_alert(validation) if validation else None,
             P(
-                "Edit and preview freely. Saving updates the shared draft. "
-                + "Publishing freezes that saved draft, and activation is a separate choice.",
-                cls="configuration-intro",
-            ),
-            cls="configuration-header",
-        ),
-        _notice(notice) if notice else None,
-        P(alert, cls="configuration-alert", role="alert") if alert else None,
-        _validation_alert(validation) if validation else None,
-        P(
-            "Unsaved browser changes are shown below. Release actions still apply to the saved draft.",
-            cls="configuration-alert unsaved-state",
-            role="status",
-        )
-        if dirty
-        else None,
-        _state_strip(state, dirty=dirty),
-        Div(
-            _section_index(),
-            Form(
-                Input(type="hidden", name="csrf_token", value=csrf_token),
-                Input(
-                    type="hidden",
-                    name="expected_draft_version",
-                    value=raw.expected_draft_version,
-                ),
-                _keywords_editor(raw, issues),
-                _sources_editor(raw, issues),
-                _named_editor(
-                    "Personal criteria",
-                    "criteria",
-                    "personal_criteria",
-                    "criterion",
-                    raw.personal_criteria,
-                    issues,
-                    expanded_rows,
-                ),
-                _named_editor(
-                    "Target profiles",
-                    "profiles",
-                    "target_profiles",
-                    "profile",
-                    raw.target_profiles,
-                    issues,
-                    expanded_rows,
-                ),
-                Div(
-                    Button(
-                        "Preview unsaved values",
-                        type="submit",
-                        formaction="/configuration/preview",
-                        cls="button secondary",
+                "Unsaved browser changes are shown below. Release actions still apply to the saved draft.",
+                cls="configuration-alert unsaved-state",
+                role="status",
+            )
+            if dirty
+            else None,
+            _state_strip(state, dirty=dirty),
+            Div(
+                _section_index(),
+                Form(
+                    Input(type="hidden", name="csrf_token", value=csrf_token),
+                    Input(
+                        type="hidden",
+                        name="expected_draft_version",
+                        value=raw.expected_draft_version,
                     ),
-                    Button(
-                        "Save draft",
-                        type="submit",
-                        formaction="/configuration/draft",
-                        cls="button primary",
+                    _keywords_editor(raw, issues),
+                    _sources_editor(raw, issues),
+                    _named_editor(
+                        "Personal criteria",
+                        "criteria",
+                        "personal_criteria",
+                        "criterion",
+                        raw.personal_criteria,
+                        issues,
+                        expanded_rows,
                     ),
-                    cls="editor-actions",
+                    _named_editor(
+                        "Target profiles",
+                        "profiles",
+                        "target_profiles",
+                        "profile",
+                        raw.target_profiles,
+                        issues,
+                        expanded_rows,
+                    ),
+                    Div(
+                        Button(
+                            "Preview unsaved values",
+                            type="submit",
+                            formaction="/configuration/preview",
+                            cls="button secondary",
+                        ),
+                        Button(
+                            "Save draft",
+                            type="submit",
+                            formaction="/configuration/draft",
+                            cls="button primary",
+                        ),
+                        cls="editor-actions",
+                    ),
+                    action="/configuration/edit",
+                    method="post",
+                    cls="configuration-form",
                 ),
-                action="/configuration/edit",
-                method="post",
-                cls="configuration-form",
+                cls="configuration-layout",
             ),
-            cls="configuration-layout",
+            _preview(preview) if preview else None,
+            _release_actions(state, csrf_token, publication_key, dirty=dirty),
+            id="configuration",
+            cls="review-shell configuration-shell",
         ),
-        _preview(preview) if preview else None,
-        _release_actions(state, csrf_token, publication_key, dirty=dirty),
-        id="configuration",
-        cls="review-shell configuration-shell",
     )
 
 
@@ -361,38 +338,41 @@ def publication_retry_page(
     expected_draft_version: str,
     expected_revision_id: str,
 ) -> object:
-    return Section(
-        authenticated_masthead(csrf_token, current="configuration"),
-        Div(
-            Small("Search setup", cls="eyebrow"),
-            H1("Publication result unknown"),
-            P(
-                "The database did not confirm whether it received this publication. "
-                + "Retry this exact request. Its private idempotency key is unchanged, so a completed "
-                + "publication will be replayed rather than duplicated.",
-                role="alert",
-            ),
-            Form(
-                Input(type="hidden", name="csrf_token", value=csrf_token),
-                Input(type="hidden", name="idempotency_key", value=publication_key),
-                Input(
-                    type="hidden",
-                    name="expected_draft_version",
-                    value=expected_draft_version,
+    return sidebar_page(
+        "configuration",
+        csrf_token,
+        Section(
+            Div(
+                Small("Search setup", cls="eyebrow"),
+                H1("Publication result unknown"),
+                P(
+                    "The database did not confirm whether it received this publication. "
+                    + "Retry this exact request. Its private idempotency key is unchanged, so a completed "
+                    + "publication will be replayed rather than duplicated.",
+                    role="alert",
                 ),
-                Input(
-                    type="hidden",
-                    name="expected_configuration_revision_id",
-                    value=expected_revision_id,
+                Form(
+                    Input(type="hidden", name="csrf_token", value=csrf_token),
+                    Input(type="hidden", name="idempotency_key", value=publication_key),
+                    Input(
+                        type="hidden",
+                        name="expected_draft_version",
+                        value=expected_draft_version,
+                    ),
+                    Input(
+                        type="hidden",
+                        name="expected_configuration_revision_id",
+                        value=expected_revision_id,
+                    ),
+                    Button("Retry exact publication", type="submit", cls="button primary"),
+                    action="/configuration/publish",
+                    method="post",
                 ),
-                Button("Retry exact publication", type="submit", cls="button primary"),
-                action="/configuration/publish",
-                method="post",
+                A("Return to search setup", href="/configuration", cls="retry"),
+                cls="state",
             ),
-            A("Return to search setup", href="/configuration", cls="retry"),
-            cls="state",
+            cls="review-shell state-shell",
         ),
-        cls="review-shell state-shell",
     )
 
 
