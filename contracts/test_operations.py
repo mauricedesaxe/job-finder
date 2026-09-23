@@ -1133,6 +1133,7 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
         working = by_id[run_id]
         idle = by_id[idle_run_id]
         assert working.idle_tick is False
+        assert idle.idle_tick is False  # idle ticks are orchestration-only; unit-pinned
         assert working.discoveries == 1
         assert working.processed_jobs == 1
         assert working.model_calls == 1
