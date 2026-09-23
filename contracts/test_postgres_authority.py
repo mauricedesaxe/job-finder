@@ -255,6 +255,7 @@ EXPECTED_MIGRATIONS = (
     "0030_provider_credentials.sql",
     "0031_execution_budget.sql",
     "0032_legacy_execution_budget.sql",
+    "0033_onboarding_test_search_requests.sql",
 )
 
 

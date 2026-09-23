@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from job_finder.execution_budget import estimate_execution, owner_may_run_scheduled_execution
+from job_finder.execution_budget import (
+    estimate_execution,
+    owner_may_run_onboarding_test_search,
+    owner_may_run_scheduled_execution,
+)
 from job_finder.review.owner_access import OnboardingStage
 from job_finder.search_configuration import DEFAULT_SEARCH_CONFIGURATION
 
@@ -24,4 +28,8 @@ def test_existing_installs_can_run_scheduled_work_before_budget_setup() -> None:
     assert owner_may_run_scheduled_execution(OnboardingStage.LEGACY_OWNER_IMPORT)
     assert not owner_may_run_scheduled_execution(OnboardingStage.OWNER_ACCOUNT)
     assert not owner_may_run_scheduled_execution(OnboardingStage.BUDGET)
+    assert not owner_may_run_scheduled_execution(OnboardingStage.TEST_SEARCH)
     assert not owner_may_run_scheduled_execution(None)
+    assert owner_may_run_onboarding_test_search(OnboardingStage.TEST_SEARCH)
+    assert not owner_may_run_onboarding_test_search(OnboardingStage.COMPLETE)
+    assert not owner_may_run_onboarding_test_search(None)
