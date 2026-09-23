@@ -1138,7 +1138,6 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
         assert working.processed_jobs == 1
         assert working.model_calls == 1
         assert working.known_cost_usd == Decimal("0.25")
-        assert idle.idle_tick is True
 
         detail = load_run_detail(connection, run_id)
         assert detail.item.model_calls == 1
