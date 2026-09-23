@@ -223,6 +223,7 @@ def create_review_app(
     operations = operations_service or unknown_operations_service()
     runs = runs_service or RunsService()
     controls = control_service or unavailable_control_plane_service()
+    dagster_configured = control_service is not None
 
     def require_owner(request: Request) -> Response | None:
         return _require_owner(request, owner_access_service, budget_setup_service)
@@ -585,10 +586,6 @@ def create_review_app(
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
-        try:
-            control_snapshot = controls.load()
-        except ControlPlaneUnavailable:
-            control_snapshot = None
         return HTMLResponse(
             _document(
                 sidebar_page(
@@ -596,14 +593,43 @@ def create_review_app(
                     csrf_token,
                     _operations_page(
                         snapshot,
-                        control_snapshot,
-                        csrf_token,
-                        run_key=secrets.token_urlsafe(32),
                         notice=_OPERATIONS_NOTICES.get(request.query_params.get("notice", "")),
                         now=now(),
                     ),
                 ),
                 title="Job Finder operations",
+            )
+        )
+
+    @app.route("/operations/control", methods=["GET"])
+    def control_plane_page(request: Request) -> HTMLResponse:
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        try:
+            control_snapshot = controls.load()
+        except ControlPlaneUnavailable as error:
+            control_snapshot = None
+            control_error = str(error)
+        else:
+            control_error = None
+        notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
+        return HTMLResponse(
+            _document(
+                sidebar_page(
+                    "operations",
+                    csrf_token,
+                    _control_page(
+                        control_snapshot,
+                        csrf_token,
+                        dagster_configured=dagster_configured,
+                        control_error=control_error,
+                        run_key=secrets.token_urlsafe(32),
+                        notice=notice,
+                        now=now(),
+                    ),
+                ),
+                title="Control plane",
             )
         )
 
@@ -631,7 +657,7 @@ def create_review_app(
             return _operations_unavailable_response(str(error))
         if isinstance(result, RunStarted):
             notice = "run-replayed" if result.replayed else "run-started"
-            return RedirectResponse(f"/operations?notice={notice}", status_code=303)
+            return RedirectResponse(f"/operations/control?notice={notice}", status_code=303)
         if isinstance(result, ControlConflict):
             return _operations_conflict_response(result.reason)
         if isinstance(result, RunLaunchUncertain):
@@ -674,7 +700,7 @@ def create_review_app(
                 if result.status is ScheduleStatus.RUNNING
                 else "schedule-paused"
             )
-            return RedirectResponse(f"/operations?notice={notice}", status_code=303)
+            return RedirectResponse(f"/operations/control?notice={notice}", status_code=303)
         if isinstance(result, ScheduleStateConflict):
             return _operations_conflict_response(
                 "Schedule state changed before this request. "
@@ -1729,10 +1755,7 @@ def _review_page(queue: ReviewQueue) -> object:
 
 def _operations_page(
     snapshot: OperationsSnapshot,
-    controls: ControlPlaneSnapshot | None,
-    csrf_token: str,
     *,
-    run_key: str,
     notice: str | None,
     now: datetime,
 ) -> object:
@@ -1795,7 +1818,12 @@ def _operations_page(
                 cls="operations-panel spend-panel",
             ),
             Div(
-                _schedule_controls(controls, csrf_token, run_key, now=now),
+                Small("Dagster control plane", cls="eyebrow"),
+                P(
+                    "Schedules and on-demand runs live on the control plane page.",
+                    cls="operations-muted",
+                ),
+                A("Open the control plane →", href="/operations/control", cls="health-link"),
                 cls="operations-panel",
             ),
             cls="operations-grid",
@@ -1820,44 +1848,89 @@ def _operations_page(
     )
 
 
-def _schedule_controls(
+_CONTROL_DESCRIPTIONS = {
+    "job_finder": (
+        "Runs the full cycle: searches for new jobs, scrapes and filters them, "
+        + "then evaluates them against the current release."
+    ),
+    "job_work_queue": (
+        "Every 15 minutes: claims due jobs and pushes them through scraping and "
+        + "evaluation. Ticks that find nothing due finish in seconds."
+    ),
+    "review_sample": (
+        "Once a day: enqueues a sample of yesterday's rejected jobs so you can "
+        + "audit them in the review queue."
+    ),
+    "langfuse_projection": (
+        "Every minute: ships telemetry to Langfuse. It never influences decisions."
+    ),
+}
+
+
+def _control_page(
     snapshot: ControlPlaneSnapshot | None,
     csrf_token: str,
-    run_key: str,
     *,
+    dagster_configured: bool,
+    control_error: str | None,
+    run_key: str,
+    notice: str | None,
     now: datetime,
-) -> tuple[object, ...]:
-    if snapshot is None:
-        return (
-            Small("Dagster control plane", cls="eyebrow"),
-            H2("Schedule status unavailable"),
+) -> object:
+    return Div(
+        P(notice, cls="operations-notice", role="status") if notice else None,
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1("Control plane"),
             P(
-                "Dagster could not be reached. Pipeline evidence above is still current, but "
-                + "schedule controls are disabled.",
+                "Dagster owns the schedules. Changes are re-checked before applying, "
+                + "and every launch is idempotent.",
+                cls="operations-intro",
+            ),
+            cls="operations-header",
+        ),
+        Div(
+            Small("Schedules", cls="eyebrow"),
+            H2("Schedules"),
+            P(
+                "Current state from Dagster. Changes are re-checked before applying.",
+                cls="operations-muted",
+            )
+            if snapshot is not None
+            else P(
+                "Dagster is not configured for this app. Set JOB_FINDER_DAGSTER_GRAPHQL_URL "
+                + "(and optionally JOB_FINDER_DAGSTER_REPOSITORY_LOCATION and "
+                + "JOB_FINDER_DAGSTER_REPOSITORY_NAME) in the review app's environment, "
+                + "then restart."
+            )
+            if not dagster_configured
+            else P(
+                "Dagster could not be reached, so schedule controls are disabled. The control "
+                + f"plane reported: {control_error}. Pipeline evidence elsewhere stays current.",
                 cls="operations-muted",
             ),
             Ul(
                 *(
-                    _unavailable_schedule_row(definition.label, definition.cadence)
+                    _schedule_row(schedule, csrf_token, run_key, now=now)
+                    for schedule in snapshot.schedules
+                ),
+                cls="schedule-list",
+            )
+            if snapshot is not None
+            else Ul(
+                *(
+                    _unavailable_schedule_row(
+                        definition.label,
+                        definition.cadence,
+                        _CONTROL_DESCRIPTIONS.get(definition.job_name),
+                    )
                     for definition in CONTROL_DEFINITIONS
                 ),
                 cls="schedule-list",
             ),
-        )
-    return (
-        Small("Dagster control plane", cls="eyebrow"),
-        H2("Schedules"),
-        P(
-            "Current state from Dagster. Changes are re-checked before applying.",
-            cls="operations-muted",
+            cls="operations-section",
         ),
-        Ul(
-            *(
-                _schedule_row(schedule, csrf_token, run_key, now=now)
-                for schedule in snapshot.schedules
-            ),
-            cls="schedule-list",
-        ),
+        cls="review-shell operations-shell",
     )
 
 
@@ -1879,6 +1952,10 @@ def _schedule_row(
                 ),
             ),
             P(schedule.definition.cadence, cls="schedule-cadence"),
+            P(
+                _CONTROL_DESCRIPTIONS.get(schedule.definition.job_name),
+                cls="operations-muted",
+            ),
             P(
                 "Next: ",
                 timestamp(schedule.next_tick, now=now),
@@ -1922,11 +1999,12 @@ def _schedule_row(
     )
 
 
-def _unavailable_schedule_row(label: str, cadence: str) -> object:
+def _unavailable_schedule_row(label: str, cadence: str, description: str | None) -> object:
     return Li(
         Div(
             Div(Strong(label), Span("Unavailable", cls="schedule-state unavailable")),
             P(cadence, cls="schedule-cadence"),
+            P(description, cls="operations-muted") if description else None,
             Div(
                 Button("Run now", type="button", disabled=True, cls="operation-button"),
                 Button(
