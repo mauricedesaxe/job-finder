@@ -1051,14 +1051,14 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
                 f"runs:{run_id}",
                 now - timedelta(minutes=10),
                 now - timedelta(minutes=9),
-                "orchestration",
+                "discovery",
             ),
             (
                 idle_run_id,
                 f"runs:{idle_run_id}",
                 now - timedelta(minutes=5),
                 now - timedelta(minutes=5),
-                "orchestration",
+                "discovery",
             ),
         ):
             connection.execute(
