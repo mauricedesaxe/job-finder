@@ -75,16 +75,17 @@ def job_finder_cycle(
     context: AssetExecutionContext, job_finder: JobFinderResource
 ) -> dict[str, int]:
     observed_at = datetime.now(UTC)
+    settings = OrchestrationSettings.from_environment()
     with job_finder.connection() as connection:
         run_key = f"dagster:{context.run.run_id}"
         admission = admit_scheduled_execution(
             connection, idempotency_key=run_key, requested_at=observed_at
         )
+        ping_heartbeat(settings.discovery_heartbeat_url)
         if isinstance(admission, ExecutionBlocked):
             metadata = {"blocked": 1}
             context.add_output_metadata({**metadata, "reason": admission.reason})
             return metadata
-        settings = OrchestrationSettings.from_environment()
         credentials = _provider_credentials(connection, settings)
         boundaries = production_boundaries(jina_api_key=credentials.jina.get_secret_value())
         run: OrchestrationRun | None = None
@@ -149,16 +150,17 @@ def job_work_queue_cycle(
     context: AssetExecutionContext, job_finder: JobFinderResource
 ) -> dict[str, int]:
     observed_at = datetime.now(UTC)
+    settings = OrchestrationSettings.from_environment()
     with job_finder.connection() as connection:
         run_key = f"dagster:{context.run.run_id}"
         admission = admit_scheduled_execution(
             connection, idempotency_key=run_key, requested_at=observed_at
         )
+        ping_heartbeat(settings.work_queue_heartbeat_url)
         if isinstance(admission, ExecutionBlocked):
             metadata = {"blocked": 1}
             context.add_output_metadata({**metadata, "reason": admission.reason})
             return metadata
-        settings = OrchestrationSettings.from_environment()
         credentials = _provider_credentials(connection, settings)
         boundaries = production_boundaries(jina_api_key=credentials.jina.get_secret_value())
         run: OrchestrationRun | None = None
