@@ -599,7 +599,9 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
         assert isinstance(key_conflict, WorkDismissalKeyConflict)
 
         mid = load_operations_snapshot(connection)
-        assert mid.health is OperationsHealth.CAUGHT_UP
+        # the retrying item keeps health at WORKING; the terminal dismissal
+        # only removes its ACTION_REQUIRED contribution
+        assert mid.health is OperationsHealth.WORKING
         assert mid.dismissed_terminal == 1
         assert mid.actionable_work[0].dismissed is True
 
