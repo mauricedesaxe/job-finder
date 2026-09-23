@@ -36,6 +36,7 @@ from job_finder.review.control_plane import (
     ControlConflict,
     ControlPlaneService,
     ControlPlaneSnapshot,
+    ControlPlaneUnavailable,
     RunLaunchUncertain,
     RunNowCommand,
     RunNowResult,
@@ -179,8 +180,7 @@ def test_the_operations_page_shows_truthful_owner_operations_status() -> None:
     assert "$1.2345" in response.text
     assert "4 attempts have no recorded cost" in response.text
     assert "OpenRouter did not respond" in response.text
-    assert "Dagster could not be reached." in response.text
-    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
+    assert "Open the control plane" in response.text
 
 
 def test_the_operations_page_marks_its_section_and_relative_times() -> None:
@@ -365,21 +365,62 @@ def test_the_operations_page_renders_each_operations_health_state(
         assert "No pipeline runs recorded." in response.text
 
 
-def test_the_operations_home_renders_all_live_schedule_controls() -> None:
+_CONTROL_DESCRIPTION_MATCHES = {
+    "job_finder": "searches for new jobs",
+    "job_work_queue": "claims due jobs",
+    "review_sample": "enqueues a sample of yesterday's rejected jobs",
+    "langfuse_projection": "ships telemetry to Langfuse",
+}
+
+
+def test_the_control_plane_page_renders_all_live_schedule_controls() -> None:
     client = _client(_queue(), controls=_control_service())
 
-    response = client.get("/operations")
+    response = client.get("/operations/control")
 
     assert response.status_code == 200
     for definition in CONTROL_DEFINITIONS:
         assert definition.label in response.text
         assert definition.cadence in response.text
+        assert _CONTROL_DESCRIPTION_MATCHES[definition.job_name] in response.text
         assert f'value="{definition.job_name}"' in response.text
         assert f'value="{definition.schedule_name}"' in response.text
     assert "in 11 days" in response.text
     assert 'title="2026-09-21 13:00 UTC"' in response.text
     assert response.text.count('action="/operations/run"') == 4
     assert response.text.count('action="/operations/schedule"') == 4
+
+
+def test_the_control_plane_page_names_a_missing_configuration() -> None:
+    client = _client(_queue())
+
+    response = client.get("/operations/control")
+
+    assert response.status_code == 200
+    assert "JOB_FINDER_DAGSTER_GRAPHQL_URL" in response.text
+    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
+
+
+def _unexpected_control_call(*_args: object) -> Never:
+    raise AssertionError("control operation was not expected")
+
+
+def test_the_control_plane_page_reports_an_unreachable_dagster() -> None:
+    def unavailable() -> ControlPlaneSnapshot:
+        raise ControlPlaneUnavailable("Dagster GraphQL request failed")
+
+    controls = ControlPlaneService(
+        load=unavailable,
+        run_now=_unexpected_control_call,
+        change_schedule=_unexpected_control_call,
+    )
+    client = _client(_queue(), controls=controls)
+
+    response = client.get("/operations/control")
+
+    assert response.status_code == 200
+    assert "Dagster could not be reached" in response.text
+    assert "Dagster GraphQL request failed" in response.text
 
 
 def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
@@ -563,7 +604,7 @@ def test_schedule_change_redirects_after_a_verified_pause() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/operations?notice=schedule-paused"
+    assert response.headers["location"] == "/operations/control?notice=schedule-paused"
 
 
 def test_schedule_resume_redirects_and_the_home_renders_the_notice() -> None:
