@@ -77,10 +77,15 @@ ExecutionAdmission: TypeAlias = ExecutionAdmitted | ExecutionBlocked
 _SCHEDULABLE_ONBOARDING_STAGES = frozenset(
     {OnboardingStage.COMPLETE, OnboardingStage.LEGACY_OWNER_IMPORT}
 )
+_ONBOARDING_TEST_SEARCH_STAGES = frozenset({OnboardingStage.TEST_SEARCH})
 
 
 def owner_may_run_scheduled_execution(stage: OnboardingStage | None) -> bool:
     return stage in _SCHEDULABLE_ONBOARDING_STAGES
+
+
+def owner_may_run_onboarding_test_search(stage: OnboardingStage | None) -> bool:
+    return stage in _ONBOARDING_TEST_SEARCH_STAGES
 
 
 @dataclass(frozen=True)
@@ -254,86 +259,113 @@ def admit_scheduled_execution(
     idempotency_key: str,
     requested_at: datetime,
 ) -> ExecutionAdmission:
-    period_start = date(requested_at.year, requested_at.month, 1)
     with connection.transaction():
-        owner_row = connection.execute(
-            "SELECT stage FROM owner_onboarding WHERE singleton_id = 1 FOR UPDATE"
-        ).fetchone()
-        if owner_row is None or not owner_may_run_scheduled_execution(
-            OnboardingStage(str(owner_row[0]))
-        ):
-            return ExecutionBlocked(reason="onboarding_incomplete")
-        existing = connection.execute(
-            """
-            SELECT max_jobs, status
-            FROM execution_budget_reservations
-            WHERE idempotency_key = %s
-            """,
-            (idempotency_key,),
-        ).fetchone()
-        if existing is not None:
-            if str(existing[1]) == "settled":
-                return ExecutionBlocked(reason="already_consumed")
-            return ExecutionAdmitted(max_jobs=cast(int, existing[0]))
-        policy_row = connection.execute(
-            """
-            SELECT version, monthly_limit_usd, run_allowance_usd, max_jobs_per_run
-            FROM execution_budget_policy
-            WHERE singleton_id = 1
-            FOR UPDATE
-            """
-        ).fetchone()
-        if policy_row is None:
-            return ExecutionBlocked(reason="budget_not_configured")
-        configuration = load_published_active_search_configuration(
-            connection
-        ).active.revision.configuration
-        estimate = estimate_execution(configuration, cast(int, policy_row[3]))
-        limits_row = connection.execute(
-            """
-            SELECT max_search_queries_per_run, max_provider_attempts_per_run
-            FROM execution_budget_policy
-            WHERE singleton_id = 1
-            """
-        ).fetchone()
-        if limits_row is None:
-            raise RuntimeError("Execution budget limits could not be loaded")
-        if estimate.search_queries > cast(
-            int, limits_row[0]
-        ) or estimate.maximum_provider_attempts > cast(int, limits_row[1]):
-            return ExecutionBlocked(reason="configuration_exceeds_policy")
-        consumed_row = connection.execute(
-            """
-            SELECT COALESCE(sum(CASE WHEN status = 'settled' THEN consumed_usd ELSE reserved_usd END), 0)
-            FROM execution_budget_reservations
-            WHERE period_start = %s
-            """,
-            (period_start,),
-        ).fetchone()
-        if consumed_row is None:
-            raise RuntimeError("Execution budget usage could not be loaded")
-        consumed = Decimal(str(consumed_row[0]))
-        monthly_limit = Decimal(str(policy_row[1]))
-        reservation = Decimal(str(policy_row[2]))
-        if consumed + reservation > monthly_limit:
-            return ExecutionBlocked(reason="monthly_budget_exhausted")
-        _ = connection.execute(
-            """
-            INSERT INTO execution_budget_reservations (
-              idempotency_key, policy_version, period_start, reserved_usd,
-              status, max_jobs, created_at
-            ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s)
-            """,
-            (
-                idempotency_key,
-                policy_row[0],
-                period_start,
-                reservation,
-                policy_row[3],
-                requested_at,
-            ),
+        return _admit_execution(
+            connection,
+            idempotency_key=idempotency_key,
+            requested_at=requested_at,
+            allowed_stages=_SCHEDULABLE_ONBOARDING_STAGES,
         )
-        return ExecutionAdmitted(max_jobs=cast(int, policy_row[3]))
+
+
+def admit_onboarding_test_execution(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    requested_at: datetime,
+) -> ExecutionAdmission:
+    return _admit_execution(
+        connection,
+        idempotency_key=idempotency_key,
+        requested_at=requested_at,
+        allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
+    )
+
+
+def _admit_execution(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    requested_at: datetime,
+    allowed_stages: frozenset[OnboardingStage],
+) -> ExecutionAdmission:
+    period_start = date(requested_at.year, requested_at.month, 1)
+    owner_row = connection.execute(
+        "SELECT stage FROM owner_onboarding WHERE singleton_id = 1 FOR UPDATE"
+    ).fetchone()
+    if owner_row is None or OnboardingStage(str(owner_row[0])) not in allowed_stages:
+        return ExecutionBlocked(reason="onboarding_incomplete")
+    existing = connection.execute(
+        """
+        SELECT max_jobs, status
+        FROM execution_budget_reservations
+        WHERE idempotency_key = %s
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if existing is not None:
+        if str(existing[1]) == "settled":
+            return ExecutionBlocked(reason="already_consumed")
+        return ExecutionAdmitted(max_jobs=cast(int, existing[0]))
+    policy_row = connection.execute(
+        """
+        SELECT version, monthly_limit_usd, run_allowance_usd, max_jobs_per_run
+        FROM execution_budget_policy
+        WHERE singleton_id = 1
+        FOR UPDATE
+        """
+    ).fetchone()
+    if policy_row is None:
+        return ExecutionBlocked(reason="budget_not_configured")
+    configuration = load_published_active_search_configuration(
+        connection
+    ).active.revision.configuration
+    estimate = estimate_execution(configuration, cast(int, policy_row[3]))
+    limits_row = connection.execute(
+        """
+        SELECT max_search_queries_per_run, max_provider_attempts_per_run
+        FROM execution_budget_policy
+        WHERE singleton_id = 1
+        """
+    ).fetchone()
+    if limits_row is None:
+        raise RuntimeError("Execution budget limits could not be loaded")
+    if estimate.search_queries > cast(
+        int, limits_row[0]
+    ) or estimate.maximum_provider_attempts > cast(int, limits_row[1]):
+        return ExecutionBlocked(reason="configuration_exceeds_policy")
+    consumed_row = connection.execute(
+        """
+        SELECT COALESCE(sum(CASE WHEN status = 'settled' THEN consumed_usd ELSE reserved_usd END), 0)
+        FROM execution_budget_reservations
+        WHERE period_start = %s
+        """,
+        (period_start,),
+    ).fetchone()
+    if consumed_row is None:
+        raise RuntimeError("Execution budget usage could not be loaded")
+    consumed = Decimal(str(consumed_row[0]))
+    monthly_limit = Decimal(str(policy_row[1]))
+    reservation = Decimal(str(policy_row[2]))
+    if consumed + reservation > monthly_limit:
+        return ExecutionBlocked(reason="monthly_budget_exhausted")
+    _ = connection.execute(
+        """
+        INSERT INTO execution_budget_reservations (
+          idempotency_key, policy_version, period_start, reserved_usd,
+          status, max_jobs, created_at
+        ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s)
+        """,
+        (
+            idempotency_key,
+            policy_row[0],
+            period_start,
+            reservation,
+            policy_row[3],
+            requested_at,
+        ),
+    )
+    return ExecutionAdmitted(max_jobs=cast(int, policy_row[3]))
 
 
 def settle_execution_budget(
