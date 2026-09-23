@@ -59,10 +59,13 @@ class DagsterControlSettings(BaseModel):
     timeout_seconds: int = Field(default=5, gt=0, le=30)
 
     @classmethod
-    def from_environment(cls) -> DagsterControlSettings:
+    def from_environment(cls) -> DagsterControlSettings | None:
+        graphql_url = os.environ.get("JOB_FINDER_DAGSTER_GRAPHQL_URL")
+        if not graphql_url:
+            return None
         return cls.model_validate(
             {
-                "graphql_url": os.environ.get("JOB_FINDER_DAGSTER_GRAPHQL_URL"),
+                "graphql_url": graphql_url,
                 "repository_location_name": os.environ.get(
                     "JOB_FINDER_DAGSTER_REPOSITORY_LOCATION", "job_finder.dagster"
                 ),
