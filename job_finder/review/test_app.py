@@ -172,6 +172,29 @@ def test_the_operations_page_shows_truthful_owner_operations_status() -> None:
     assert "OpenRouter did not respond" in response.text
     assert "Dagster could not be reached." in response.text
     assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
+
+
+def test_the_operations_page_marks_its_section_and_relative_times() -> None:
+    snapshot = OperationsSnapshot(
+        health=OperationsHealth.CAUGHT_UP,
+        queues=QueueCounts(completed=2),
+        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
+        recent_runs=(
+            PipelineRunSummary(
+                id=UUID(int=21),
+                kind="orchestration",
+                status="completed",
+                started_at=NOW,
+                completed_at=NOW,
+            ),
+        ),
+        failures=(),
+    )
+    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+
+    response = client.get("/operations")
+
+    assert response.status_code == 200
     assert 'aria-current="page" class="shell-link">Operations</a>' in response.text
     assert 'href="/" class="shell-link">Review</a>' in response.text
     assert 'href="/configuration" class="shell-link">Search setup</a>' in response.text
