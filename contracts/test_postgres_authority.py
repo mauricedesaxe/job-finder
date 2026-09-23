@@ -320,7 +320,7 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "legacy secure owner password")
     monkeypatch.delenv("JOB_FINDER_BOOTSTRAP_TOKEN", raising=False)
     monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
-    monkeypatch.setenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", "http://dagster.test/graphql")
+    monkeypatch.delenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", raising=False)
 
     _ = create_review_server()
 

@@ -79,5 +79,5 @@ def create_app() -> FastHTML:
         budget_setup_service=postgres_budget_setup_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
-        control_service=dagster_control_plane_service(dagster),
+        control_service=(None if dagster is None else dagster_control_plane_service(dagster)),
     )

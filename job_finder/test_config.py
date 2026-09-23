@@ -94,19 +94,23 @@ def test_dagster_control_settings_read_url_and_repo_defaults(
 
     settings = DagsterControlSettings.from_environment()
 
+    assert settings is not None
     assert str(settings.graphql_url) == "http://dagster:3000/graphql"
     assert settings.repository_location_name == "job_finder.dagster"
     assert settings.repository_name == "__repository__"
     assert settings.timeout_seconds == 5
 
 
-def test_dagster_control_settings_require_the_graphql_url(
+def test_dagster_control_settings_skip_when_the_graphql_url_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", raising=False)
 
-    with pytest.raises(ValidationError):
-        _ = DagsterControlSettings.from_environment()
+    assert DagsterControlSettings.from_environment() is None
+
+    monkeypatch.setenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", "")
+
+    assert DagsterControlSettings.from_environment() is None
 
 
 def test_database_settings_reads_the_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
