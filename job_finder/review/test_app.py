@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 import re
 from typing import Never, cast
@@ -28,6 +28,13 @@ from job_finder.provider_credentials import (
     ProviderSetupService,
     ProviderSetupSnapshot,
     ProviderStageAdvanced,
+)
+from job_finder.review.analytics import (
+    AnalyticsService,
+    DaySpend,
+    ModelSpend,
+    RunSpend,
+    SpendAnalytics,
 )
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import ConfigurationEditorService
@@ -1821,6 +1828,7 @@ def _client(
     *,
     operations: OperationsService | None = None,
     runs: RunsService | None = None,
+    analytics: AnalyticsService | None = None,
     controls: ControlPlaneService | None = None,
 ) -> TestClient:
     service = ReviewService(review_queue=lambda: queue, submit=submit)
@@ -1832,6 +1840,7 @@ def _client(
             owner_access_service=OWNER_ACCESS,
             operations_service=operations,
             runs_service=runs,
+            analytics_service=analytics,
             control_service=controls,
             now=lambda: NOW,
         )
@@ -2143,6 +2152,138 @@ def test_an_unknown_run_id_renders_the_not_found_page() -> None:
 
     assert response.status_code == 404
     assert "Run not found" in response.text
+
+
+def _spend_analytics() -> SpendAnalytics:
+    return SpendAnalytics(
+        known_usd=Decimal("1.2345"),
+        calls=6,
+        accepted=4,
+        errors=2,
+        input_tokens=900,
+        output_tokens=300,
+        max_latency_ms=5200,
+        days=(
+            DaySpend(
+                day=NOW.date(),
+                calls=4,
+                accepted=3,
+                errors=1,
+                known_cost_usd=Decimal("1.0000"),
+            ),
+            DaySpend(
+                day=NOW.date() - timedelta(days=1),
+                calls=2,
+                accepted=1,
+                errors=1,
+                known_cost_usd=Decimal("0.2345"),
+            ),
+        ),
+        models=(
+            ModelSpend(
+                model="z-ai/glm-4.6",
+                calls=4,
+                accepted=3,
+                errors=1,
+                input_tokens=700,
+                output_tokens=200,
+                known_cost_usd=Decimal("1.1000"),
+                max_latency_ms=5200,
+            ),
+            ModelSpend(
+                model="openai/gpt-5-mini",
+                calls=2,
+                accepted=1,
+                errors=1,
+                input_tokens=200,
+                output_tokens=100,
+                known_cost_usd=Decimal("0.1345"),
+                max_latency_ms=2100,
+            ),
+        ),
+        runs=(
+            RunSpend(
+                id=UUID(int=7),
+                kind="orchestration",
+                started_at=NOW - timedelta(hours=3),
+                calls=4,
+                known_cost_usd=Decimal("1.0000"),
+            ),
+        ),
+    )
+
+
+def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 200
+    assert "$1.2345" in response.text
+    assert "Model spend only" in response.text
+    assert "Jina (search and scrape) and Langfuse costs are not tracked." in response.text
+    assert "4 accepted calls" in response.text
+    assert "2 calls returned no usage" in response.text
+    assert "1,200" in response.text
+    assert "900 in / 300 out" in response.text
+    assert "5,200 ms" in response.text
+    assert NOW.date().isoformat() in response.text
+    assert "$1.0000" in response.text
+    assert "$0.2345" in response.text
+    assert "spend-bar-fill" in response.text
+    assert "z-ai/glm-4.6" in response.text
+    assert "$1.1000" in response.text
+    assert "up to 5200 ms" in response.text
+    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000007"' in response.text
+    assert 'href="/operations"' in response.text
+
+
+def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
+    empty = SpendAnalytics(
+        known_usd=Decimal(0),
+        calls=0,
+        accepted=0,
+        errors=0,
+        input_tokens=0,
+        output_tokens=0,
+        max_latency_ms=0,
+        days=(),
+        models=(),
+        runs=(),
+    )
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: empty))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 200
+    assert "$0.0000" in response.text
+    assert "No model calls were recorded in the last 30 days." in response.text
+    assert "No model calls were recorded." in response.text
+    assert "No pipeline runs with model calls were recorded." in response.text
+
+
+def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
+    def broken() -> SpendAnalytics:
+        raise psycopg.Error("connection refused")
+
+    client = _client(_queue(), analytics=AnalyticsService(load=broken))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 503
+    assert "Model spend analytics are unavailable" in response.text
+
+
+def test_the_operations_overview_links_to_the_analytics_page() -> None:
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot()),
+    )
+
+    response = client.get("/operations")
+
+    assert response.status_code == 200
+    assert 'href="/operations/analytics"' in response.text
 
 
 def _applied_dismissal(command: WorkDismissalCommand) -> WorkDismissalApplied:
