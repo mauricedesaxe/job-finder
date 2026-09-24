@@ -2473,15 +2473,20 @@ def _activity_work_row(entry: ActivityEntry, *, now: datetime) -> object:
     else:
         timing += (timestamp(work.occurred_at, now=now),)
     return Li(
-        Div(
+        A(
             Div(
-                Strong("Job work"),
-                Span(entry.status, cls="run-status"),
-                cls="row-head",
+                Div(
+                    Strong("Job work"),
+                    Span(entry.status, cls="run-status"),
+                    cls="row-head",
+                ),
+                Small(*timing),
+                P(work.failure_summary, cls="operations-muted") if work.failure_summary else None,
+                Div(Strong("Open work →"), cls="run-link-hint"),
+                cls="run-row",
             ),
-            Small(*timing),
-            P(work.failure_summary, cls="operations-muted") if work.failure_summary else None,
-            cls="run-row",
+            href=f"/operations/work/{work.job_id}",
+            cls="run-link",
         ),
     )
 
@@ -2631,7 +2636,26 @@ def _run_detail_page(detail: RunDetail, *, now: datetime) -> object:
             Ul(
                 *(
                     Li(
-                        Div(
+                        A(
+                            Div(
+                                Div(
+                                    Strong(a.operation_key),
+                                    Span(
+                                        f"attempt {a.attempt_number} · {a.status}",
+                                        cls="run-status",
+                                    ),
+                                ),
+                                Small(str(a.job_id), cls="recovery-id"),
+                                P(a.error_summary, cls="operations-muted")
+                                if a.error_summary
+                                else None,
+                                Div(Strong("Inspect work →"), cls="run-link-hint"),
+                            ),
+                            href=f"/operations/work/{a.job_id}",
+                            cls="run-link",
+                        )
+                        if a.job_id is not None
+                        else Div(
                             Div(
                                 Strong(a.operation_key),
                                 Span(
@@ -2639,9 +2663,6 @@ def _run_detail_page(detail: RunDetail, *, now: datetime) -> object:
                                     cls="run-status",
                                 ),
                             ),
-                            Small(str(a.job_id), cls="recovery-id")
-                            if a.job_id is not None
-                            else None,
                             P(a.error_summary, cls="operations-muted") if a.error_summary else None,
                         )
                         for a in detail.attempts

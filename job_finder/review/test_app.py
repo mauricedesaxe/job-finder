@@ -87,6 +87,7 @@ from job_finder.review.operations import (
     PipelineRunStatus,
     QueueCounts,
     RecoveryAction,
+    RunAttemptSummary,
     RecoveryOutcome,
     SpendSummary,
     WorkDismissalApplied,
@@ -2068,13 +2069,45 @@ def _activity_service(
     return ActivityService(list=list_page), captured
 
 
-def test_the_activity_page_renders_runs_work_filters_and_pagination() -> None:
+def test_the_activity_page_renders_runs_work_and_pagination() -> None:
     activity, _ = _activity_service(
         _activity_run_entry(value=1, idle=True),
         _activity_run_entry(value=2, kind="discovery"),
         _activity_work_entry(value=9, state="failed"),
         cursor="next-cursor-token",
     )
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert listing.status_code == 200
+    assert "Idle tick — nothing was due." in listing.text
+    assert "4 discovered · 3 processed · 2 model calls" in listing.text
+    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
+    assert "Job work" in listing.text
+    assert ">retrying</span>" in listing.text
+    assert "provider_timeout: OpenRouter did not respond" in listing.text
+    assert 'href="/operations/work/00000000-0000-0000-0000-000000000009"' in listing.text
+    assert "Open work →" in listing.text
+    assert 'class="row-head"' in listing.text
+    assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
+    assert "Next page →" in listing.text
+
+
+def test_the_activity_page_renders_the_filter_form() -> None:
+    activity, _ = _activity_service()
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert listing.status_code == 200
+    assert 'name="status" value="failed"' in listing.text
+    assert 'name="kind"' in listing.text
+    assert 'name="from"' in listing.text
+    assert "Apply filters" in listing.text
+
+
+def test_the_run_detail_page_keeps_its_run_content() -> None:
     runs = RunsService(
         detail=lambda _run_id: RunDetail(
             item=_run_item(value=2, kind="discovery"),
@@ -2086,23 +2119,7 @@ def test_the_activity_page_renders_runs_work_filters_and_pagination() -> None:
             decisions=(),
         ),
     )
-    client = _client(_queue(), runs=runs, activity=activity)
-
-    listing = client.get("/operations/runs")
-
-    assert listing.status_code == 200
-    assert "Idle tick — nothing was due." in listing.text
-    assert "4 discovered · 3 processed · 2 model calls" in listing.text
-    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
-    assert "Job work" in listing.text
-    assert ">retrying</span>" in listing.text
-    assert "provider_timeout: OpenRouter did not respond" in listing.text
-    assert 'class="row-head"' in listing.text
-    assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
-    assert "Next page →" in listing.text
-    assert 'name="status" value="failed"' in listing.text
-    assert 'name="kind"' in listing.text
-    assert 'name="from"' in listing.text
+    client = _client(_queue(), runs=runs)
 
     detail = client.get("/operations/runs/00000000-0000-0000-0000-000000000002")
 
@@ -2351,6 +2368,43 @@ def test_dismissal_from_the_detail_page_returns_to_the_detail_page() -> None:
         response.headers["location"]
         == "/operations/work/00000000-0000-0000-0000-00000000001f?notice=work-dismissed"
     )
+
+
+def test_the_run_detail_page_links_attempts_to_work_detail() -> None:
+    runs = RunsService(
+        detail=lambda _run_id: RunDetail(
+            item=_run_item(value=2, kind="discovery"),
+            parameters={},
+            unknown_cost_calls=0,
+            keywords=(),
+            attempts=(
+                RunAttemptSummary(
+                    job_id=UUID(int=31),
+                    operation_key="evaluation",
+                    attempt_number=1,
+                    status="failed",
+                    error_summary="provider_timeout: OpenRouter did not respond",
+                ),
+                RunAttemptSummary(
+                    job_id=None,
+                    operation_key="orchestration",
+                    attempt_number=0,
+                    status="completed",
+                    error_summary=None,
+                ),
+            ),
+            models=(),
+            decisions=(),
+        ),
+    )
+    client = _client(_queue(), runs=runs)
+
+    response = client.get("/operations/runs/00000000-0000-0000-0000-000000000002")
+
+    assert response.status_code == 200
+    assert 'href="/operations/work/00000000-0000-0000-0000-00000000001f"' in response.text
+    assert "Inspect work →" in response.text
+    assert response.text.count("Inspect work →") == 1
 
 
 def test_an_unknown_run_id_renders_the_not_found_page() -> None:
