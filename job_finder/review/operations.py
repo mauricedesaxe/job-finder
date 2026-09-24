@@ -938,6 +938,109 @@ def _parse_activity_work(row: tuple[object, ...]) -> ActivityWork:
     )
 
 
+class WorkItemNotFound(LookupError):
+    pass
+
+
+@dataclass(frozen=True)
+class WorkAttemptSummary:
+    operation_key: str
+    attempt_number: int
+    status: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    run_id: UUID | None
+    model_calls: int
+    known_cost_usd: Decimal
+    error_summary: str | None
+
+
+@dataclass(frozen=True)
+class WorkItemDetail:
+    job_id: UUID
+    state: WorkItemState
+    attempt_count: int
+    created_at: datetime
+    completed_at: datetime | None
+    last_failed_at: datetime | None
+    retry_at: datetime | None
+    failure_summary: str | None
+    discovery_run_id: UUID | None
+    dismissed: bool
+    dismissed_at: datetime | None
+    dismissed_by: str | None
+    attempts: tuple[WorkAttemptSummary, ...]
+
+
+def _unavailable_work_detail(_job_id: UUID) -> WorkItemDetail:
+    raise OperationsUnavailable("Work item detail is unavailable")
+
+
+def load_work_item_detail(connection: Connection, job_id: UUID) -> WorkItemDetail:
+    row = connection.execute(
+        """
+        SELECT item.state, item.attempt_count, item.created_at, item.completed_at,
+               item.last_failed_at, item.retry_at, item.last_error, item.discovery_run_id,
+               dismissal.attempt_count, dismissal.actor, dismissal.dismissed_at
+        FROM job_work_items item
+        LEFT JOIN work_dismissals dismissal ON dismissal.job_id = item.job_id
+        WHERE item.job_id = %s
+        """,
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        raise WorkItemNotFound("Work item does not exist")
+
+    state = str(row[0])
+    if state not in {"pending", "leased", "failed", "completed", "terminal_error"}:
+        raise RuntimeError("Work item state is invalid")
+    attempt_count = int(str(row[1]))
+    dismissal_active = row[8] is not None and int(str(row[8])) == attempt_count
+    attempts = tuple(
+        WorkAttemptSummary(
+            operation_key=str(item[0]),
+            attempt_number=int(str(item[1])),
+            status=str(item[2]),
+            started_at=cast(datetime | None, item[3]),
+            completed_at=cast(datetime | None, item[4]),
+            run_id=cast(UUID | None, item[5]),
+            model_calls=int(str(item[7])),
+            known_cost_usd=Decimal(str(item[8])),
+            error_summary=None if item[6] is None else _error_summary(item[6]),
+        )
+        for item in connection.execute(
+            """
+            SELECT pa.operation_key, pa.attempt_number, pa.status, pa.started_at,
+                   pa.completed_at, pa.pipeline_run_id, pa.error,
+                   (SELECT count(*) FROM model_call_attempts m
+                      WHERE m.processing_attempt_id = pa.id),
+                   (SELECT COALESCE(sum(m.cost_usd), 0) FROM model_call_attempts m
+                      WHERE m.processing_attempt_id = pa.id)
+            FROM processing_attempts pa
+            WHERE pa.job_id = %s
+            ORDER BY pa.started_at DESC NULLS LAST, pa.operation_key, pa.attempt_number
+            LIMIT 100
+            """,
+            (job_id,),
+        ).fetchall()
+    )
+    return WorkItemDetail(
+        job_id=job_id,
+        state=cast(WorkItemState, state),
+        attempt_count=attempt_count,
+        created_at=cast(datetime, row[2]),
+        completed_at=cast(datetime | None, row[3]),
+        last_failed_at=cast(datetime | None, row[4]),
+        retry_at=cast(datetime | None, row[5]),
+        failure_summary=None if row[6] is None else _error_summary(row[6]),
+        discovery_run_id=cast(UUID | None, row[7]),
+        dismissed=dismissal_active,
+        dismissed_at=cast(datetime | None, row[10]) if dismissal_active else None,
+        dismissed_by=str(row[9]) if dismissal_active and row[9] is not None else None,
+        attempts=attempts,
+    )
+
+
 def _unavailable_recovery(_command: WorkRecoveryCommand) -> WorkRecoveryResult:
     raise OperationsUnavailable("Work recovery is unavailable")
 
@@ -958,6 +1061,7 @@ class OperationsService:
         _unavailable_reevaluation
     )
     dismiss: Callable[[WorkDismissalCommand], WorkDismissalResult] = _unavailable_dismissal
+    work_detail: Callable[[UUID], WorkItemDetail] = _unavailable_work_detail
 
 
 def operations_health(
@@ -1008,7 +1112,17 @@ def postgres_operations_service(connect: ConnectionFactory) -> OperationsService
         with connect() as connection:
             return dismiss_work(connection, command)
 
-    return OperationsService(load=load, recover=recover, reevaluate=reevaluate, dismiss=dismiss)
+    def work_detail(job: UUID) -> WorkItemDetail:
+        with connect() as connection:
+            return load_work_item_detail(connection, job)
+
+    return OperationsService(
+        load=load,
+        recover=recover,
+        reevaluate=reevaluate,
+        dismiss=dismiss,
+        work_detail=work_detail,
+    )
 
 
 def load_operations_snapshot(
