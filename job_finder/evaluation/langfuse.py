@@ -13,13 +13,11 @@ from langfuse import Langfuse
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from job_finder.benchmarks.executions import EvaluationRun
 from job_finder.benchmarks.manifests import EvaluationManifest
+from job_finder.benchmarks.promotions import PromptPromotionDecision
 from job_finder.config import LangfuseSettings
 from job_finder.evaluation.models import ModelCallAttempt
-from job_finder.evaluation.manifests import (
-    EvaluationRun,
-    PromptPromotionDecision,
-)
 
 Connection = psycopg.Connection[tuple[object, ...]]
 ProjectionKind = Literal["evaluation_manifest", "evaluation_run", "prompt_promotion", "model_call"]

@@ -15,6 +15,17 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from pydantic_core import ValidationError
 
+from job_finder.benchmarks.comparisons import (
+    EvaluationRunComparison,
+    preview_run_comparison,
+)
+from job_finder.benchmarks.executions import (
+    EvaluateManifestCommand,
+    EvaluationExecutionState,
+    EvaluationRun,
+    load_evaluation_execution,
+    load_run,
+)
 from job_finder.benchmarks.manifests import (
     CuratedReviewEvent,
     ManifestOperationError,
@@ -28,6 +39,10 @@ from job_finder.benchmarks.manifests import (
     load_manifest,
     preview_manifest,
     summarize_manifest,
+)
+from job_finder.benchmarks.promotions import (
+    PromptPromotionDecision,
+    record_prompt_promotion_decision,
 )
 from job_finder.configuration_service import (
     DEFAULT_RESULT_LIMIT,
@@ -60,17 +75,6 @@ from job_finder.configuration_service import (
 )
 from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.langfuse import ProjectionQueueStatus, load_projection_queue_status
-from job_finder.evaluation.manifests import (
-    EvaluateManifestCommand,
-    EvaluationExecutionState,
-    EvaluationRun,
-    EvaluationRunComparison,
-    PromptPromotionDecision,
-    load_evaluation_execution,
-    load_run,
-    preview_run_comparison,
-    record_prompt_promotion_decision,
-)
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 from job_finder.evaluation.prompt_releases import PromptReleaseError
 from job_finder.evaluation.release_targets import (

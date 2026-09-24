@@ -17,13 +17,11 @@ from uuid import UUID
 import psycopg
 from pydantic import JsonValue, TypeAdapter
 
+from job_finder.benchmarks.executions import load_run
 from job_finder.benchmarks.manifests import enqueue_projection, load_manifest
+from job_finder.benchmarks.promotions import load_promotion_decision
 from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
-from job_finder.evaluation.manifests import (
-    load_promotion_decision,
-    load_run,
-)
 from job_finder.evaluation.openrouter import enqueue_model_call_projection
 from job_finder.evaluation.models import ModelCallAttempt
 

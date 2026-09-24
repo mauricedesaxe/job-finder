@@ -13,15 +13,14 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, model_validator
 
 import job_finder.benchmarks.manifests as _benchmark_manifests
+import job_finder.benchmarks.scoring as _scoring
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import (
-    EvaluationOutcome,
     EvaluationResult,
     ProviderRequestObservation,
     PromptReleaseId,
     ReleaseTarget,
     RelevanceReleaseId,
-    evaluation_outcome,
 )
 from job_finder.evaluation.prompt_releases import load_prompt_release
 from job_finder.evaluation.relevance_releases import (
@@ -29,7 +28,7 @@ from job_finder.evaluation.relevance_releases import (
     validate_release_target,
 )
 
-Connection = psycopg.Connection[tuple[object, ...]]
+_Connection = psycopg.Connection[tuple[object, ...]]
 _Digest = str
 _RUNNING_CONNECTIONS: set[int] = set()
 _RUNNING_CONNECTIONS_LOCK = Lock()
@@ -39,37 +38,6 @@ class _EvaluationModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
 
-class EvaluationTrialResult(_EvaluationModel):
-    id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    case_position: int = Field(ge=0)
-    trial_index: int = Field(ge=0)
-    expected_outcome: EvaluationOutcome
-    actual_outcome: EvaluationOutcome | None
-    failure_kind: Literal["false_positive", "false_negative", "operational"] | None
-    reason: str
-
-    @model_validator(mode="after")
-    def classification_matches_outcomes(self) -> Self:
-        expected_failure = _failure_kind(self.expected_outcome, self.actual_outcome)
-        if self.failure_kind != expected_failure:
-            raise ValueError("Trial failure kind must match its expected and actual outcomes")
-        return self
-
-
-class EvaluationMetrics(_EvaluationModel):
-    result_count: int = Field(ge=0)
-    false_positive_count: int = Field(ge=0)
-    false_negative_count: int = Field(ge=0)
-    operational_failure_count: int = Field(ge=0)
-    critical_false_positive_count: int = Field(ge=0)
-    false_positive_rate: Decimal = Field(ge=0, le=1)
-    false_negative_rate: Decimal = Field(ge=0, le=1)
-
-    @field_serializer("false_positive_rate", "false_negative_rate", when_used="json")
-    def serialize_rates(self, value: Decimal) -> str:
-        return format(value, "f")
-
-
 class EvaluationRun(_EvaluationModel):
     id: str = Field(pattern=r"^[0-9a-f]{64}$")
     idempotency_key: str
@@ -77,8 +45,8 @@ class EvaluationRun(_EvaluationModel):
     prompt_release_id: PromptReleaseId = Field(pattern=r"^[0-9a-f]{64}$")
     target: ReleaseTarget | None = None
     implementation_ref: str
-    metrics: EvaluationMetrics
-    results: tuple[EvaluationTrialResult, ...]
+    metrics: _scoring.EvaluationMetrics
+    results: tuple[_scoring.EvaluationTrialResult, ...]
     completed_at: datetime
 
     @model_validator(mode="after")
@@ -191,63 +159,6 @@ EvaluationExecutionState = Annotated[
 ]
 _EXECUTION_ADAPTER: TypeAdapter[EvaluationExecutionState] = TypeAdapter(EvaluationExecutionState)
 
-
-class EvaluationTrialTransition(_EvaluationModel):
-    case_position: int = Field(ge=0)
-    trial_index: int = Field(ge=0)
-    baseline: EvaluationTrialResult
-    candidate: EvaluationTrialResult
-    transition: Literal["unchanged", "improvement", "regression", "changed_failure"]
-
-
-class EvaluationCaseTransition(_EvaluationModel):
-    case_position: int = Field(ge=0)
-    critical: bool
-    trials: tuple[EvaluationTrialTransition, ...]
-
-
-class EvaluationRunComparison(_EvaluationModel):
-    id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    manifest_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    baseline_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    baseline_target: ReleaseTarget
-    candidate_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    candidate_target: ReleaseTarget
-    cases: tuple[EvaluationCaseTransition, ...]
-    improvement_count: int = Field(ge=0)
-    regression_count: int = Field(ge=0)
-    eligible: bool
-    eligibility_failures: tuple[str, ...]
-
-
-class PromptPromotionDecision(_EvaluationModel):
-    id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    manifest_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    baseline_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    baseline_prompt_release_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    baseline_target: ReleaseTarget | None = None
-    candidate_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    candidate_prompt_release_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    candidate_target: ReleaseTarget | None = None
-    comparison_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    eligible: bool | None = None
-    eligibility_failures: tuple[str, ...] = ()
-    decision: Literal["approved", "rejected"]
-    reason: str
-    actor: str
-    created_at: datetime
-
-    @model_validator(mode="after")
-    def targets_match_prompt_provenance(self) -> Self:
-        for prompt_release_id, target in (
-            (self.baseline_prompt_release_id, self.baseline_target),
-            (self.candidate_prompt_release_id, self.candidate_target),
-        ):
-            if target is not None and target.prompt_release_id != prompt_release_id:
-                raise ValueError("Promotion target must match prompt provenance")
-        return self
-
-
 CaseEvaluator = Callable[
     [_benchmark_manifests.EvaluationManifestCase, ReleaseTarget, int],
     EvaluationResult,
@@ -260,7 +171,7 @@ CaseEvaluatorFactory = Callable[
 
 
 def run_manifest(
-    connection: Connection,
+    connection: _Connection,
     *,
     command: EvaluateManifestCommand,
     create_exchange_rates: Callable[[], ExchangeRateSnapshot],
@@ -287,7 +198,7 @@ def run_manifest(
 
 
 def _run_manifest_exclusive(
-    connection: Connection,
+    connection: _Connection,
     *,
     command: EvaluateManifestCommand,
     create_exchange_rates: Callable[[], ExchangeRateSnapshot],
@@ -336,7 +247,7 @@ def _run_manifest_exclusive(
             evaluator = create_evaluator(exchange_rates, observations.append)
             run_id = _digest({"kind": "evaluation_run", "idempotency_key": command.idempotency_key})
             results = tuple(
-                _trial_result(
+                _scoring.score_trial(
                     run_id,
                     case,
                     trial_index,
@@ -353,7 +264,7 @@ def _run_manifest_exclusive(
                 prompt_release_id=command.target.prompt_release_id,
                 target=command.target,
                 implementation_ref=command.implementation_ref,
-                metrics=score_results(manifest, results),
+                metrics=_scoring.score_results(manifest, results),
                 results=results,
                 completed_at=completed_at,
             )
@@ -409,317 +320,6 @@ def aggregate_evaluation_telemetry(
     )
 
 
-def score_results(
-    manifest: _benchmark_manifests.EvaluationManifest,
-    results: tuple[EvaluationTrialResult, ...],
-) -> EvaluationMetrics:
-    expected_count = sum(case.trial_count for case in manifest.cases)
-    if len(results) != expected_count:
-        raise ValueError("Results must account for every configured trial")
-    expected_by_position = {case.position: case for case in manifest.cases}
-    seen = {(result.case_position, result.trial_index) for result in results}
-    required = {
-        (case.position, trial_index)
-        for case in manifest.cases
-        for trial_index in range(case.trial_count)
-    }
-    if seen != required:
-        raise ValueError("Results must cover each trial exactly once")
-    if any(
-        result.expected_outcome != expected_by_position[result.case_position].expected_outcome
-        for result in results
-    ):
-        raise ValueError("Result expectations must match the manifest")
-    false_positives = sum(result.failure_kind == "false_positive" for result in results)
-    false_negatives = sum(result.failure_kind == "false_negative" for result in results)
-    operational = sum(result.failure_kind == "operational" for result in results)
-    negative_trials = sum(
-        case.trial_count for case in manifest.cases if case.expected_outcome == "rejected"
-    )
-    positive_trials = expected_count - negative_trials
-    critical_false_positives = sum(
-        result.failure_kind == "false_positive"
-        and expected_by_position[result.case_position].critical
-        for result in results
-    )
-    return EvaluationMetrics(
-        result_count=len(results),
-        false_positive_count=false_positives,
-        false_negative_count=false_negatives,
-        operational_failure_count=operational,
-        critical_false_positive_count=critical_false_positives,
-        false_positive_rate=_rate(false_positives, negative_trials),
-        false_negative_rate=_rate(false_negatives, positive_trials),
-    )
-
-
-def compare_runs(
-    manifest: _benchmark_manifests.EvaluationManifest,
-    baseline: EvaluationRun,
-    candidate: EvaluationRun,
-) -> EvaluationRunComparison:
-    if baseline.manifest_id != manifest.id or candidate.manifest_id != manifest.id:
-        raise ValueError("Baseline and candidate runs must use the supplied manifest")
-    if baseline.target is None or candidate.target is None:
-        raise ValueError("Run comparison requires exact release targets")
-    if baseline.target == candidate.target:
-        raise ValueError("Baseline and candidate release targets must differ")
-    baseline_results = _indexed_results(manifest, baseline)
-    candidate_results = _indexed_results(manifest, candidate)
-    baseline_metrics = score_results(manifest, baseline.results)
-    candidate_metrics = score_results(manifest, candidate.results)
-    if baseline.metrics != baseline_metrics or candidate.metrics != candidate_metrics:
-        raise ValueError("Run metrics must match case-level evidence")
-    cases: list[EvaluationCaseTransition] = []
-    improvements = 0
-    regressions = 0
-    for case in manifest.cases:
-        trials: list[EvaluationTrialTransition] = []
-        for trial_index in range(case.trial_count):
-            key = (case.position, trial_index)
-            baseline_result = baseline_results[key]
-            candidate_result = candidate_results[key]
-            transition = _transition(baseline_result, candidate_result)
-            improvements += transition == "improvement"
-            regressions += transition == "regression"
-            trials.append(
-                EvaluationTrialTransition(
-                    case_position=case.position,
-                    trial_index=trial_index,
-                    baseline=baseline_result,
-                    candidate=candidate_result,
-                    transition=transition,
-                )
-            )
-        cases.append(
-            EvaluationCaseTransition(
-                case_position=case.position,
-                critical=case.critical,
-                trials=tuple(trials),
-            )
-        )
-    failures = _promotion_failures(manifest.policy, baseline_metrics, candidate_metrics)
-    comparison_id = hashlib.sha256(
-        (f"evaluation_run_comparison_v1:{manifest.id}:" f"{baseline.id}:{candidate.id}").encode()
-    ).hexdigest()
-    return EvaluationRunComparison(
-        id=comparison_id,
-        manifest_id=manifest.id,
-        baseline_run_id=baseline.id,
-        baseline_target=baseline.target,
-        candidate_run_id=candidate.id,
-        candidate_target=candidate.target,
-        cases=tuple(cases),
-        improvement_count=improvements,
-        regression_count=regressions,
-        eligible=not failures,
-        eligibility_failures=failures,
-    )
-
-
-def preview_run_comparison(
-    connection: Connection,
-    baseline_run_id: _Digest,
-    candidate_run_id: _Digest,
-) -> EvaluationRunComparison:
-    baseline = load_run(connection, baseline_run_id)
-    candidate = load_run(connection, candidate_run_id)
-    if baseline.manifest_id != candidate.manifest_id:
-        raise ValueError("Baseline and candidate runs must use the same manifest")
-    return compare_runs(
-        _benchmark_manifests.load_manifest(connection, baseline.manifest_id), baseline, candidate
-    )
-
-
-def record_prompt_promotion_decision(
-    connection: Connection,
-    *,
-    baseline_run_id: _Digest,
-    candidate_run_id: _Digest,
-    expected_comparison_id: _Digest,
-    decision: Literal["approved", "rejected"],
-    reason: str,
-    actor: str,
-    created_at: datetime,
-    idempotency_key: str,
-) -> PromptPromotionDecision:
-    _require_autocommit(connection)
-    if not reason.strip():
-        raise ValueError("Promotion decision reason must not be blank")
-    with connection.transaction():
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s))",
-            (f"prompt_promotion:{idempotency_key}",),
-        )
-        existing = load_promotion_decision(connection, idempotency_key)
-        if existing is not None:
-            if (
-                existing.baseline_run_id != baseline_run_id
-                or existing.candidate_run_id != candidate_run_id
-                or existing.comparison_id != expected_comparison_id
-                or existing.decision != decision
-                or existing.reason != reason
-                or existing.actor != actor
-            ):
-                raise ValueError("Idempotency key belongs to a different promotion decision")
-            return existing
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"prompt_promotion_pair:{baseline_run_id}:{candidate_run_id}",),
-        )
-        comparison = preview_run_comparison(connection, baseline_run_id, candidate_run_id)
-        if comparison.id != expected_comparison_id:
-            raise ValueError("Promotion decision evidence is stale")
-        if decision == "approved" and not comparison.eligible:
-            raise ValueError("Ineligible release target cannot be approved")
-        duplicate = connection.execute(
-            """
-            SELECT 1 FROM prompt_promotion_decisions
-            WHERE baseline_run_id = %s AND candidate_run_id = %s
-            """,
-            (baseline_run_id, candidate_run_id),
-        ).fetchone()
-        if duplicate is not None:
-            raise ValueError("This run comparison already has a promotion decision")
-        baseline = load_run(connection, baseline_run_id)
-        candidate = load_run(connection, candidate_run_id)
-        promotion_id = _digest({"kind": "prompt_promotion", "idempotency_key": idempotency_key})
-        promotion = PromptPromotionDecision(
-            id=promotion_id,
-            manifest_id=comparison.manifest_id,
-            baseline_run_id=baseline.id,
-            baseline_prompt_release_id=comparison.baseline_target.prompt_release_id,
-            baseline_target=comparison.baseline_target,
-            candidate_run_id=candidate.id,
-            candidate_prompt_release_id=comparison.candidate_target.prompt_release_id,
-            candidate_target=comparison.candidate_target,
-            comparison_id=comparison.id,
-            eligible=comparison.eligible,
-            eligibility_failures=comparison.eligibility_failures,
-            decision=decision,
-            reason=reason,
-            actor=actor,
-            created_at=created_at,
-        )
-        _ = connection.execute(
-            """
-            INSERT INTO prompt_promotion_decisions (
-              id, idempotency_key, manifest_id, baseline_run_id,
-              baseline_prompt_release_id, candidate_run_id,
-              candidate_prompt_release_id, baseline_relevance_release_id,
-              candidate_relevance_release_id, comparison_id, decision, reason,
-              baseline_metrics, candidate_metrics, actor, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                promotion.id,
-                idempotency_key,
-                promotion.manifest_id,
-                promotion.baseline_run_id,
-                comparison.baseline_target.prompt_release_id,
-                promotion.candidate_run_id,
-                comparison.candidate_target.prompt_release_id,
-                comparison.baseline_target.relevance_release_id,
-                comparison.candidate_target.relevance_release_id,
-                promotion.comparison_id,
-                promotion.decision,
-                promotion.reason,
-                Jsonb(baseline.metrics.model_dump(mode="json")),
-                Jsonb(candidate.metrics.model_dump(mode="json")),
-                actor,
-                created_at,
-            ),
-        )
-        _benchmark_manifests.enqueue_projection(
-            connection, "prompt_promotion", promotion.id, promotion, created_at
-        )
-    return promotion
-
-
-def _indexed_results(
-    manifest: _benchmark_manifests.EvaluationManifest, run: EvaluationRun
-) -> dict[tuple[int, int], EvaluationTrialResult]:
-    indexed = {(result.case_position, result.trial_index): result for result in run.results}
-    required = {
-        (case.position, trial_index)
-        for case in manifest.cases
-        for trial_index in range(case.trial_count)
-    }
-    if len(indexed) != len(run.results) or set(indexed) != required:
-        raise ValueError("Run results must cover every manifest trial exactly once")
-    expected = {case.position: case.expected_outcome for case in manifest.cases}
-    if any(result.expected_outcome != expected[result.case_position] for result in run.results):
-        raise ValueError("Run results must match manifest expectations")
-    return indexed
-
-
-def _transition(
-    baseline: EvaluationTrialResult, candidate: EvaluationTrialResult
-) -> Literal["unchanged", "improvement", "regression", "changed_failure"]:
-    if baseline.failure_kind == candidate.failure_kind:
-        return "unchanged"
-    if baseline.failure_kind is not None and candidate.failure_kind is None:
-        return "improvement"
-    if baseline.failure_kind is None and candidate.failure_kind is not None:
-        return "regression"
-    return "changed_failure"
-
-
-def _trial_result(
-    run_id: _Digest,
-    case: _benchmark_manifests.EvaluationManifestCase,
-    trial_index: int,
-    result: EvaluationResult,
-) -> EvaluationTrialResult:
-    actual = evaluation_outcome(result)
-    failure = _failure_kind(case.expected_outcome, actual)
-    result_id = _digest(
-        {"run_id": run_id, "case_position": case.position, "trial_index": trial_index}
-    )
-    return EvaluationTrialResult(
-        id=result_id,
-        case_position=case.position,
-        trial_index=trial_index,
-        expected_outcome=case.expected_outcome,
-        actual_outcome=actual,
-        failure_kind=failure,
-        reason=result.reason,
-    )
-
-
-def _failure_kind(
-    expected: EvaluationOutcome, actual: EvaluationOutcome | None
-) -> Literal["false_positive", "false_negative", "operational"] | None:
-    if actual is None:
-        return "operational"
-    if actual == expected:
-        return None
-    return "false_positive" if actual == "qualified" else "false_negative"
-
-
-def _promotion_failures(
-    policy: _benchmark_manifests.ManifestPolicy,
-    baseline: EvaluationMetrics,
-    candidate: EvaluationMetrics,
-) -> tuple[str, ...]:
-    failures: list[str] = []
-    if baseline.operational_failure_count:
-        failures.append("Baseline has operational failures")
-    if candidate.operational_failure_count:
-        failures.append("Candidate has operational failures")
-    if candidate.critical_false_positive_count:
-        failures.append("Candidate qualified a critical expected-negative trial")
-    if candidate.false_positive_rate > policy.max_false_positive_rate:
-        failures.append("Candidate exceeds the false-positive threshold")
-    if candidate.false_negative_rate > policy.max_false_negative_rate:
-        failures.append("Candidate exceeds the false-negative threshold")
-    if candidate.false_positive_rate > baseline.false_positive_rate:
-        failures.append("Candidate regresses against baseline false positives")
-    if candidate.false_negative_rate > baseline.false_negative_rate:
-        failures.append("Candidate regresses against baseline false negatives")
-    return tuple(failures)
-
-
 def _execution_id(idempotency_key: str) -> str:
     return hashlib.sha256(f"evaluation_execution:{idempotency_key}".encode()).hexdigest()
 
@@ -752,7 +352,7 @@ def _require_matching_execution_command(
 
 
 def _insert_running_execution(
-    connection: Connection,
+    connection: _Connection,
     execution_id: str,
     command: EvaluateManifestCommand,
     exchange_rates: ExchangeRateSnapshot,
@@ -796,7 +396,7 @@ def _telemetry_values(telemetry: EvaluationRunTelemetry | None) -> tuple[object,
 
 
 def _complete_execution(
-    connection: Connection,
+    connection: _Connection,
     execution_id: str,
     run_id: str,
     telemetry: EvaluationRunTelemetry,
@@ -817,7 +417,7 @@ def _complete_execution(
 
 
 def _fail_execution(
-    connection: Connection,
+    connection: _Connection,
     execution_id: str,
     telemetry: EvaluationRunTelemetry | None,
     failure: EvaluationExecutionFailure,
@@ -843,7 +443,7 @@ def _fail_execution(
 
 
 def load_evaluation_execution_by_key(
-    connection: Connection, idempotency_key: str
+    connection: _Connection, idempotency_key: str
 ) -> EvaluationExecutionState | None:
     row = connection.execute(
         "SELECT id FROM evaluation_run_executions WHERE idempotency_key = %s",
@@ -853,7 +453,7 @@ def load_evaluation_execution_by_key(
 
 
 def load_evaluation_execution(
-    connection: Connection, execution_id: str
+    connection: _Connection, execution_id: str
 ) -> EvaluationExecutionState:
     row = connection.execute(
         """
@@ -923,7 +523,7 @@ def load_evaluation_execution(
     return _EXECUTION_ADAPTER.validate_python(payload)
 
 
-def _insert_run(connection: Connection, run: EvaluationRun) -> None:
+def _insert_run(connection: _Connection, run: EvaluationRun) -> None:
     if run.target is None:
         raise ValueError("New evaluation runs require a complete release target")
     metrics = run.metrics
@@ -979,7 +579,7 @@ def _insert_run(connection: Connection, run: EvaluationRun) -> None:
         )
 
 
-def load_run(connection: Connection, run_id: _Digest) -> EvaluationRun:
+def load_run(connection: _Connection, run_id: _Digest) -> EvaluationRun:
     row = connection.execute(
         """
         SELECT idempotency_key, manifest_id, prompt_release_id, relevance_release_id, result_count,
@@ -1014,7 +614,7 @@ def load_run(connection: Connection, run_id: _Digest) -> EvaluationRun:
                 relevance_release_id=RelevanceReleaseId(str(row[3])),
             )
         ),
-        metrics=EvaluationMetrics(
+        metrics=_scoring.EvaluationMetrics(
             result_count=int(str(row[4])),
             false_positive_count=int(str(row[5])),
             false_negative_count=int(str(row[6])),
@@ -1025,7 +625,7 @@ def load_run(connection: Connection, run_id: _Digest) -> EvaluationRun:
         ),
         implementation_ref=str(row[11]),
         results=tuple(
-            EvaluationTrialResult.model_validate(
+            _scoring.EvaluationTrialResult.model_validate(
                 {
                     "id": result[0],
                     "case_position": result[1],
@@ -1042,66 +642,11 @@ def load_run(connection: Connection, run_id: _Digest) -> EvaluationRun:
     )
 
 
-def load_promotion_decision(
-    connection: Connection, idempotency_key: str
-) -> PromptPromotionDecision | None:
-    row = connection.execute(
-        """
-        SELECT id, manifest_id, baseline_run_id, baseline_prompt_release_id,
-               baseline_relevance_release_id, candidate_run_id,
-               candidate_prompt_release_id, candidate_relevance_release_id,
-               comparison_id, decision, reason, baseline_metrics, candidate_metrics,
-               actor, created_at
-        FROM prompt_promotion_decisions WHERE idempotency_key = %s
-        """,
-        (idempotency_key,),
-    ).fetchone()
-    if row is None:
-        return None
-    return PromptPromotionDecision.model_validate(
-        {
-            "id": row[0],
-            "manifest_id": row[1],
-            "baseline_run_id": row[2],
-            "baseline_prompt_release_id": row[3],
-            "baseline_target": None
-            if row[4] is None
-            else {"prompt_release_id": row[3], "relevance_release_id": row[4]},
-            "candidate_run_id": row[5],
-            "candidate_prompt_release_id": row[6],
-            "candidate_target": None
-            if row[7] is None
-            else {"prompt_release_id": row[6], "relevance_release_id": row[7]},
-            "comparison_id": row[8],
-            "decision": row[9],
-            "reason": row[10],
-            "eligible": not _promotion_failures(
-                _benchmark_manifests.load_manifest(connection, str(row[1])).policy,
-                EvaluationMetrics.model_validate(row[11]),
-                EvaluationMetrics.model_validate(row[12]),
-            ),
-            "eligibility_failures": _promotion_failures(
-                _benchmark_manifests.load_manifest(connection, str(row[1])).policy,
-                EvaluationMetrics.model_validate(row[11]),
-                EvaluationMetrics.model_validate(row[12]),
-            ),
-            "actor": row[13],
-            "created_at": row[14],
-        }
-    )
-
-
-def _rate(count: int, denominator: int) -> Decimal:
-    if denominator == 0:
-        return Decimal(0)
-    return (Decimal(count) / Decimal(denominator)).quantize(Decimal("0.0000001"))
-
-
 def _digest(value: object) -> _Digest:
     content = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def _require_autocommit(connection: Connection) -> None:
+def _require_autocommit(connection: _Connection) -> None:
     if not connection.autocommit:
         raise ValueError("Evaluation manifest operations require an autocommit connection")
