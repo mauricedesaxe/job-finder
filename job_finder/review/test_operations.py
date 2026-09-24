@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 from uuid import UUID
 
 import pytest
 
 from job_finder.review.operations import (
     ActionableWork,
+    ActivityEntry,
+    ActivityQuery,
+    ActivityRun,
+    ActivityWork,
     JobReevaluationCommand,
     RunListItem,
     OperationsHealth,
@@ -18,7 +23,10 @@ from job_finder.review.operations import (
     QueueCounts,
     RecoveryAction,
     SpendSummary,
+    WorkItemState,
     WorkRecoveryCommand,
+    _decode_activity_cursor,
+    _encode_activity_cursor,
     operations_health,
     unknown_operations_service,
 )
@@ -216,3 +224,81 @@ def test_completed_orchestration_runs_without_work_are_idle_ticks() -> None:
     assert item(0, 0).idle_tick is True
     assert item(2, 0).idle_tick is False
     assert item(0, 1).idle_tick is False
+
+
+def _activity_run(status: PipelineRunStatus) -> ActivityRun:
+    return ActivityRun(
+        id=UUID(int=1),
+        kind="orchestration",
+        status=status,
+        started_at=NOW,
+        completed_at=None if status == "running" else NOW,
+        discoveries=0,
+        processing_attempts=0,
+        processed_jobs=0,
+        model_calls=0,
+        known_cost_usd=Decimal(0),
+        error_summary=None,
+    )
+
+
+def _activity_work(state: str, *, dismissed: bool = False) -> ActivityWork:
+    return ActivityWork(
+        job_id=UUID(int=2),
+        state=cast(WorkItemState, state),
+        attempt_count=1,
+        occurred_at=NOW,
+        retry_at=NOW if state == "failed" else None,
+        failure_summary=None,
+        dismissed=dismissed,
+    )
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        (_activity_run("running"), "running"),
+        (_activity_run("completed"), "completed"),
+        (_activity_run("failed"), "failed"),
+        (_activity_work("pending"), "running"),
+        (_activity_work("leased"), "running"),
+        (_activity_work("completed"), "completed"),
+        (_activity_work("failed"), "retrying"),
+        (_activity_work("terminal_error"), "terminal"),
+        (_activity_work("terminal_error", dismissed=True), "dismissed"),
+    ],
+)
+def test_activity_entries_map_to_one_unified_status(
+    item: ActivityRun | ActivityWork, expected: str
+) -> None:
+    entry = ActivityEntry(occurred_at=NOW, ref="ref", item=item)
+
+    assert entry.status == expected
+
+
+def test_activity_query_rejects_unknown_statuses_and_limits() -> None:
+    with pytest.raises(ValueError):
+        ActivityQuery(statuses=frozenset({"exploded"}))
+    with pytest.raises(ValueError):
+        ActivityQuery(limit=0)
+
+
+def test_activity_cursor_round_trips_through_encoding() -> None:
+    entry = ActivityEntry(
+        occurred_at=NOW,
+        ref=str(UUID(int=7)),
+        item=_activity_run("completed"),
+    )
+
+    cursor = _encode_activity_cursor(entry)
+    occurred_at, entry_type, ref = _decode_activity_cursor(cursor)
+
+    assert occurred_at == NOW
+    assert entry_type == "run"
+    assert ref == str(UUID(int=7))
+
+
+@pytest.mark.parametrize("cursor", ["", "not-base64!!", "x", "abc"])
+def test_activity_cursor_rejects_garbage(cursor: str) -> None:
+    with pytest.raises(ValueError):
+        _decode_activity_cursor(cursor)
