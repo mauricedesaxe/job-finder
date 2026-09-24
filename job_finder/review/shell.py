@@ -7,7 +7,7 @@ from typing import Literal
 from fasthtml.common import A, Aside, Button, Div, Form, Input, Main, Nav, Small, Span, Strong
 
 ShellSection = Literal["review", "operations", "configuration"]
-OperationsPage = Literal["activity", "analytics", "control", "failures"]
+OperationsPage = Literal["activity", "analytics", "control"]
 
 _SECTIONS: tuple[tuple[ShellSection, str, str], ...] = (
     ("review", "Review", "/"),
@@ -19,7 +19,6 @@ _OPERATIONS_PAGES: tuple[tuple[OperationsPage, str, str], ...] = (
     ("activity", "Recent activity", "/operations/runs"),
     ("analytics", "Analytics", "/operations/analytics"),
     ("control", "Control plane", "/operations/control"),
-    ("failures", "Recent failures", "/operations/failures"),
 )
 
 _MINUTE = 60
