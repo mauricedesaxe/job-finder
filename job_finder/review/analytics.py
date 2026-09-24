@@ -16,10 +16,13 @@ SPEND_MODEL_LIMIT = 10
 class DayModelSpend:
     model: str
     known_cost_usd: Decimal
+    p90_latency_ms: int
 
     def __post_init__(self) -> None:
         if self.known_cost_usd < 0:
             raise ValueError("spend values cannot be negative")
+        if self.p90_latency_ms < 0:
+            raise ValueError("latency values cannot be negative")
         if not self.model:
             raise ValueError("model name must not be empty")
 
@@ -143,7 +146,8 @@ def load_spend_analytics(
         SELECT (observed_at AT TIME ZONE 'UTC')::date AS day, requested_model, count(*),
                count(*) FILTER (WHERE status = 'accepted'),
                count(*) FILTER (WHERE status <> 'accepted'),
-               COALESCE(sum(cost_usd), 0)
+               COALESCE(sum(cost_usd), 0),
+               ceil(percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_ms))::bigint
         FROM model_call_attempts
         WHERE observed_at >= now() - (%s * interval '1 day')
         GROUP BY day, requested_model
@@ -195,6 +199,7 @@ def _parse_day_spend(rows: list[tuple[object, ...]]) -> tuple[DaySpend, ...]:
                 DayModelSpend(
                     model=_validated_model_name(row[1]),
                     known_cost_usd=Decimal(str(row[5])),
+                    p90_latency_ms=int(str(row[6])),
                 )
                 for row in day_rows
             ),
