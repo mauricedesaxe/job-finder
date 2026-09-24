@@ -42,18 +42,16 @@ from job_finder.evaluation.release_targets import (
     ReleaseTargetActivated,
 )
 from job_finder.evaluation.relevance_releases import build_jev_faithful_policy
-from job_finder.mcp_server import Connection, McpDependencies, create_mcp_server
-from job_finder.review.models import (
+from job_finder.database import Connection
+from job_finder.mcp_server import McpDependencies, create_mcp_server
+from job_finder.review.feedback import (
     ReviewFeedback,
     ReviewFeedbackPage,
     ReviewSaved,
     ReviewSubmission,
-)
-from job_finder.review.postgres import (
-    enqueue_qualified_review_item,
-    load_review_queue,
     record_review,
 )
+from job_finder.review.queue import enqueue_qualified_review_item, load_review_queue
 from job_finder.search_configuration import load_active_search_configuration
 from scripts.serve_mcp import create_server
 

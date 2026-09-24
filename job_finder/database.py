@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 from typing import LiteralString, cast
@@ -8,6 +10,9 @@ from typing import LiteralString, cast
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
+
+Connection = psycopg.Connection[tuple[object, ...]]
+ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
 
 MIGRATIONS_PATH = Path(__file__).with_name("migrations")
 SEARCH_CONFIGURATION_MIGRATION = "0016_search_configuration_revisions.sql"

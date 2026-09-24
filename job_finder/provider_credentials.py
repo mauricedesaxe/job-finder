@@ -15,11 +15,11 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
+from job_finder.database import Connection, ConnectionFactory
 from job_finder.discovery.jina import JinaReaderEnvelope, JinaSearchEnvelope
 from job_finder.evaluation.jev import JevSystemOneResponse
 from job_finder.evaluation.openrouter import OpenRouterCompletion
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
-from job_finder.review.postgres import Connection, ConnectionFactory
 
 
 class ProviderKind(StrEnum):

@@ -133,7 +133,13 @@ from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.models import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
-from job_finder.review.models import ReviewSaved, ReviewSubmission
+from job_finder.review.feedback import (
+    ReviewSaved,
+    ReviewSubmission,
+    list_review_feedback,
+    load_review_feedback,
+    record_review,
+)
 from job_finder.review.onboarding import postgres_onboarding_progress_service
 from job_finder.review.owner_access import (
     OnboardingStage,
@@ -141,14 +147,11 @@ from job_finder.review.owner_access import (
     import_legacy_owner_password,
     postgres_owner_access_service,
 )
-from job_finder.review.postgres import (
+from job_finder.review.queue import (
     deterministic_rejected_sample,
     enqueue_qualified_review_item,
     enqueue_rejected_audit_sample,
-    list_review_feedback,
-    load_review_feedback,
     load_review_queue,
-    record_review,
 )
 from scripts.serve_review import create_app as create_review_server
 from job_finder.search_configuration import (
@@ -3589,7 +3592,7 @@ def test_an_identical_revision_is_a_stored_no_op(authority_schema: str) -> None:
         assert load_review_queue(connection).reviewed_items[0].decision == "unsure"
 
 
-def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> None:
+def test_rolls_back_feedback_when_company_policy_fails(authority_schema: str) -> None:
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     run_id = uuid4()
     with _connection(authority_schema) as connection:
@@ -3621,7 +3624,7 @@ def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> 
                     review_item_id=item.id,
                     evaluation_id=item.evaluation_id,
                     snapshot_id=item.snapshot_id,
-                    decision="reject",
+                    decision="pursue",
                     target_profile="neither",
                     primary_reason="company-quality",
                     block_company=True,
@@ -3631,6 +3634,7 @@ def test_rolls_back_feedback_when_company_block_fails(authority_schema: str) -> 
             )
 
         assert connection.execute("SELECT count(*) FROM review_events").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM application_events").fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM company_policies").fetchone() == (0,)
 
 

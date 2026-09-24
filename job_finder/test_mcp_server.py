@@ -13,7 +13,8 @@ from fastmcp.exceptions import ToolError
 
 import job_finder.mcp_server as server_module
 from job_finder.configuration_service import ConfigurationRevisionNotFound
-from job_finder.mcp_server import Connection, McpDependencies, create_mcp_server
+from job_finder.database import Connection
+from job_finder.mcp_server import McpDependencies, create_mcp_server
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     search_configuration_revision_id,

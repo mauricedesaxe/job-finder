@@ -115,13 +115,17 @@ from job_finder.review.control_plane import (
     ScheduleView,
     unavailable_control_plane_service,
 )
-from job_finder.review.models import (
-    Compensation,
+from job_finder.review.feedback import (
     ReviewConflict,
+    ReviewFeedbackService,
+    ReviewSubmission,
+)
+from job_finder.review.queue import (
+    Compensation,
     ReviewItem,
     ReviewJob,
     ReviewQueue,
-    ReviewSubmission,
+    ReviewQueueService,
 )
 from job_finder.review.operations import (
     ACTIVITY_STATUSES,
@@ -171,7 +175,6 @@ from job_finder.review.owner_access import (
     OwnerAccessService,
     OwnerBootstrapConflict,
 )
-from job_finder.review.postgres import ReviewService
 from job_finder.provider_credentials import (
     ProviderCredentialChanged,
     ProviderCredentialRejected,
@@ -227,10 +230,11 @@ _WORK_ACTION_NOTICES = {
 
 
 def create_review_app(
-    service: ReviewService,
+    queue_service: ReviewQueueService,
     configuration_service: ConfigurationEditorService,
     settings: ReviewAppSettings,
     *,
+    feedback_service: ReviewFeedbackService,
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
     onboarding_progress_service: OnboardingProgressService | None = None,
@@ -593,7 +597,7 @@ def create_review_app(
     @app.route("/", methods=["GET"])
     def home(request: Request) -> HTMLResponse:
         try:
-            queue = service.review_queue()
+            queue = queue_service.review_queue()
         except psycopg.Error:
             return _unavailable_response()
         csrf_token = request.session.get("csrf_token")
@@ -1276,12 +1280,19 @@ def create_review_app(
     async def submit_review(
         review_item_id: str, request: Request
     ) -> HTMLResponse | RedirectResponse:
-        return await _submit_review(request, review_item_id, service, actor=actor, now=now)
+        return await _submit_review(
+            request,
+            review_item_id,
+            queue_service,
+            feedback_service,
+            actor=actor,
+            now=now,
+        )
 
     @app.route("/review/item/{review_item_id}", methods=["GET"])
     def review_item_page(review_item_id: str, request: Request) -> HTMLResponse:
         try:
-            queue = service.review_queue()
+            queue = queue_service.review_queue()
         except psycopg.Error:
             return _unavailable_response()
         csrf_token = request.session.get("csrf_token")
@@ -1379,7 +1390,8 @@ async def _submit_logout(request: Request) -> HTMLResponse | RedirectResponse:
 async def _submit_review(
     request: Request,
     review_item_id: str,
-    service: ReviewService,
+    queue_service: ReviewQueueService,
+    feedback_service: ReviewFeedbackService,
     *,
     actor: str,
     now: DateTimeClock,
@@ -1392,7 +1404,7 @@ async def _submit_review(
     except ValueError:
         return _item_not_found_response()
     try:
-        queue = service.review_queue()
+        queue = queue_service.review_queue()
     except psycopg.Error:
         return _unavailable_response()
     item = _find_item(queue, item_id)
@@ -1419,7 +1431,7 @@ async def _submit_review(
     except ValidationError:
         return _conflict_response("This review form is invalid. Reload the page and try again.")
     try:
-        result = service.submit(submission)
+        result = feedback_service.submit(submission)
     except psycopg.Error:
         return _unavailable_response()
     if isinstance(result, ReviewConflict):

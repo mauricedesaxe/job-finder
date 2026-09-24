@@ -9,8 +9,8 @@ from job_finder.configuration_service import (
     ConfigurationActivated,
     activate_search_configuration,
 )
+from job_finder.database import ConnectionFactory
 from job_finder.review.owner_access import OnboardingStage
-from job_finder.review.postgres import ConnectionFactory
 
 
 @dataclass(frozen=True)

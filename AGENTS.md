@@ -57,6 +57,12 @@ the control plane in the same change: `CONTROL_DEFINITIONS` in
 `job_finder/review/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
 pipeline explainer in `job_finder/review/app.py`. See "Dagster" in CLAUDE.md.
 
+## Domain ownership
+
+A file's name describes the subject it owns. The review queue and feedback live
+in `job_finder/review/queue.py` and `job_finder/review/feedback.py`; do not
+recreate a generic review persistence module or compatibility facade.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
 

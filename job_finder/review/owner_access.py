@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeAlias
 
-from job_finder.review.postgres import Connection, ConnectionFactory
+from job_finder.database import Connection, ConnectionFactory
 
 _SCRYPT_N = 2**17
 _SCRYPT_R = 8

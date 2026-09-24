@@ -10,10 +10,10 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.configuration_service import load_published_active_search_configuration
+from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.jev import JevRetryPolicy
 from job_finder.evaluation.openrouter import RetryPolicy as OpenRouterRetryPolicy
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
-from job_finder.review.postgres import Connection, ConnectionFactory
 from job_finder.search_configuration import SearchConfiguration
 
 

@@ -58,17 +58,21 @@ from job_finder.review.control_plane import (
     ScheduleView,
     unavailable_control_plane_service,
 )
-from job_finder.review.models import (
-    Compensation,
+from job_finder.review.feedback import (
     ReviewConflict,
+    ReviewFeedbackService,
+    ReviewSaved,
+    ReviewSubmission,
+    ReviewSubmitResult,
+)
+from job_finder.review.queue import (
+    Compensation,
     ReviewDecision,
     ReviewItem,
     ReviewJob,
     ReviewLane,
     ReviewQueue,
-    ReviewSaved,
-    ReviewSubmission,
-    ReviewSubmitResult,
+    ReviewQueueService,
 )
 from job_finder.review.operations import (
     ActivityEntry,
@@ -113,7 +117,6 @@ from job_finder.review.owner_access import (
     OwnerBootstrapped,
     OwnerBootstrapConflict,
 )
-from job_finder.review.postgres import ReviewService
 
 TODAY = date(2026, 9, 10)
 YESTERDAY = date(2026, 9, 9)
@@ -131,15 +134,19 @@ OWNER_ACCESS = OwnerAccessService(
     authenticate=lambda password: password == OWNER_PASSWORD,
     bootstrap=lambda _password: OwnerBootstrapConflict(OWNER_STATE),
 )
+DEFAULT_FEEDBACK_SERVICE = ReviewFeedbackService(
+    submit=lambda _review: ReviewSaved(review_event_id=UUID(int=9))
+)
 
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
 
 
 def test_http_route_manifest_stays_stable() -> None:
     app = create_review_app(
-        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        ReviewQueueService(review_queue=lambda: _queue()),
         _configuration_service(),
         SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -206,9 +213,10 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
         cookie_secure=True,
     )
     app = create_review_app(
-        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        ReviewQueueService(review_queue=lambda: _queue()),
         _configuration_service(),
         secure_settings,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -316,9 +324,10 @@ def test_the_old_review_url_redirects_to_the_landing_page() -> None:
 
 def test_the_operations_home_requires_the_existing_owner_session() -> None:
     app = create_review_app(
-        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        ReviewQueueService(review_queue=lambda: _queue()),
         _configuration_service(),
         SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -435,9 +444,10 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
         dismiss=lambda command: calls.append(command) or _applied_dismissal(command),
     )
     app = create_review_app(
-        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        ReviewQueueService(review_queue=lambda: _queue()),
         _configuration_service(),
         SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         operations_service=operations,
         control_service=controls,
@@ -932,9 +942,10 @@ def test_a_job_page_links_back_and_walks_the_queue() -> None:
 def test_the_login_uses_the_editorial_split_and_route_line() -> None:
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -1121,15 +1132,15 @@ def test_submitting_a_revision_returns_to_the_item_page_with_the_update() -> Non
         )
         return ReviewSaved(review_event_id=UUID(int=9))
 
-    service = ReviewService(
-        review_queue=lambda: ReviewQueue(reviewed_items=(decided[0],), reviewed_counts={TODAY: 1}),
-        submit=submit,
+    queue_service = ReviewQueueService(
+        review_queue=lambda: ReviewQueue(reviewed_items=(decided[0],), reviewed_counts={TODAY: 1})
     )
     client = TestClient(
         create_review_app(
-            service,
+            queue_service,
             _configuration_service(),
             SETTINGS,
+            feedback_service=ReviewFeedbackService(submit=submit),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -1358,9 +1369,10 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
         raise psycopg.OperationalError("database down")
 
     app = create_review_app(
-        ReviewService(review_queue=unavailable, submit=_saved),
+        ReviewQueueService(review_queue=unavailable),
         _configuration_service(),
         SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -1378,9 +1390,10 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
 def test_requires_a_signed_session_for_review_routes() -> None:
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -1429,9 +1442,10 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     )
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=owner_access,
             provider_setup_service=provider_setup,
             now=lambda: NOW,
@@ -1540,9 +1554,10 @@ def test_provider_setup_never_echoes_credentials_and_advances_when_ready() -> No
     )
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=owner_access,
             provider_setup_service=providers,
             now=lambda: NOW,
@@ -1615,9 +1630,10 @@ def test_budget_setup_shows_bounds_and_advances_to_test_search() -> None:
     )
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=owner,
             budget_setup_service=budget,
             now=lambda: NOW,
@@ -1675,9 +1691,10 @@ def test_completed_upgrade_without_a_budget_is_routed_to_budget_setup() -> None:
     )
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=owner,
             budget_setup_service=budget,
         )
@@ -1700,9 +1717,10 @@ def test_legacy_install_fails_closed_until_password_import() -> None:
     )
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=legacy,
             now=lambda: NOW,
         )
@@ -1717,9 +1735,10 @@ def test_legacy_install_fails_closed_until_password_import() -> None:
 def test_authenticates_and_signs_out_the_owner() -> None:
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -1750,9 +1769,10 @@ def test_exposes_public_health_and_database_readiness() -> None:
         readiness_calls += 1
 
     app = create_review_app(
-        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        ReviewQueueService(review_queue=lambda: _queue()),
         _configuration_service(),
         SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
         owner_access_service=OWNER_ACCESS,
         readiness=ready,
         now=lambda: NOW,
@@ -1770,9 +1790,10 @@ def test_reports_database_readiness_failure_without_authentication() -> None:
 
     client = TestClient(
         create_review_app(
-            ReviewService(review_queue=lambda: _queue(), submit=_saved),
+            ReviewQueueService(review_queue=lambda: _queue()),
             _configuration_service(),
             SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=OWNER_ACCESS,
             readiness=unavailable,
             now=lambda: NOW,
@@ -1799,12 +1820,13 @@ def _client(
     analytics: AnalyticsService | None = None,
     controls: ControlPlaneService | None = None,
 ) -> TestClient:
-    service = ReviewService(review_queue=lambda: queue, submit=submit)
+    queue_service = ReviewQueueService(review_queue=lambda: queue)
     client = TestClient(
         create_review_app(
-            service,
+            queue_service,
             _configuration_service(),
             SETTINGS,
+            feedback_service=ReviewFeedbackService(submit=submit),
             owner_access_service=OWNER_ACCESS,
             operations_service=operations,
             runs_service=runs,
@@ -1819,12 +1841,13 @@ def _client(
 
 
 def _draining_client(remaining: list[ReviewItem], submit: Submitter) -> TestClient:
-    service = ReviewService(review_queue=lambda: ReviewQueue(items=tuple(remaining)), submit=submit)
+    queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue(items=tuple(remaining)))
     client = TestClient(
         create_review_app(
-            service,
+            queue_service,
             _configuration_service(),
             SETTINGS,
+            feedback_service=ReviewFeedbackService(submit=submit),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
