@@ -2383,10 +2383,9 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     assert "Sep 10" in response.text
     assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage" in response.text
     assert '"costs": ["$0.2345", "$1.0000"]' in response.text
+    script_tags: list[str] = re.findall(r"<script[^>]*>", response.text)
     executable_inline_scripts = [
-        tag
-        for tag in re.findall(r"<script[^>]*>", response.text)
-        if "src=" not in tag and "application/json" not in tag
+        tag for tag in script_tags if "src=" not in tag and "application/json" not in tag
     ]
     assert executable_inline_scripts == []
 
