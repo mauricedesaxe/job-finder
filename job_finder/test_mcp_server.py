@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
+import hashlib
+import json
 from typing import cast
 
 import pytest
@@ -25,6 +27,38 @@ def _connect() -> Generator[Connection]:
 
 def _no_database() -> AbstractContextManager[Connection]:
     raise AssertionError("this test must not open a database connection")
+
+
+def test_mcp_tool_manifest_stays_stable() -> None:
+    server = create_mcp_server(McpDependencies(connect=_no_database))
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            tools = sorted(await client.list_tools(), key=lambda tool: tool.name)
+            manifest = [
+                {
+                    "name": tool.name,
+                    "inputSchema": tool.input_schema,
+                    "outputSchema": tool.output_schema,
+                    "annotations": None
+                    if tool.annotations is None
+                    else tool.annotations.model_dump(mode="json", by_alias=True, exclude_none=True),
+                }
+                for tool in tools
+            ]
+            encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+            assert hashlib.sha256(encoded).hexdigest() == (
+                "2cf424f6dc8402de8e210789661fb4488ce5fa669d6cbb36d023ca27ef8eed75"
+            )
+
+    asyncio.run(exercise())
+
+
+def test_mcp_server_rejects_duplicate_tool_names() -> None:
+    server = create_mcp_server(McpDependencies(connect=_no_database))
+
+    with pytest.raises(ValueError, match="Component already exists"):
+        _ = server.tool(name="feedback_list")(lambda: None)
 
 
 def test_mcp_tools_are_bounded_and_validate_input() -> None:

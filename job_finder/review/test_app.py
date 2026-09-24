@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from http.cookies import SimpleCookie
 import re
 from typing import Never, cast
 from uuid import UUID
@@ -10,6 +11,7 @@ from uuid import UUID
 import psycopg
 import pytest
 from pydantic import SecretStr
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
@@ -131,6 +133,123 @@ OWNER_ACCESS = OwnerAccessService(
 )
 
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
+
+
+def test_http_route_manifest_stays_stable() -> None:
+    app = create_review_app(
+        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        _configuration_service(),
+        SETTINGS,
+        owner_access_service=OWNER_ACCESS,
+        now=lambda: NOW,
+    )
+    get_paths = {
+        "/",
+        "/configuration",
+        "/favicon.ico",
+        "/healthz",
+        "/login",
+        "/operations",
+        "/operations/analytics",
+        "/operations/control",
+        "/operations/failures",
+        "/operations/runs",
+        "/operations/runs/{run_id}",
+        "/operations/work/{job_id}",
+        "/readyz",
+        "/review",
+        "/review/item/{review_item_id}",
+        "/setup",
+        "/setup/budget",
+        "/setup/providers",
+        "/setup/test-search",
+        "/static/{name}",
+    }
+    post_paths = {
+        "/configuration/activate",
+        "/configuration/draft",
+        "/configuration/edit",
+        "/configuration/preview",
+        "/configuration/publish",
+        "/login",
+        "/logout",
+        "/operations/dismiss",
+        "/operations/recovery",
+        "/operations/reevaluation",
+        "/operations/run",
+        "/operations/schedule",
+        "/review/{review_item_id}",
+        "/setup",
+        "/setup/budget",
+        "/setup/providers",
+        "/setup/providers/continue",
+    }
+    expected = sorted(
+        [(method, path) for path in get_paths for method in ("GET", "HEAD")]
+        + [("POST", path) for path in post_paths]
+    )
+    assert all(isinstance(route, Route) and route.methods is not None for route in app.routes)
+    actual = sorted(
+        (method, route.path)
+        for route in app.routes
+        if isinstance(route, Route)
+        for method in route.methods or ()
+    )
+
+    assert actual == expected
+
+
+def test_security_and_session_middleware_contract_stays_stable() -> None:
+    secure_settings = ReviewAppSettings(
+        bootstrap_token=SecretStr(BOOTSTRAP_TOKEN),
+        session_secret="s" * 32,
+        cookie_secure=True,
+    )
+    app = create_review_app(
+        ReviewService(review_queue=lambda: _queue(), submit=_saved),
+        _configuration_service(),
+        secure_settings,
+        owner_access_service=OWNER_ACCESS,
+        now=lambda: NOW,
+    )
+    client = TestClient(app, base_url="https://testserver")
+
+    health = client.get("/healthz")
+    accepted = client.post(
+        "/login",
+        data={"password": OWNER_PASSWORD, "next": "/"},
+        follow_redirects=False,
+    )
+    cookie = SimpleCookie()
+    cookie.load(accepted.headers["set-cookie"])
+    session = cookie["job_finder_review_session"]
+
+    assert {
+        name: health.headers[name]
+        for name in (
+            "cache-control",
+            "content-security-policy",
+            "referrer-policy",
+            "strict-transport-security",
+            "x-content-type-options",
+            "x-frame-options",
+        )
+    } == {
+        "cache-control": "no-store",
+        "content-security-policy": "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+        "referrer-policy": "no-referrer",
+        "strict-transport-security": "max-age=63072000; includeSubDomains",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+    }
+    assert "set-cookie" not in health.headers
+    assert accepted.status_code == 303
+    assert session["path"] == "/"
+    assert session["max-age"] == "1209600"
+    assert session["httponly"] is True
+    assert session["samesite"] == "lax"
+    assert session["secure"] is True
+    assert client.get("/").status_code == 200
 
 
 def test_the_operations_entry_point_redirects_to_recent_activity() -> None:
