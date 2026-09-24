@@ -21,6 +21,9 @@ from job_finder.configuration_service import load_published_active_search_config
 from job_finder.pipeline.state import claim_next_job, prepare_orchestration_run
 from job_finder.review.analytics import load_spend_analytics
 from job_finder.review.operations import (
+    ActivityPage,
+    ActivityQuery,
+    ActivityRun,
     DismissalAction,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
@@ -41,6 +44,7 @@ from job_finder.review.operations import (
     WorkRecoveryKeyConflict,
     WorkRecoveryResult,
     WorkRecoveryStaleState,
+    load_activity_page,
     load_operations_snapshot,
     load_pipeline_runs,
     load_run_detail,
@@ -1359,3 +1363,247 @@ def test_spend_analytics_reads_totals_days_models_and_runs(
 
         bounded = load_spend_analytics(connection, day_limit=45)
         assert len(bounded.days) == 2
+
+
+def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    failed_run_id = uuid4()
+    completed_run_id = uuid4()
+    retry_job_id = uuid4()
+    terminal_job_id = uuid4()
+    dismissed_job_id = uuid4()
+    pending_job_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        prompt_name, prompt_version_id = connection.execute(
+            """
+            SELECT prompt_name, prompt_version_id
+            FROM prompt_release_members
+            WHERE release_id = %s
+            ORDER BY prompt_name
+            LIMIT 1
+            """,
+            (release.id,),
+        ).fetchone() or pytest.fail("bootstrap release has no members")
+
+        def insert_run(
+            run_id: UUID,
+            kind: str,
+            status: str,
+            started: datetime,
+            completed: datetime | None,
+            error: str | None = None,
+        ) -> None:
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref, prompt_release_id,
+                  parameters, status, started_at, completed_at, error
+                ) VALUES (%s, %s, %s, 'activity-contract', %s, '{}'::jsonb, %s, %s, %s,
+                  %s::jsonb)
+                """,
+                (run_id, f"activity:{run_id}", kind, release.id, status, started, completed, error),
+            )
+
+        insert_run(
+            failed_run_id,
+            "discovery",
+            "failed",
+            now - timedelta(hours=1),
+            now,
+            error='{"code":"provider_timeout","reason":"Provider did not respond"}',
+        )
+        insert_run(completed_run_id, "processing", "completed", now - timedelta(hours=2), now)
+        failed_attempt_id = uuid4()
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, operation_key, attempt_number, input_digest,
+              status, started_at, completed_at
+            ) VALUES (%s, %s, 'activity-test', 0, %s, 'completed', %s, %s)
+            """,
+            (
+                failed_attempt_id,
+                failed_run_id,
+                "a" * 64,
+                now - timedelta(minutes=31),
+                now - timedelta(minutes=30),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_call_attempts (
+              id, processing_attempt_id, pipeline_run_id, prompt_release_id,
+              request_id, attempt_number, operation_key, prompt_name,
+              prompt_version_id, input_digest, requested_model, provider,
+              status, parsed_output, raw_response, input_tokens, output_tokens,
+              cost_usd, latency_ms, observed_at, response_model, request_messages
+            ) VALUES (
+              %s, %s, %s, %s, %s, 0, 'activity-test', %s, %s, %s,
+              'test-model', 'typesafe', 'accepted', '{}'::jsonb, '{}'::jsonb,
+              4, 2, 0.50000000, 10, %s, 'test-model', '[]'::jsonb
+            )
+            """,
+            (
+                uuid4(),
+                failed_attempt_id,
+                failed_run_id,
+                release.id,
+                "d" * 64,
+                prompt_name,
+                prompt_version_id,
+                "a" * 64,
+                now - timedelta(minutes=30),
+            ),
+        )
+
+        def insert_job(job_id: UUID, url_slug: str) -> None:
+            connection.execute(
+                """
+                INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (job_id, f"https://example.com/{url_slug}", now - timedelta(hours=3), now),
+            )
+
+        def insert_work(
+            job_id: UUID,
+            state: str,
+            *,
+            created: datetime,
+            completed: datetime | None = None,
+            last_failed: datetime | None = None,
+            retry_at: datetime | None = None,
+            error: str | None = None,
+        ) -> None:
+            connection.execute(
+                """
+                INSERT INTO job_work_items (
+                  job_id, discovery_run_id, keyword, state, created_at, completed_at,
+                  last_failed_at, retry_at, last_error
+                ) VALUES (%s, %s, 'python', %s, %s, %s, %s, %s,
+                  %s::jsonb)
+                """,
+                (
+                    job_id,
+                    completed_run_id,
+                    state,
+                    created,
+                    completed,
+                    last_failed,
+                    retry_at,
+                    error,
+                ),
+            )
+
+        insert_job(retry_job_id, "retry")
+        insert_job(terminal_job_id, "terminal")
+        insert_job(dismissed_job_id, "dismissed")
+        insert_job(pending_job_id, "pending")
+
+        insert_work(
+            retry_job_id,
+            "failed",
+            created=now,
+            last_failed=now,
+            retry_at=now + timedelta(minutes=15),
+            error='{"retryability":"retryable","code":"provider_timeout","reason":"Provider did not respond"}',
+        )
+        insert_work(
+            terminal_job_id,
+            "terminal_error",
+            created=now - timedelta(minutes=5),
+            completed=now - timedelta(minutes=4),
+            last_failed=now - timedelta(minutes=4),
+            error='{"retryability":"terminal","code":"invalid_job","reason":"Job is invalid"}',
+        )
+        insert_work(
+            dismissed_job_id,
+            "terminal_error",
+            created=now - timedelta(minutes=10),
+            completed=now - timedelta(minutes=9),
+            last_failed=now - timedelta(minutes=9),
+            error='{"retryability":"terminal","code":"invalid_job","reason":"Job is invalid"}',
+        )
+        connection.execute(
+            """
+            INSERT INTO work_dismissals (job_id, attempt_count, actor, dismissed_at)
+            VALUES (%s, 0, 'owner', %s)
+            """,
+            (dismissed_job_id, now - timedelta(minutes=3)),
+        )
+        insert_work(pending_job_id, "pending", created=now - timedelta(minutes=1))
+
+        def refs(page: ActivityPage) -> list[str]:
+            return [entry.ref for entry in page.entries]
+
+        def statuses(page: ActivityPage) -> list[str]:
+            return [entry.status for entry in page.entries]
+
+        everything = load_activity_page(connection, ActivityQuery(limit=50))
+        assert len(everything.entries) == 6
+        assert refs(everything) == [
+            str(retry_job_id),
+            str(pending_job_id),
+            str(terminal_job_id),
+            str(dismissed_job_id),
+            str(failed_run_id),
+            str(completed_run_id),
+        ]
+        assert statuses(everything) == [
+            "retrying",
+            "running",
+            "terminal",
+            "dismissed",
+            "failed",
+            "completed",
+        ]
+        assert everything.next_cursor is None
+
+        run_entry = next(e for e in everything.entries if e.entry_type == "run")
+        assert isinstance(run_entry.item, ActivityRun)
+        assert run_entry.item.model_calls == 1
+        assert run_entry.item.known_cost_usd == Decimal("0.5")
+        assert run_entry.item.processing_attempts == 1
+
+        failed_only = load_activity_page(connection, ActivityQuery(statuses=frozenset({"failed"})))
+        assert refs(failed_only) == [str(failed_run_id)]
+
+        attention = load_activity_page(
+            connection, ActivityQuery(statuses=frozenset({"retrying", "terminal", "dismissed"}))
+        )
+        assert refs(attention) == [str(retry_job_id), str(terminal_job_id), str(dismissed_job_id)]
+
+        work_only = load_activity_page(connection, ActivityQuery(kind="work"))
+        assert all(entry.kind == "work" for entry in work_only.entries)
+        assert len(work_only.entries) == 4
+
+        discovery_only = load_activity_page(connection, ActivityQuery(kind="discovery"))
+        assert refs(discovery_only) == [str(failed_run_id)]
+
+        windowed = load_activity_page(
+            connection,
+            ActivityQuery(
+                from_at=now - timedelta(hours=1),
+                to_at=now - timedelta(minutes=2),
+            ),
+        )
+        assert refs(windowed) == [
+            str(terminal_job_id),
+            str(dismissed_job_id),
+            str(failed_run_id),
+        ]
+
+        first = load_activity_page(connection, ActivityQuery(limit=3))
+        assert refs(first) == refs(everything)[:3]
+        assert first.next_cursor is not None
+        second = load_activity_page(connection, ActivityQuery(limit=3, cursor=first.next_cursor))
+        assert refs(second) == refs(everything)[3:]
+        assert second.next_cursor is None
+
+        with pytest.raises(ValueError):
+            load_activity_page(connection, ActivityQuery(cursor="garbage!"))
