@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, assert_never, cast
 from urllib.parse import quote, urlencode
@@ -291,7 +292,7 @@ def create_review_app(
         path = _STATIC_ASSETS.get(name)
         if path is None or not path.is_file():
             return Response(status_code=404)
-        return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
+        return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     @app.route("/setup", methods=["GET"])
     def setup_form(request: Request) -> HTMLResponse:
@@ -904,8 +905,8 @@ def create_review_app(
                 ),
                 title="Model spend",
                 scripts=(
-                    Script(src="/static/frappe-charts.min.umd.js"),
-                    Script(src="/static/spend-chart-init.js"),
+                    Script(src=_STATIC_URLS["frappe-charts.min.umd.js"]),
+                    Script(src=_STATIC_URLS["spend-chart-init.js"]),
                 ),
             )
         )
@@ -3251,10 +3252,29 @@ def _state_response(
     return HTMLResponse(_document(content), status_code=status_code)
 
 
-_STATIC_ASSETS = {
-    "frappe-charts.min.umd.js": Path(__file__).parent / "static" / "frappe-charts.min.umd.js",
-    "spend-chart-init.js": Path(__file__).parent / "static" / "spend-chart-init.js",
-}
+_STATIC_DIR = Path(__file__).parent / "static"
+_ASSET_HASH_LENGTH = 10
+
+
+def _hashed_static_assets(directory: Path) -> dict[str, Path]:
+    assets: dict[str, Path] = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_file():
+            digest = sha256(path.read_bytes()).hexdigest()[:_ASSET_HASH_LENGTH]
+            assets[f"{path.stem}.{digest}{path.suffix}"] = path
+    return assets
+
+
+def _hashed_static_urls(assets: dict[str, Path]) -> dict[str, str]:
+    urls: dict[str, str] = {}
+    for hashed_name, path in assets.items():
+        original = f"{path.stem}{path.suffix}"
+        urls[original] = f"/static/{hashed_name}"
+    return urls
+
+
+_STATIC_ASSETS = _hashed_static_assets(_STATIC_DIR)
+_STATIC_URLS = _hashed_static_urls(_STATIC_ASSETS)
 
 
 def _document(

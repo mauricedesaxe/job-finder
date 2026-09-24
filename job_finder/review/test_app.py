@@ -2382,8 +2382,14 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     response = client.get("/operations/analytics")
 
     assert response.status_code == 200
-    assert 'src="/static/frappe-charts.min.umd.js"' in response.text
-    assert 'src="/static/spend-chart-init.js"' in response.text
+    library_match = re.search(r'src="(/static/frappe-charts[^"]+)"', response.text)
+    init_match = re.search(r'src="(/static/spend-chart-init[^"]+)"', response.text)
+    assert library_match is not None
+    assert init_match is not None
+    assert re.fullmatch(
+        r"/static/frappe-charts\.min\.umd\.[0-9a-f]{10}\.js", library_match.group(1)
+    )
+    assert re.fullmatch(r"/static/spend-chart-init\.[0-9a-f]{10}\.js", init_match.group(1))
     assert 'id="spend-per-day-chart"' in response.text
     assert "Sep 9" in response.text
     assert "Sep 10" in response.text
@@ -2406,15 +2412,25 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
 def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
 
-    library = client.get("/static/frappe-charts.min.umd.js")
-    init_script = client.get("/static/spend-chart-init.js")
+    page = client.get("/operations/analytics")
+    library_match = re.search(r'src="(/static/frappe-charts[^"]+)"', page.text)
+    init_match = re.search(r'src="(/static/spend-chart-init[^"]+)"', page.text)
+    assert library_match is not None
+    assert init_match is not None
+
+    library = client.get(library_match.group(1))
+    init_script = client.get(init_match.group(1))
+    stale_url = client.get("/static/spend-chart-init.js")
     missing = client.get("/static/nope.js")
 
     assert library.status_code == 200
     assert "javascript" in library.headers["content-type"]
+    assert library.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert init_script.status_code == 200
+    assert init_script.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert "frappe.Chart" in init_script.text
     assert "stacked: true" in init_script.text
+    assert stale_url.status_code == 404
     assert missing.status_code == 404
 
 
