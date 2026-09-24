@@ -7,11 +7,19 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from job_finder.ats.models import (
     AtsAvailable,
     CompensationObservation,
-    compensation_period_from_interval,
+    CompensationPeriod,
     normalize_workplace_type,
     unique_locations,
 )
 from job_finder.urls import parse_http_url
+
+_COMPENSATION_PERIOD_BY_UNIT: dict[str, CompensationPeriod] = {
+    "year": "year",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "hour": "hour",
+}
 
 
 class _AshbyWireModel(BaseModel):
@@ -125,9 +133,15 @@ def _compensation_from(
         return None
     if component.min_value is None and component.max_value is None:
         return None
+    interval_parts = component.interval.strip().split() if component.interval is not None else ()
+    period = (
+        _COMPENSATION_PERIOD_BY_UNIT.get(interval_parts[1].lower())
+        if len(interval_parts) == 2
+        else None
+    )
     return CompensationObservation(
         minimum=component.min_value,
         maximum=component.max_value,
         currency=component.currency_code,
-        period=compensation_period_from_interval(component.interval),
+        period=period,
     )

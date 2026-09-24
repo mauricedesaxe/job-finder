@@ -21,6 +21,7 @@ from job_finder.ats.policy import (
     ats_structural_filter,
     detect_ats_source,
     format_ats_block,
+    format_ats_description,
 )
 from job_finder.ats.workable import parse_workable_job, parse_workable_url
 
@@ -117,6 +118,36 @@ def test_parses_structured_compensation_from_a_recorded_ashby_payload() -> None:
 
 
 @pytest.mark.parametrize(
+    ("interval", "expected"),
+    ((None, None), ("year", None), ("1 fortnight", None), ("  1 YEAR ", "year")),
+)
+def test_parses_ashby_compensation_intervals(interval: str | None, expected: str | None) -> None:
+    evidence = parse_ashby_job(
+        {
+            "jobs": [
+                {
+                    "id": "job-1",
+                    "compensation": {
+                        "summaryComponents": [
+                            {
+                                "compensationType": "Salary",
+                                "interval": interval,
+                                "minValue": 100,
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+        "job-1",
+    )
+
+    assert evidence is not None
+    assert evidence.compensation is not None
+    assert evidence.compensation.period == expected
+
+
+@pytest.mark.parametrize(
     ("parser", "url", "expected"),
     (
         (parse_ashby_url, "https://jobs.ashbyhq.com/ledger/abc-123", ("ledger", "abc-123")),
@@ -190,6 +221,18 @@ def test_formats_structured_evidence_for_the_evaluator() -> None:
             "- Workplace type: Remote",
             "- Country fallback when locations are non-geographic: AR",
             "---",
+        )
+    )
+    assert format_ats_description(data, "Job body") == "\n".join(
+        (
+            "## ATS Structured Data (from lever API)",
+            "- Primary location: Argentina",
+            "- All listed locations: Argentina, Europe, Spain",
+            "- Workplace type: Remote",
+            "- Country fallback when locations are non-geographic: AR",
+            "---",
+            "",
+            "Job body",
         )
     )
 

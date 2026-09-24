@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable
-from job_finder.ats.policy import ats_structural_filter, format_ats_block
+from job_finder.ats.policy import ats_structural_filter, format_ats_description
 from job_finder.discovery.exchange_rates import format_compensation_rates
 from job_finder.discovery.jina import (
     JinaUnavailable,
@@ -663,7 +663,7 @@ def _resolve_claim_ats(
     if isinstance(evidence, AtsAvailable):
         listing = listing.model_copy(
             update={
-                "description": f"{format_ats_block(evidence)}\n\n{body}",
+                "description": format_ats_description(evidence, body),
                 "location": evidence.location,
             }
         )

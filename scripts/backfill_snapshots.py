@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable
-from job_finder.ats.policy import detect_ats_source, format_ats_block
+from job_finder.ats.policy import detect_ats_source, format_ats_description
 from job_finder.config import BackfillSettings
 from job_finder.database import apply_migrations
 
@@ -127,7 +127,7 @@ def _plan_correction(
     description: str | None = None
     reason_parts: list[str] = []
     if evidence.description is not None and body_length < min_body_length:
-        description = f"{format_ats_block(evidence)}\n\n{evidence.description}"
+        description = format_ats_description(evidence, evidence.description)
         reason_parts.append(f"description {body_length} -> {len(description)} chars")
     compensation = evidence.compensation
     fields: tuple[object, ...] = (None, None, None, None, None)
