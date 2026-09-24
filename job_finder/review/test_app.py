@@ -204,6 +204,45 @@ def test_http_route_manifest_stays_stable() -> None:
     )
 
     assert actual == expected
+    assert [(route.path, route.name) for route in app.routes] == [
+        ("/healthz", "create_review_app_healthz"),
+        ("/readyz", "create_review_app_readyz"),
+        ("/favicon.ico", "create_review_app_favicon"),
+        ("/static/{name}", "create_review_app_static_asset"),
+        ("/setup", "create_review_app_setup_form"),
+        ("/setup", "create_review_app_setup_submit"),
+        ("/setup/providers", "create_review_app_provider_setup_form"),
+        ("/setup/providers", "create_review_app_provider_setup_submit"),
+        ("/setup/providers/continue", "create_review_app_provider_setup_continue"),
+        ("/login", "create_review_app_login_form"),
+        ("/setup/budget", "create_review_app_budget_setup_form"),
+        ("/setup/budget", "create_review_app_budget_setup_submit"),
+        ("/setup/test-search", "create_review_app_test_search_setup"),
+        ("/login", "create_review_app_login_submit"),
+        ("/", "create_review_app_home"),
+        ("/review", "create_review_app_review_page"),
+        ("/operations", "create_review_app_operations_page"),
+        ("/operations/control", "create_review_app_control_plane_page"),
+        ("/operations/run", "create_review_app_run_operation"),
+        ("/operations/schedule", "create_review_app_change_schedule"),
+        ("/operations/recovery", "create_review_app_recover_operation"),
+        ("/operations/runs", "create_review_app_pipeline_runs_page"),
+        ("/operations/runs/{run_id}", "create_review_app_run_detail_page"),
+        ("/operations/work/{job_id}", "create_review_app_work_item_page"),
+        ("/operations/failures", "create_review_app_failures_page"),
+        ("/operations/analytics", "create_review_app_spend_analytics_page"),
+        ("/operations/dismiss", "create_review_app_dismiss_operation"),
+        ("/operations/reevaluation", "create_review_app_request_reevaluation"),
+        ("/configuration", "create_review_app_configuration"),
+        ("/configuration/edit", "create_review_app_edit_configuration"),
+        ("/configuration/preview", "create_review_app_preview_configuration"),
+        ("/configuration/draft", "create_review_app_save_configuration"),
+        ("/configuration/publish", "create_review_app_publish_configuration"),
+        ("/configuration/activate", "create_review_app_activate_configuration"),
+        ("/review/{review_item_id}", "create_review_app_submit_review"),
+        ("/review/item/{review_item_id}", "create_review_app_review_item_page"),
+        ("/logout", "create_review_app_logout"),
+    ]
 
 
 def test_security_and_session_middleware_contract_stays_stable() -> None:
@@ -221,6 +260,11 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
         now=lambda: NOW,
     )
     client = TestClient(app, base_url="https://testserver")
+
+    assert [middleware.cls.__name__ for middleware in app.user_middleware] == [
+        "SecurityHeadersMiddleware",
+        "SessionMiddleware",
+    ]
 
     health = client.get("/healthz")
     accepted = client.post(
@@ -1781,6 +1825,9 @@ def test_exposes_public_health_and_database_readiness() -> None:
 
     assert client.get("/healthz").text == "ok"
     assert client.get("/readyz").text == "ready"
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code == 204
+    assert favicon.content == b""
     assert readiness_calls == 1
 
 
@@ -2616,6 +2663,22 @@ def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     assert "stacked" not in latency_init_script.text
     assert stale_url.status_code == 404
     assert missing.status_code == 404
+
+
+def test_static_assets_require_the_owner_session() -> None:
+    app = create_review_app(
+        ReviewQueueService(review_queue=lambda: _queue()),
+        _configuration_service(),
+        SETTINGS,
+        feedback_service=DEFAULT_FEEDBACK_SERVICE,
+        owner_access_service=OWNER_ACCESS,
+        now=lambda: NOW,
+    )
+
+    response = TestClient(app).get("/static/nope.js", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2Fstatic%2Fnope.js"
 
 
 def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
