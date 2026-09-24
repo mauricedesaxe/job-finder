@@ -2521,13 +2521,25 @@ def _spend_chart(days: tuple[DaySpend, ...]) -> object:
         if day.errors:
             line += f" · {day.errors} returned no usage"
         details.append(f"{label}, {day.day.year} · {line}")
+    totals: dict[str, Decimal] = {}
+    for day in ordered:
+        for part in day.by_model:
+            totals[part.model] = totals.get(part.model, Decimal(0)) + part.known_cost_usd
+    datasets = []
+    for model in sorted(totals, key=lambda name: (-totals[name], name)):
+        model_costs = [
+            next((part.known_cost_usd for part in day.by_model if part.model == model), Decimal(0))
+            for day in ordered
+        ]
+        datasets.append(
+            {
+                "name": model,
+                "values": [float(cost) for cost in model_costs],
+                "costs": [f"${cost:,.4f}" for cost in model_costs],
+            }
+        )
     payload = json.dumps(
-        {
-            "labels": labels,
-            "values": [float(day.known_cost_usd) for day in ordered],
-            "costs": [f"${day.known_cost_usd:,.4f}" for day in ordered],
-            "details": details,
-        },
+        {"labels": labels, "details": details, "datasets": datasets},
         ensure_ascii=False,
     ).replace("</", "<\\/")
     return Div(

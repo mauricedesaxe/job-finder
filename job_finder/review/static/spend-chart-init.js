@@ -3,20 +3,34 @@
   var dataElement = document.getElementById("spend-per-day-data");
   if (!container || !dataElement || typeof frappe === "undefined") return;
   var data = JSON.parse(dataElement.textContent);
-  var acid = getComputedStyle(document.documentElement).getPropertyValue("--acid").trim();
+  var styles = getComputedStyle(document.documentElement);
+  function cssColor(name, fallback) {
+    return styles.getPropertyValue(name).trim() || fallback;
+  }
+  var colors = [
+    cssColor("--acid", "#dfff00"),
+    cssColor("--focus", "#315cff"),
+    cssColor("--caution", "#ffd86b"),
+    cssColor("--muted", "#5d5b54")
+  ];
+  var costsByValue = {};
+  data.datasets.forEach(function (dataset) {
+    dataset.values.forEach(function (value, i) {
+      costsByValue[value] = dataset.costs[i];
+    });
+  });
   new frappe.Chart(container, {
     type: "bar",
     height: 180,
-    data: { labels: data.labels, datasets: [{ values: data.values }] },
-    colors: [acid || "#c8f542"],
-    barOptions: { spaceRatio: 0.25 },
+    data: { labels: data.labels, datasets: data.datasets },
+    colors: colors,
+    barOptions: { spaceRatio: 0.25, stacked: true },
     tooltipOptions: {
       formatTooltipX: function (label) {
         return data.details[data.labels.indexOf(label)] || label;
       },
       formatTooltipY: function (value) {
-        var i = data.values.indexOf(value);
-        return i >= 0 ? data.costs[i] : "$" + Number(value).toFixed(4);
+        return costsByValue[value] || "$" + Number(value).toFixed(4);
       }
     }
   });

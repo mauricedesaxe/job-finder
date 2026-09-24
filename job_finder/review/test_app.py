@@ -31,6 +31,7 @@ from job_finder.provider_credentials import (
 )
 from job_finder.review.analytics import (
     AnalyticsService,
+    DayModelSpend,
     DaySpend,
     ModelSpend,
     SpendAnalytics,
@@ -2311,6 +2312,10 @@ def _spend_analytics() -> SpendAnalytics:
                 accepted=3,
                 errors=1,
                 known_cost_usd=Decimal("1.0000"),
+                by_model=(
+                    DayModelSpend(model="z-ai/glm-4.6", known_cost_usd=Decimal("0.9000")),
+                    DayModelSpend(model="openai/gpt-5-mini", known_cost_usd=Decimal("0.1000")),
+                ),
             ),
             DaySpend(
                 day=NOW.date() - timedelta(days=1),
@@ -2318,6 +2323,7 @@ def _spend_analytics() -> SpendAnalytics:
                 accepted=1,
                 errors=1,
                 known_cost_usd=Decimal("0.2345"),
+                by_model=(DayModelSpend(model="z-ai/glm-4.6", known_cost_usd=Decimal("0.2345")),),
             ),
         ),
         models=(
@@ -2382,7 +2388,14 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     assert "Sep 9" in response.text
     assert "Sep 10" in response.text
     assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage" in response.text
-    assert '"costs": ["$0.2345", "$1.0000"]' in response.text
+    assert (
+        '{"name": "z-ai/glm-4.6", "values": [0.2345, 0.9], "costs": ["$0.2345", "$0.9000"]}'
+        in response.text
+    )
+    assert (
+        '{"name": "openai/gpt-5-mini", "values": [0.0, 0.1], "costs": ["$0.0000", "$0.1000"]}'
+        in response.text
+    )
     script_tags: list[str] = re.findall(r"<script[^>]*>", response.text)
     executable_inline_scripts = [
         tag for tag in script_tags if "src=" not in tag and "application/json" not in tag
@@ -2401,6 +2414,7 @@ def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     assert "javascript" in library.headers["content-type"]
     assert init_script.status_code == 200
     assert "frappe.Chart" in init_script.text
+    assert "stacked: true" in init_script.text
     assert missing.status_code == 404
 
 
