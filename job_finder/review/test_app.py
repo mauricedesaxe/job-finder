@@ -78,9 +78,8 @@ from job_finder.review.operations import (
     JobReevaluationResult,
     OperationsHealth,
     OperationsService,
-    PipelineRunStatus,
     OperationsSnapshot,
-    PipelineRunSummary,
+    PipelineRunStatus,
     QueueCounts,
     RecoveryAction,
     RecoveryOutcome,
@@ -128,95 +127,48 @@ OWNER_ACCESS = OwnerAccessService(
 Submitter = Callable[[ReviewSubmission], ReviewSubmitResult]
 
 
-def test_the_operations_page_shows_truthful_owner_operations_status() -> None:
+def test_the_operations_entry_point_redirects_to_recent_activity() -> None:
+    client = _client(_queue())
+
+    response = client.get("/operations", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/operations/runs"
+
+
+def test_operations_pages_mark_their_shell_sections() -> None:
     snapshot = OperationsSnapshot(
-        health=OperationsHealth.ACTION_REQUIRED,
-        queues=QueueCounts(pending=2, leased=1, retrying=3, completed=20, terminal_error=1),
-        spend=SpendSummary(known_usd=Decimal("1.2345"), unknown_attempts=4),
-        recent_runs=(
-            PipelineRunSummary(
-                id=UUID(int=20),
-                kind="orchestration",
-                status="failed",
-                started_at=NOW,
-                completed_at=NOW,
-            ),
-        ),
-        failures=(
-            FailureSample(
-                source="job",
-                occurred_at=NOW,
-                summary="provider_timeout: OpenRouter did not respond",
-            ),
-        ),
-        actionable_work=(
-            ActionableWork(
-                job_id=UUID(int=31),
-                state="failed",
-                attempt_count=2,
-                retry_at=NOW,
-                failed_at=NOW,
-                failure_summary="provider_timeout: OpenRouter did not respond",
-            ),
-            ActionableWork(
-                job_id=UUID(int=32),
-                state="terminal_error",
-                attempt_count=3,
-                retry_at=None,
-                failed_at=NOW,
-                failure_summary="invalid_job: Job is invalid",
-            ),
-        ),
-        actionable_work_total=2,
-    )
-    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
-
-    response = client.get("/operations")
-
-    assert response.status_code == 200
-    assert "Action required" in response.text
-    assert "2 pending" in response.text
-    assert "1 leased" in response.text
-    assert "3 retrying" in response.text
-    assert "20 completed" in response.text
-    assert "1 terminal error" in response.text
-    assert "pendings" not in response.text
-    assert "leaseds" not in response.text
-    assert "retryings" not in response.text
-    assert "completeds" not in response.text
-    assert "$1.2345" in response.text
-    assert "4 attempts have no recorded cost" in response.text
-    assert "OpenRouter did not respond" in response.text
-    assert "Open the control plane" in response.text
-
-
-def test_the_operations_page_marks_its_section_and_relative_times() -> None:
-    snapshot = OperationsSnapshot(
-        health=OperationsHealth.CAUGHT_UP,
+        health=OperationsHealth.UNKNOWN,
         queues=QueueCounts(completed=2),
         spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
-        recent_runs=(
-            PipelineRunSummary(
-                id=UUID(int=21),
-                kind="orchestration",
-                status="completed",
-                started_at=NOW,
-                completed_at=NOW,
-            ),
-        ),
+        recent_runs=(),
         failures=(),
     )
-    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: snapshot),
+        runs=RunsService(list=lambda _limit: (_run_item(value=1),)),
+    )
 
-    response = client.get("/operations")
+    runs = client.get("/operations/runs")
+    failures = client.get("/operations/failures")
 
-    assert response.status_code == 200
-    assert 'aria-current="page" class="shell-link">Operations</a>' in response.text
-    assert 'href="/" class="shell-link">Review</a>' in response.text
-    assert 'href="/configuration" class="shell-link">Search setup</a>' in response.text
-    assert 'aria-current="page">Operations<' not in response.text
-    assert "just now" in response.text
-    assert 'title="2026-09-10 12:00 UTC"' in response.text
+    assert (
+        'href="/operations/runs" aria-current="page" class="shell-link">Operations</a>' in runs.text
+    )
+    assert 'href="/" class="shell-link">Review</a>' in runs.text
+    assert 'href="/configuration" class="shell-link">Search setup</a>' in runs.text
+    assert (
+        'href="/operations/runs" aria-current="page" class="shell-link">Recent activity</a>'
+        in runs.text
+    )
+    assert "just now" in runs.text
+    assert 'title="2026-09-10 12:00 UTC"' in runs.text
+    assert (
+        'href="/operations/failures" aria-current="page" class="shell-link">Recent failures</a>'
+        in failures.text
+    )
+    assert 'href="/operations/runs" class="shell-link">Recent activity</a>' in failures.text
 
 
 def test_the_review_queue_is_the_landing_page() -> None:
@@ -242,7 +194,13 @@ def test_the_failures_page_renders_bounded_recovery_commands() -> None:
         queues=QueueCounts(retrying=1, terminal_error=1),
         spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
         recent_runs=(),
-        failures=(),
+        failures=(
+            FailureSample(
+                source="job",
+                occurred_at=NOW,
+                summary="provider_timeout: OpenRouter did not respond",
+            ),
+        ),
         actionable_work=(
             ActionableWork(
                 job_id=UUID(int=31),
@@ -276,6 +234,8 @@ def test_the_failures_page_renders_bounded_recovery_commands() -> None:
     assert "Re-runs it with a fresh attempt budget. Past decisions stay put." in response.text
     assert 'name="expected_attempt_count" value="2"' in response.text
     assert "Showing the newest 2 of 5" in response.text
+    assert "Recent failures" in response.text
+    assert "provider_timeout: OpenRouter did not respond" in response.text
 
 
 def test_the_operations_home_requires_the_existing_owner_session() -> None:
@@ -291,85 +251,6 @@ def test_the_operations_home_requires_the_existing_owner_session() -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login?next=%2F"
-
-
-def test_the_operations_home_reports_database_unavailability() -> None:
-    def unavailable() -> OperationsSnapshot:
-        raise psycopg.OperationalError("offline")
-
-    client = _client(_queue(), operations=OperationsService(load=unavailable))
-
-    response = client.get("/operations")
-
-    assert response.status_code == 503
-    assert "Operations status is unavailable" in response.text
-
-
-@pytest.mark.parametrize(
-    ("snapshot", "heading"),
-    [
-        (
-            OperationsSnapshot(
-                health=OperationsHealth.UNKNOWN,
-                queues=QueueCounts(),
-                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
-                recent_runs=(),
-                failures=(),
-            ),
-            "Status unknown",
-        ),
-        (
-            OperationsSnapshot(
-                health=OperationsHealth.WORKING,
-                queues=QueueCounts(pending=1),
-                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
-                recent_runs=(
-                    PipelineRunSummary(
-                        id=UUID(int=7),
-                        kind="processing",
-                        status="running",
-                        started_at=NOW,
-                        completed_at=None,
-                    ),
-                ),
-                failures=(),
-            ),
-            "Work is in progress",
-        ),
-        (
-            OperationsSnapshot(
-                health=OperationsHealth.CAUGHT_UP,
-                queues=QueueCounts(),
-                spend=SpendSummary(known_usd=Decimal("0"), unknown_attempts=0),
-                recent_runs=(
-                    PipelineRunSummary(
-                        id=UUID(int=8),
-                        kind="processing",
-                        status="completed",
-                        started_at=NOW,
-                        completed_at=NOW,
-                    ),
-                ),
-                failures=(),
-            ),
-            "Caught up",
-        ),
-    ],
-)
-def test_the_operations_page_renders_each_operations_health_state(
-    snapshot: OperationsSnapshot, heading: str
-) -> None:
-    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
-
-    response = client.get("/operations")
-
-    assert response.status_code == 200
-    assert heading in response.text
-    assert "No recent failures recorded." in response.text
-    if snapshot.recent_runs:
-        assert snapshot.recent_runs[0].status in response.text
-    else:
-        assert "No pipeline runs recorded." in response.text
 
 
 _CONTROL_DESCRIPTION_MATCHES = {
@@ -857,7 +738,7 @@ def test_job_reevaluation_passes_an_exact_typed_command_and_redirects() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/operations?notice=reevaluation-requested"
+    assert response.headers["location"] == "/operations/runs?notice=reevaluation-requested"
     assert calls == [
         JobReevaluationCommand(
             idempotency_key="private-key",
@@ -2235,7 +2116,11 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "$1.1000" in response.text
     assert "up to 5200 ms" in response.text
     assert 'href="/operations/runs/00000000-0000-0000-0000-000000000007"' in response.text
-    assert 'href="/operations"' in response.text
+    assert (
+        'href="/operations/analytics" aria-current="page" class="shell-link">Analytics</a>'
+        in response.text
+    )
+    assert 'href="/operations" class="back-link"' not in response.text
 
 
 def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
@@ -2274,13 +2159,13 @@ def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
     assert "Model spend analytics are unavailable" in response.text
 
 
-def test_the_operations_overview_links_to_the_analytics_page() -> None:
+def test_the_recent_failures_page_links_to_the_analytics_page() -> None:
     client = _client(
         _queue(),
         operations=OperationsService(load=lambda: _operations_snapshot()),
     )
 
-    response = client.get("/operations")
+    response = client.get("/operations/failures")
 
     assert response.status_code == 200
     assert 'href="/operations/analytics"' in response.text

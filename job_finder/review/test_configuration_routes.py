@@ -193,7 +193,7 @@ def test_initial_editor_preserves_order_and_uses_the_shared_responsive_chrome() 
     assert 'value="greenhouse"' in response.text
     assert 'value="workable"' in response.text
     assert 'aria-label="Owner workbench"' in response.text
-    assert 'href="/operations" class="shell-link">Operations</a>' in response.text
+    assert 'href="/operations/runs" class="shell-link">Operations</a>' in response.text
     assert 'href="/" class="shell-link">Review</a>' in response.text
     assert (
         'href="/configuration" aria-current="page" class="shell-link">Search setup</a>'
