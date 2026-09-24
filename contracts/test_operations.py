@@ -19,6 +19,7 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.pipeline.state import claim_next_job, prepare_orchestration_run
+from job_finder.review.analytics import load_spend_analytics
 from job_finder.review.operations import (
     DismissalAction,
     JobReevaluationAccepted,
@@ -1149,3 +1150,210 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
 
         with pytest.raises(RunNotFound):
             load_run_detail(connection, uuid4())
+
+
+def test_spend_analytics_reads_totals_days_models_and_runs(
+    authority_schema: str,
+) -> None:
+    now = datetime.now(UTC)
+    recent_run_id = uuid4()
+    older_run_id = uuid4()
+    job_id = uuid4()
+    recent_attempt_id = uuid4()
+    older_attempt_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        prompt_name, prompt_version_id = connection.execute(
+            """
+            SELECT prompt_name, prompt_version_id
+            FROM prompt_release_members
+            WHERE release_id = %s
+            ORDER BY prompt_name
+            LIMIT 1
+            """,
+            (release.id,),
+        ).fetchone() or pytest.fail("bootstrap release has no members")
+        for run, key, started, kind in (
+            (recent_run_id, f"spend:{recent_run_id}", now - timedelta(hours=4), "orchestration"),
+            (older_run_id, f"spend:{older_run_id}", now - timedelta(days=45), "orchestration"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref, prompt_release_id,
+                  parameters, status, started_at, completed_at
+                ) VALUES (%s, %s, %s, 'spend-contract', %s, '{"source": "contract"}'::jsonb,
+                  'completed', %s, %s)
+                """,
+                (run, key, kind, release.id, started, started),
+            )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/spend-contract', %s, %s)
+            """,
+            (job_id, now, now),
+        )
+        for attempt, run, digest in (
+            (recent_attempt_id, recent_run_id, "e" * 64),
+            (older_attempt_id, older_run_id, "0" * 63 + "1"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO processing_attempts (
+                  id, pipeline_run_id, job_id, operation_key, attempt_number,
+                  input_digest, status, started_at, completed_at
+                ) VALUES (%s, %s, %s, 'evaluation', 0, %s, 'completed', %s, %s)
+                """,
+                (attempt, run, job_id, digest, now, now),
+            )
+
+        def model_attempt(
+            attempt_id: UUID,
+            request_digest: str,
+            *,
+            run_id: UUID,
+            processing_attempt_id: UUID,
+            input_digest: str,
+            model: str,
+            status: str,
+            cost: Decimal | None,
+            input_tokens: int | None,
+            output_tokens: int | None,
+            latency_ms: int,
+            observed_at: datetime,
+            response_model: str | None,
+        ) -> None:
+            accepted = status == "accepted"
+            connection.execute(
+                """
+                INSERT INTO model_call_attempts (
+                  id, processing_attempt_id, pipeline_run_id, prompt_release_id,
+                  request_id, attempt_number, operation_key, prompt_name,
+                  prompt_version_id, input_digest, requested_model, provider,
+                  status, parsed_output, raw_response, input_tokens, output_tokens,
+                  cost_usd, latency_ms, observed_at, error, response_model,
+                  request_messages
+                ) VALUES (
+                  %s, %s, %s, %s, %s, 0, 'evaluation', %s, %s, %s,
+                  %s, 'typesafe', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '[]'::jsonb
+                )
+                """,
+                (
+                    attempt_id,
+                    processing_attempt_id,
+                    run_id,
+                    release.id,
+                    request_digest,
+                    prompt_name,
+                    prompt_version_id,
+                    input_digest,
+                    model,
+                    status,
+                    Jsonb({}) if accepted else None,
+                    Jsonb({}) if accepted else None,
+                    input_tokens,
+                    output_tokens,
+                    cost,
+                    latency_ms,
+                    observed_at,
+                    None if accepted else Jsonb({"code": "provider_timeout"}),
+                    response_model,
+                ),
+            )
+
+        model_attempt(
+            uuid4(),
+            "f" * 64,
+            run_id=recent_run_id,
+            processing_attempt_id=recent_attempt_id,
+            input_digest="e" * 64,
+            model="glm-4.6",
+            status="accepted",
+            cost=Decimal("0.25000000"),
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=40,
+            observed_at=now - timedelta(hours=4),
+            response_model="glm-4.6",
+        )
+        model_attempt(
+            uuid4(),
+            "a" * 64,
+            run_id=recent_run_id,
+            processing_attempt_id=recent_attempt_id,
+            input_digest="e" * 64,
+            model="gpt-5-mini",
+            status="accepted",
+            cost=Decimal("0.10000000"),
+            input_tokens=8,
+            output_tokens=4,
+            latency_ms=20,
+            observed_at=now - timedelta(hours=3),
+            response_model="gpt-5-mini",
+        )
+        model_attempt(
+            uuid4(),
+            "b" * 64,
+            run_id=recent_run_id,
+            processing_attempt_id=recent_attempt_id,
+            input_digest="e" * 64,
+            model="glm-4.6",
+            status="retryable_error",
+            cost=None,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=5,
+            observed_at=now - timedelta(hours=2),
+            response_model=None,
+        )
+        model_attempt(
+            uuid4(),
+            "c" * 64,
+            run_id=older_run_id,
+            processing_attempt_id=older_attempt_id,
+            input_digest="0" * 63 + "1",
+            model="glm-4.6",
+            status="accepted",
+            cost=Decimal("1.00000000"),
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=90,
+            observed_at=now - timedelta(days=45),
+            response_model="glm-4.6",
+        )
+
+        spend = load_spend_analytics(connection)
+
+        assert spend.known_usd == Decimal("1.35")
+        assert spend.calls == 4
+        assert spend.accepted == 3
+        assert spend.errors == 1
+        assert spend.input_tokens == 118
+        assert spend.output_tokens == 59
+        assert spend.max_latency_ms == 90
+
+        assert len(spend.days) == 1
+        assert spend.days[0].day == (now - timedelta(hours=2)).date()
+        assert spend.days[0].calls == 3
+        assert spend.days[0].accepted == 2
+        assert spend.days[0].errors == 1
+        assert spend.days[0].known_cost_usd == Decimal("0.35")
+
+        assert [item.model for item in spend.models] == ["glm-4.6", "gpt-5-mini"]
+        assert spend.models[0].calls == 2
+        assert spend.models[0].known_cost_usd == Decimal("1.25")
+        assert spend.models[0].input_tokens == 110
+        assert spend.models[0].output_tokens == 55
+        assert spend.models[0].max_latency_ms == 90
+
+        assert [item.id for item in spend.runs] == [recent_run_id, older_run_id]
+        assert spend.runs[0].calls == 3
+        assert spend.runs[0].known_cost_usd == Decimal("0.35")
+        assert spend.runs[1].calls == 1
+        assert spend.runs[1].known_cost_usd == Decimal("1.00")
+
+        bounded = load_spend_analytics(connection, day_limit=45)
+        assert len(bounded.days) == 2

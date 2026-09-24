@@ -81,6 +81,13 @@ from job_finder.review.configuration_editor import (
     publication_retry_page,
 )
 from job_finder.review.shell import sidebar_page, timestamp
+from job_finder.review.analytics import (
+    AnalyticsService,
+    DaySpend,
+    ModelSpend,
+    RunSpend,
+    SpendAnalytics,
+)
 from job_finder.review.control_plane import (
     CONTROL_DEFINITIONS,
     ControlConflict,
@@ -216,12 +223,14 @@ def create_review_app(
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     runs_service: RunsService | None = None,
+    analytics_service: AnalyticsService | None = None,
     control_service: ControlPlaneService | None = None,
     actor: str = "owner",
     now: DateTimeClock = lambda: datetime.now(UTC),
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
     runs = runs_service or RunsService()
+    analytics = analytics_service or AnalyticsService()
     controls = control_service or unavailable_control_plane_service()
     dagster_configured = control_service is not None
 
@@ -841,6 +850,30 @@ def create_review_app(
                     _failures_page(snapshot, csrf_token, notice=notice, now=now()),
                 ),
                 title="Failures and recovery",
+            )
+        )
+
+    @app.route("/operations/analytics", methods=["GET"])
+    def spend_analytics_page(request: Request) -> HTMLResponse:
+        try:
+            spend = analytics.load()
+        except psycopg.Error:
+            return _state_response(
+                "Model spend analytics are unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        return HTMLResponse(
+            _document(
+                sidebar_page(
+                    "operations",
+                    csrf_token,
+                    _analytics_page(spend, now=now()),
+                ),
+                title="Model spend",
             )
         )
 
@@ -1815,6 +1848,11 @@ def _operations_page(
                     ),
                     cls="operations-muted",
                 ),
+                A(
+                    "Open model spend analytics →",
+                    href="/operations/analytics",
+                    cls="health-link",
+                ),
                 cls="operations-panel spend-panel",
             ),
             Div(
@@ -2461,6 +2499,149 @@ def _run_not_found_response() -> HTMLResponse:
         "This pipeline run does not exist.",
         action=A("Back to the runs", href="/operations/runs", cls="retry"),
         status_code=404,
+    )
+
+
+def _analytics_page(spend: SpendAnalytics, *, now: datetime) -> object:
+    return Div(
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1("Model spend"),
+            P(
+                "What the evaluation pipeline spends on model calls. Model spend only — "
+                + "Jina (search and scrape) and Langfuse costs are not tracked.",
+                cls="operations-intro",
+            ),
+            A("← Operations", href="/operations", cls="back-link"),
+            cls="operations-header",
+        ),
+        Div(
+            _spend_metric(
+                "Recorded spend", f"${spend.known_usd:,.4f}", "across every recorded call"
+            ),
+            _spend_metric(
+                "Model calls",
+                str(spend.calls),
+                _count_phrase(spend.accepted, "accepted call", "accepted calls"),
+            ),
+            _spend_metric(
+                "Errors",
+                str(spend.errors),
+                _count_phrase(spend.errors, "call returned no usage", "calls returned no usage"),
+            ),
+            _spend_metric(
+                "Tokens",
+                f"{spend.input_tokens + spend.output_tokens:,}",
+                f"{spend.input_tokens:,} in / {spend.output_tokens:,} out",
+            ),
+            _spend_metric(
+                "Slowest call",
+                f"{spend.max_latency_ms:,} ms",
+                "longest recorded call",
+            ),
+            cls="operations-metrics",
+            aria_label="Model spend totals",
+        ),
+        _spend_days_section(spend.days),
+        _spend_models_section(spend.models),
+        _spend_runs_section(spend.runs, now=now),
+        cls="review-shell operations-shell",
+    )
+
+
+def _spend_metric(label: str, value: str, detail: str) -> object:
+    return Div(
+        Small(label),
+        Strong(value),
+        Span(detail),
+    )
+
+
+def _spend_days_section(days: tuple[DaySpend, ...]) -> object:
+    peak = max((day.known_cost_usd for day in days), default=Decimal(0))
+    return Div(
+        Small("Last 30 days", cls="eyebrow"),
+        H2("Spend per day"),
+        Ul(
+            *(_spend_day_row(day, peak) for day in days),
+            cls="operations-list spend-day-list",
+        )
+        if days
+        else P("No model calls were recorded in the last 30 days.", cls="operations-empty"),
+        cls="operations-section",
+    )
+
+
+def _spend_day_row(day: DaySpend, peak: Decimal) -> object:
+    width = int(day.known_cost_usd / peak * 100) if peak else 0
+    return Li(
+        Div(
+            Strong(day.day.isoformat()),
+            Small(
+                _count_phrase(day.accepted, "accepted call", "accepted calls")
+                + (f" · {day.errors} returned no usage" if day.errors else "")
+            ),
+            Strong(f"${day.known_cost_usd:,.4f}", cls="spend-day-value"),
+            cls="spend-day-head",
+        ),
+        Div(cls="spend-bar-fill", style=f"width: {width}%") if width else None,
+    )
+
+
+def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
+    return Div(
+        Small("Every recorded call, by requested model", cls="eyebrow"),
+        H2("Spend by model"),
+        Ul(
+            *(
+                Li(
+                    Div(
+                        Div(Strong(m.model), Strong(f"${m.known_cost_usd:,.4f}")),
+                        Small(
+                            f"{m.calls} calls · {m.input_tokens} in / {m.output_tokens} out"
+                            + f" · up to {m.max_latency_ms} ms"
+                        ),
+                    ),
+                )
+                for m in models
+            ),
+            cls="operations-list",
+        )
+        if models
+        else P("No model calls were recorded.", cls="operations-empty"),
+        cls="operations-section",
+    )
+
+
+def _spend_runs_section(runs: tuple[RunSpend, ...], *, now: datetime) -> object:
+    return Div(
+        Small("Newest runs with recorded calls", cls="eyebrow"),
+        H2("Spend by run"),
+        Ul(
+            *(
+                Li(
+                    A(
+                        Div(
+                            Div(
+                                Strong(run.kind.replace("_", " ").title()),
+                                Strong(f"${run.known_cost_usd:,.4f}"),
+                            ),
+                            Small(
+                                f"{run.calls} calls · ",
+                                timestamp(run.started_at, now=now),
+                            ),
+                        ),
+                        href=f"/operations/runs/{run.id}",
+                        cls="run-link",
+                    ),
+                )
+                for run in runs
+            ),
+            cls="operations-list",
+        )
+        if runs
+        else P("No pipeline runs with model calls were recorded.", cls="operations-empty"),
+        cls="operations-section",
     )
 
 
@@ -3233,6 +3414,10 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-panel, .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
 .spend-panel { align-self: start; }
 .spend-value { display: block; font: 700 clamp(2rem, 6vw, 4rem) Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
+.spend-day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.spend-day-value { font: 700 1.05rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
+.spend-bar-fill { height: 12px; margin-top: 0.55rem; background: var(--acid); }
+.operations-list .spend-bar-fill { display: block; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
 .operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
