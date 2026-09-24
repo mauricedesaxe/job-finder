@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import secrets
 import time
 from collections import deque
@@ -9,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Literal, assert_never, cast
 from urllib.parse import quote, urlencode
 from uuid import UUID
@@ -37,6 +39,7 @@ from fasthtml.common import (
     Option,
     P,
     Pre,
+    Script,
     Section,
     Select,
     Small,
@@ -51,7 +54,7 @@ from fasthtml.common import (
     to_xml,
 )
 from pydantic import SecretStr, ValidationError
-from starlette.responses import PlainTextResponse
+from starlette.responses import FileResponse, PlainTextResponse
 from starlette.datastructures import FormData, QueryParams
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -285,6 +288,13 @@ def create_review_app(
     @app.route("/favicon.ico", methods=["GET"])
     def favicon() -> Response:
         return Response(status_code=204)
+
+    @app.route("/static/{name}", methods=["GET"])
+    def static_asset(name: str) -> Response:
+        path = _STATIC_ASSETS.get(name)
+        if path is None or not path.is_file():
+            return Response(status_code=404)
+        return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
 
     @app.route("/setup", methods=["GET"])
     def setup_form(request: Request) -> HTMLResponse:
@@ -915,6 +925,10 @@ def create_review_app(
                     _analytics_page(spend),
                 ),
                 title="Model spend",
+                scripts=(
+                    Script(src="/static/frappe-charts.min.umd.js"),
+                    Script(_SPEND_CHART_INIT),
+                ),
             )
         )
 
@@ -2706,36 +2720,39 @@ def _spend_metric(label: str, value: str, detail: str) -> object:
 
 
 def _spend_days_section(days: tuple[DaySpend, ...]) -> object:
-    peak = max((day.known_cost_usd for day in days), default=Decimal(0))
     return Div(
         Small("Last 30 days", cls="eyebrow"),
         H2("Spend per day"),
-        Div(
-            *(_spend_day_column(day, peak) for day in reversed(days)),
-            cls="spend-chart",
-            role="img",
-            aria_label="Bar chart of model spend per day over the last 30 days",
-        )
+        _spend_chart(days)
         if days
         else P("No model calls were recorded in the last 30 days.", cls="operations-empty"),
         cls="operations-section",
     )
 
 
-def _spend_day_column(day: DaySpend, peak: Decimal) -> object:
-    height = round(day.known_cost_usd / peak * 100) if peak else 0
-    label = f"{day.day:%b} {day.day.day}"
-    detail = _count_phrase(day.accepted, "accepted call", "accepted calls")
-    if day.errors:
-        detail += f" · {day.errors} returned no usage"
+def _spend_chart(days: tuple[DaySpend, ...]) -> object:
+    ordered = tuple(reversed(days))
+    labels = [f"{day.day:%b} {day.day.day}" for day in ordered]
+    details = []
+    for label, day in zip(labels, ordered, strict=True):
+        line = _count_phrase(day.accepted, "accepted call", "accepted calls")
+        if day.errors:
+            line += f" · {day.errors} returned no usage"
+        details.append(f"{label}, {day.day.year} · {line}")
+    payload = json.dumps(
+        {
+            "labels": labels,
+            "values": [float(day.known_cost_usd) for day in ordered],
+            "costs": [f"${day.known_cost_usd:,.4f}" for day in ordered],
+            "details": details,
+        },
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
     return Div(
-        Div(Div(cls="spend-chart-bar", style=f"height: {height}%"), cls="spend-chart-track"),
-        Strong(f"${day.known_cost_usd:,.2f}", cls="spend-chart-value")
-        if day.known_cost_usd
-        else None,
-        Small(label, cls="spend-chart-label"),
-        title=f"{label}, {day.day.year} · {detail} · ${day.known_cost_usd:,.4f}",
-        cls="spend-chart-col",
+        Div(id="spend-per-day-chart", cls="spend-chart"),
+        Script(payload, type="application/json", id="spend-per-day-data"),
+        role="img",
+        aria_label="Bar chart of model spend per day over the last 30 days",
     )
 
 
@@ -3451,7 +3468,40 @@ def _state_response(
     return HTMLResponse(_document(content), status_code=status_code)
 
 
-def _document(content: object, *, title: str = "Daily job review") -> str:
+_STATIC_ASSETS = {
+    "frappe-charts.min.umd.js": Path(__file__).parent / "static" / "frappe-charts.min.umd.js",
+}
+
+_SPEND_CHART_INIT = """
+(function () {
+  var container = document.getElementById("spend-per-day-chart");
+  var dataElement = document.getElementById("spend-per-day-data");
+  if (!container || !dataElement || typeof frappe === "undefined") return;
+  var data = JSON.parse(dataElement.textContent);
+  var acid = getComputedStyle(document.documentElement).getPropertyValue("--acid").trim();
+  new frappe.Chart(container, {
+    type: "bar",
+    height: 180,
+    data: { labels: data.labels, datasets: [{ values: data.values }] },
+    colors: [acid || "#c8f542"],
+    barOptions: { spaceRatio: 0.25 },
+    tooltipOptions: {
+      formatTooltipX: function (label) {
+        return data.details[data.labels.indexOf(label)] || label;
+      },
+      formatTooltipY: function (value) {
+        var i = data.values.indexOf(value);
+        return i >= 0 ? data.costs[i] : "$" + Number(value).toFixed(4);
+      }
+    }
+  });
+})();
+"""
+
+
+def _document(
+    content: object, *, title: str = "Daily job review", scripts: tuple[object, ...] = ()
+) -> str:
     return str(
         to_xml(
             Html(
@@ -3462,7 +3512,7 @@ def _document(content: object, *, title: str = "Daily job review") -> str:
                     Title(title),
                     Style(_CSS + CONFIGURATION_CSS),
                 ),
-                Body(content),
+                Body(content, *scripts),
                 lang="en",
             )
         )
@@ -3726,12 +3776,8 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-metrics strong { margin-top: 0.25rem; font: 700 2rem Georgia, 'Times New Roman', serif; }
 .operations-metrics span { margin-top: 0.15rem; color: var(--muted); font-size: 0.8rem; }
 .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
-.spend-chart { display: flex; align-items: stretch; gap: 0.35rem; margin-top: 1.25rem; padding: 1rem; border: 2px solid var(--line); background: var(--surface-raised); overflow-x: auto; }
-.spend-chart-col { display: flex; flex: 1 0 1.6rem; flex-direction: column; align-items: center; justify-content: flex-end; min-width: 0; }
-.spend-chart-track { display: flex; align-items: flex-end; width: 100%; height: 9rem; }
-.spend-chart-bar { width: 100%; min-height: 2px; background: var(--acid); }
-.spend-chart-value { margin-top: 0.35rem; font: 700 0.78rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
-.spend-chart-label { margin-top: 0.1rem; color: var(--muted); font-size: 0.62rem; white-space: nowrap; }
+.spend-chart { margin-top: 1.25rem; }
+.spend-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
 .operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }

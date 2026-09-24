@@ -2443,12 +2443,23 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     response = client.get("/operations/analytics")
 
     assert response.status_code == 200
-    assert "spend-chart-bar" in response.text
+    assert 'src="/static/frappe-charts.min.umd.js"' in response.text
+    assert 'id="spend-per-day-chart"' in response.text
     assert "Sep 9" in response.text
     assert "Sep 10" in response.text
-    assert "$1.00" in response.text
-    assert "$0.23" in response.text
-    assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage · $1.0000" in response.text
+    assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage" in response.text
+    assert '"costs": ["$0.2345", "$1.0000"]' in response.text
+
+
+def test_the_analytics_chart_library_is_served_as_a_static_asset() -> None:
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
+
+    library = client.get("/static/frappe-charts.min.umd.js")
+    missing = client.get("/static/nope.js")
+
+    assert library.status_code == 200
+    assert "javascript" in library.headers["content-type"]
+    assert missing.status_code == 404
 
 
 def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
