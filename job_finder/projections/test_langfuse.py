@@ -26,13 +26,12 @@ from job_finder.evaluation.models import (
     ReleaseTarget,
     RelevanceReleaseId,
 )
-from job_finder.evaluation.langfuse import (
+from job_finder.projections.langfuse import (
     LangfuseGateway,
-    LangfuseProjection,
-    LangfuseUnavailable,
     ObservationProjection,
     create_langfuse_projection_sender,
 )
+from job_finder.projections.outbox import LangfuseProjection, LangfuseUnavailable
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
 

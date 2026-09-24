@@ -7,9 +7,10 @@ from pathlib import Path
 _FRAMEWORK_ROOTS = frozenset({"dagster", "fasthtml", "fastmcp", "langfuse", "mcp", "starlette"})
 _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/dagster.py", "dagster"),
-    ("job_finder/evaluation/langfuse.py", "langfuse"),
     ("job_finder/mcp_server.py", "fastmcp"),
     ("job_finder/mcp_server.py", "mcp"),
+    ("job_finder/projections/langfuse.py", "langfuse"),
+    ("job_finder/projections/smoke.py", "langfuse"),
     ("job_finder/review/app.py", "fasthtml"),
     ("job_finder/review/app.py", "starlette"),
     ("job_finder/review/configuration_editor.py", "fasthtml"),
@@ -28,7 +29,6 @@ _BENCHMARK_PUBLIC_SYMBOLS = {
             "ManifestSummary",
             "ManifestSummaryPage",
             "create_manifest",
-            "enqueue_projection",
             "exclude_review_event",
             "include_review_event",
             "list_manifests",
@@ -86,9 +86,46 @@ _BENCHMARK_PUBLIC_SYMBOLS = {
         }
     ),
 }
+_PROJECTION_PUBLIC_SYMBOLS = {
+    "outbox.py": frozenset(
+        {
+            "LangfuseProjection",
+            "LangfuseProjectionResponse",
+            "LangfuseUnavailable",
+            "ProjectionDelivered",
+            "ProjectionDeliveryResult",
+            "ProjectionFailed",
+            "ProjectionFailureSummary",
+            "ProjectionIdle",
+            "ProjectionKind",
+            "ProjectionLeaseLost",
+            "ProjectionModel",
+            "ProjectionQueueStatus",
+            "ProjectionSender",
+            "TypedProjectionSender",
+            "deliver_next_projection",
+            "enqueue_projection",
+            "load_projection_queue_status",
+        }
+    ),
+    "langfuse.py": frozenset(
+        {
+            "CreateDataset",
+            "CreateDatasetItem",
+            "LangfuseGateway",
+            "ObservationProjection",
+            "ObservationUsage",
+            "SendObservation",
+            "create_langfuse_projection_sender",
+        }
+    ),
+    "rebuild.py": frozenset({"rebuild_langfuse_projections"}),
+    "smoke.py": frozenset({"run_live_smoke"}),
+}
 _PACKAGE_ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _PACKAGE_ROOT.parent
 _OLD_MANIFEST_MODULE = "job_finder.evaluation.manifests"
+_OLD_LANGFUSE_MODULE = "job_finder.evaluation.langfuse"
 
 
 def _parse(path: Path) -> ast.Module:
@@ -115,6 +152,16 @@ def _imported_modules(path: Path) -> set[str]:
             modules.add(module)
             modules.update(f"{module}.{alias.name}" for alias in node.names)
     modules.update(_dynamic_imported_modules(tree))
+    return modules
+
+
+def _direct_imported_modules(path: Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules.add(_absolute_from_module(path, node))
     return modules
 
 
@@ -209,3 +256,93 @@ def test_benchmark_modules_own_their_public_symbols() -> None:
             module == "job_finder.benchmarks" or module.startswith("job_finder.benchmarks.")
             for module in _imported_modules(path)
         )
+
+
+def test_projection_modules_own_the_projection_contract() -> None:
+    projection_root = _PACKAGE_ROOT / "projections"
+    assert (projection_root / "__init__.py").read_text() == ""
+    assert not (_PACKAGE_ROOT / "evaluation" / "langfuse.py").exists()
+    for filename, expected_symbols in _PROJECTION_PUBLIC_SYMBOLS.items():
+        assert _public_definitions(projection_root / filename) == expected_symbols
+
+    source_roots = (_PACKAGE_ROOT, _REPOSITORY_ROOT / "contracts", _REPOSITORY_ROOT / "scripts")
+    stale_imports = {
+        path.relative_to(_REPOSITORY_ROOT).as_posix()
+        for source_root in source_roots
+        for path in source_root.rglob("*.py")
+        if _OLD_LANGFUSE_MODULE in _imported_modules(path)
+    }
+    assert not stale_imports
+
+
+def test_projection_outbox_has_no_payload_or_sdk_dependencies() -> None:
+    projection_root = _PACKAGE_ROOT / "projections"
+    outbox_imports = _direct_imported_modules(projection_root / "outbox.py")
+    assert "langfuse" not in outbox_imports
+    assert not any(
+        module.startswith(("job_finder.benchmarks", "job_finder.config", "job_finder.evaluation"))
+        for module in outbox_imports
+    )
+
+
+def test_langfuse_sdk_stays_in_projection_adapters() -> None:
+    source_roots = (_PACKAGE_ROOT, _REPOSITORY_ROOT / "contracts", _REPOSITORY_ROOT / "scripts")
+    sdk_importers = {
+        path.relative_to(_REPOSITORY_ROOT).as_posix()
+        for source_root in source_roots
+        for path in source_root.rglob("*.py")
+        if not path.name.startswith("test_")
+        and any(
+            module == "langfuse" or module.startswith("langfuse.")
+            for module in _direct_imported_modules(path)
+        )
+    }
+    assert sdk_importers == {
+        "job_finder/projections/langfuse.py",
+        "job_finder/projections/smoke.py",
+    }
+
+
+def test_projection_imports_point_toward_the_outbox() -> None:
+    openrouter_imports = _direct_imported_modules(_PACKAGE_ROOT / "evaluation" / "openrouter.py")
+    assert not any(module.startswith("job_finder.projections") for module in openrouter_imports)
+
+    for filename in ("manifests.py", "executions.py", "promotions.py"):
+        imports = _direct_imported_modules(_PACKAGE_ROOT / "benchmarks" / filename)
+        assert {module for module in imports if module.startswith("job_finder.projections")} == {
+            "job_finder.projections.outbox"
+        }
+
+
+def test_projection_scripts_only_wire_package_operations() -> None:
+    scripts = {
+        "rebuild_langfuse_projections.py": "job_finder.projections.rebuild",
+        "smoke_langfuse_projection.py": "job_finder.projections.smoke",
+    }
+    forbidden_implementation = {
+        "rebuild_langfuse_projections.py": (
+            "langfuse_projection_items",
+            "ModelCallAttempt",
+            "SELECT ",
+            "TypeAdapter",
+        ),
+        "smoke_langfuse_projection.py": (
+            "hashlib",
+            "LangfuseProjection",
+            "ModelCallAttempt",
+            "TypeAdapter",
+        ),
+    }
+    for filename, expected_projection_import in scripts.items():
+        path = _REPOSITORY_ROOT / "scripts" / filename
+        assert {
+            module
+            for module in _direct_imported_modules(path)
+            if module.startswith("job_finder.projections")
+        } == {expected_projection_import}
+        assert {
+            node.name
+            for node in _parse(path).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        } == {"main"}
+        assert not any(value in path.read_text() for value in forbidden_implementation[filename])

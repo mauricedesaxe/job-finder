@@ -34,7 +34,6 @@ from job_finder.benchmarks.promotions import PromptPromotionDecision
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
-from job_finder.evaluation.langfuse import ProjectionQueueStatus
 from job_finder.evaluation.models import EvaluationResult, Qualified, ReleaseTarget
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release, load_prompt_release
 from job_finder.evaluation.release_targets import (
@@ -46,6 +45,7 @@ from job_finder.evaluation.release_targets import (
 from job_finder.evaluation.relevance_releases import build_jev_faithful_policy
 from job_finder.database import Connection
 from job_finder.mcp_server import McpDependencies, create_mcp_server
+from job_finder.projections.outbox import ProjectionQueueStatus
 from job_finder.review.feedback import (
     ReviewFeedback,
     ReviewFeedbackPage,

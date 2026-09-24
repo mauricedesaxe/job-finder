@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer
 
 import job_finder.benchmarks.manifests as _benchmark_manifests
 import job_finder.benchmarks.scoring as _scoring
+import job_finder.projections.outbox as _projection_outbox
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import (
     EvaluationResult,
@@ -272,7 +273,7 @@ def _run_manifest_exclusive(
             with connection.transaction():
                 _insert_run(connection, run)
                 _complete_execution(connection, execution_id, run.id, telemetry, completed_at)
-                _benchmark_manifests.enqueue_projection(
+                _projection_outbox.enqueue_projection(
                     connection, "evaluation_run", run.id, run, completed_at
                 )
         except Exception as error:

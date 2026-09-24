@@ -82,7 +82,7 @@ from job_finder.database import (
     MIGRATIONS_PATH,
     apply_migrations,
 )
-from job_finder.evaluation.langfuse import (
+from job_finder.projections.outbox import (
     LangfuseProjection,
     LangfuseUnavailable,
     ProjectionDelivered,

@@ -56,8 +56,9 @@ Langfuse             ← retryable projections (never a decision input)
 - `job_finder/` is the application package, organized by domain:
   - `discovery/` — Jina search, query catalog, exchange rates.
   - `jobs/` — scraping, structural filter, enrichment, dedup, decision pipeline.
-  - `evaluation/` — prompts, prompt releases, provider execution, Langfuse projection.
+  - `evaluation/` — prompts, prompt releases, provider execution.
   - `benchmarks/` — immutable manifests, scoring, executions, comparisons, promotions.
+  - `projections/` — projection outbox, Langfuse delivery, rebuild, and live smoke operations.
   - `pipeline/` — orchestration runs, claiming, leases.
   - `review/` — FastHTML app, decision-time review queue, feedback events.
   - `ats/` — Greenhouse/Lever/Ashby/Workable adapters.

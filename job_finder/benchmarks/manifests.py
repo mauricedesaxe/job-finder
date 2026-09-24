@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+import job_finder.projections.outbox as _projection_outbox
 from job_finder.database import Connection
 from job_finder.evaluation.models import EvaluationOutcome
 
@@ -291,7 +292,9 @@ def create_manifest(
                 created_at=created_at,
                 created_by=created_by,
             )
-            enqueue_projection(connection, "evaluation_manifest", digest, manifest, created_at)
+            _projection_outbox.enqueue_projection(
+                connection, "evaluation_manifest", digest, manifest, created_at
+            )
         _ = connection.execute(
             """
             INSERT INTO evaluation_manifest_requests (
@@ -585,27 +588,6 @@ def _require_matching_curation(
         or existing.actor != actor
     ):
         raise ManifestOperationError("Idempotency key belongs to a different curation command")
-
-
-def enqueue_projection(
-    connection: Connection,
-    kind: str,
-    source_id: str,
-    payload: BaseModel,
-    created_at: datetime,
-) -> None:
-    data = payload.model_dump(mode="json")
-    payload_digest = _digest(data)
-    projection_id = _digest({"kind": kind, "source_id": source_id})
-    _ = connection.execute(
-        """
-        INSERT INTO langfuse_projection_items (
-          id, kind, source_id, payload_digest, payload, state, created_at
-        ) VALUES (%s, %s, %s, %s, %s, 'pending', %s)
-        ON CONFLICT (kind, source_id) DO NOTHING
-        """,
-        (projection_id, kind, source_id, payload_digest, Jsonb(data), created_at),
-    )
 
 
 def _digest(value: object) -> _Digest:

@@ -5,96 +5,41 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import Thread
-from typing import Annotated, ClassVar, Literal
-from uuid import NAMESPACE_URL, UUID, uuid5
+from typing import Literal
+from uuid import NAMESPACE_URL, uuid5
 
-import psycopg
 from langfuse import Langfuse
-from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import Field, JsonValue, TypeAdapter, ValidationError
 
 from job_finder.benchmarks.executions import EvaluationRun
 from job_finder.benchmarks.manifests import EvaluationManifest
 from job_finder.benchmarks.promotions import PromptPromotionDecision
 from job_finder.config import LangfuseSettings
 from job_finder.evaluation.models import ModelCallAttempt
+from job_finder.projections.outbox import (
+    LangfuseProjection as _LangfuseProjection,
+    LangfuseProjectionResponse as _LangfuseProjectionResponse,
+    LangfuseUnavailable as _LangfuseUnavailable,
+    ProjectionModel as _ProjectionModel,
+    TypedProjectionSender as _TypedProjectionSender,
+)
 
-Connection = psycopg.Connection[tuple[object, ...]]
-ProjectionKind = Literal["evaluation_manifest", "evaluation_run", "prompt_promotion", "model_call"]
 _MODEL_CALL = TypeAdapter(ModelCallAttempt)
 _METADATA = TypeAdapter(dict[str, JsonValue])
 _JSON_VALUES = TypeAdapter(list[JsonValue])
-_PROJECTION_KIND: TypeAdapter[ProjectionKind] = TypeAdapter(ProjectionKind)
 _READ_BACK_TIMEOUT_SECONDS = 30.0
 _READ_BACK_POLL_SECONDS = 1.0
 _SEND_TIMEOUT_SECONDS = 120.0
 _SDK_HTTP_TIMEOUT_SECONDS = 15
 
 
-class ProjectionModel(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
-
-
-class LangfuseProjection(ProjectionModel):
-    id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    idempotency_key: str = Field(pattern=r"^[0-9a-f]{64}$")
-    kind: ProjectionKind
-    source_id: str
-    payload_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    payload: dict[str, JsonValue]
-    attempt_count: int = Field(gt=0)
-
-
-class LangfuseProjectionResponse(ProjectionModel):
-    remote_id: str = Field(min_length=1)
-
-
-class ProjectionDelivered(ProjectionModel):
-    kind: Literal["delivered"] = "delivered"
-    projection_id: str
-    remote_id: str
-
-
-class ProjectionFailed(ProjectionModel):
-    kind: Literal["failed"] = "failed"
-    projection_id: str
-    error_code: Literal["langfuse_unavailable", "invalid_response"]
-    reason: str
-
-
-class ProjectionLeaseLost(ProjectionModel):
-    kind: Literal["lease_lost"] = "lease_lost"
-    projection_id: str
-
-
-class ProjectionIdle(ProjectionModel):
-    kind: Literal["idle"] = "idle"
-
-
-class ProjectionFailureSummary(ProjectionModel):
-    id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    kind: ProjectionKind
-    source_id: str
-    attempt_count: int = Field(ge=0)
-    retry_at: datetime | None
-    error_code: str
-
-
-class ProjectionQueueStatus(ProjectionModel):
-    pending_count: int = Field(ge=0)
-    leased_count: int = Field(ge=0)
-    completed_count: int = Field(ge=0)
-    failed_count: int = Field(ge=0)
-    failures: Annotated[tuple[ProjectionFailureSummary, ...], Field(max_length=100)]
-
-
-class ObservationUsage(ProjectionModel):
+class ObservationUsage(_ProjectionModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     cost_usd: float | None = Field(default=None, ge=0)
 
 
-class ObservationProjection(ProjectionModel):
+class ObservationProjection(_ProjectionModel):
     trace_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     observation_type: Literal["EVALUATOR", "EVENT", "GENERATION"]
     name: str
@@ -108,11 +53,6 @@ class ObservationProjection(ProjectionModel):
     observed_at: datetime
 
 
-ProjectionDeliveryResult = (
-    ProjectionDelivered | ProjectionFailed | ProjectionLeaseLost | ProjectionIdle
-)
-ProjectionSender = Callable[[LangfuseProjection], object]
-TypedProjectionSender = Callable[[LangfuseProjection], LangfuseProjectionResponse]
 CreateDataset = Callable[[str, str, dict[str, JsonValue]], str]
 CreateDatasetItem = Callable[
     [str, str, dict[str, JsonValue], dict[str, JsonValue], dict[str, JsonValue]], str
@@ -127,19 +67,15 @@ class LangfuseGateway:
     send_observation: SendObservation
 
 
-class LangfuseUnavailable(RuntimeError):
-    pass
-
-
 def create_langfuse_projection_sender(
     settings: LangfuseSettings,
     *,
     gateway: LangfuseGateway | None = None,
     send_timeout: float = _SEND_TIMEOUT_SECONDS,
-) -> TypedProjectionSender:
+) -> _TypedProjectionSender:
     target = gateway or _sdk_gateway(settings)
 
-    def send(projection: LangfuseProjection) -> LangfuseProjectionResponse:
+    def send(projection: _LangfuseProjection) -> _LangfuseProjectionResponse:
         remote_ids: list[str] = []
         failures: list[BaseException] = []
 
@@ -154,117 +90,20 @@ def create_langfuse_projection_sender(
         worker.join(send_timeout)
         if worker.is_alive():
             # A hung SDK call once held the projection pool slot forever.
-            raise LangfuseUnavailable(
+            raise _LangfuseUnavailable(
                 f"projection send did not finish within {send_timeout:.0f} seconds"
             )
         if failures:
             error = failures[0]
             if isinstance(error, ValidationError):
                 raise error
-            raise LangfuseUnavailable(str(error)) from error
-        return LangfuseProjectionResponse(remote_id=remote_ids[0])
+            raise _LangfuseUnavailable(str(error)) from error
+        return _LangfuseProjectionResponse(remote_id=remote_ids[0])
 
     return send
 
 
-def deliver_next_projection(
-    connection: Connection,
-    *,
-    sender: ProjectionSender,
-    owner_token: UUID,
-    now: datetime,
-    lease_for: timedelta,
-    retry_after: timedelta,
-) -> ProjectionDeliveryResult:
-    _require_autocommit(connection)
-    if retry_after < timedelta(0):
-        raise ValueError("Projection retry delay cannot be negative")
-    projection = _lease_next(connection, owner_token, now, lease_for)
-    if projection is None:
-        return ProjectionIdle()
-    try:
-        response = LangfuseProjectionResponse.model_validate(sender(projection))
-    except LangfuseUnavailable as error:
-        return _record_failure(
-            connection,
-            projection,
-            owner_token,
-            now + retry_after,
-            "langfuse_unavailable",
-            str(error),
-        )
-    except ValidationError as error:
-        return _record_failure(
-            connection,
-            projection,
-            owner_token,
-            now + retry_after,
-            "invalid_response",
-            str(error),
-        )
-    with connection.transaction():
-        changed = connection.execute(
-            """
-            UPDATE langfuse_projection_items
-            SET state = 'completed', owner_token = NULL, lease_expires_at = NULL,
-                remote_id = %s, completed_at = %s, last_error = NULL, retry_at = NULL
-            WHERE id = %s AND state = 'leased' AND owner_token = %s
-            """,
-            (response.remote_id, now, projection.id, owner_token),
-        ).rowcount
-    if changed != 1:
-        return ProjectionLeaseLost(projection_id=projection.id)
-    return ProjectionDelivered(
-        projection_id=projection.id,
-        remote_id=response.remote_id,
-    )
-
-
-def load_projection_queue_status(
-    connection: Connection,
-    *,
-    failure_limit: int = 20,
-) -> ProjectionQueueStatus:
-    _require_autocommit(connection)
-    if failure_limit < 0 or failure_limit > 100:
-        raise ValueError("Projection failure limit must be between 0 and 100")
-    counts = {"pending": 0, "leased": 0, "completed": 0, "failed": 0}
-    for row in connection.execute(
-        "SELECT state, count(*) FROM langfuse_projection_items GROUP BY state"
-    ).fetchall():
-        counts[str(row[0])] = int(str(row[1]))
-    rows = connection.execute(
-        """
-        SELECT id, kind, source_id, attempt_count, retry_at, last_error
-        FROM langfuse_projection_items
-        WHERE state = 'failed'
-        ORDER BY COALESCE(retry_at, created_at), id
-        LIMIT %s
-        """,
-        (failure_limit,),
-    ).fetchall()
-    return ProjectionQueueStatus(
-        pending_count=counts["pending"],
-        leased_count=counts["leased"],
-        completed_count=counts["completed"],
-        failed_count=counts["failed"],
-        failures=tuple(_parse_projection_failure(row) for row in rows),
-    )
-
-
-def _parse_projection_failure(row: tuple[object, ...]) -> ProjectionFailureSummary:
-    last_error = _METADATA.validate_python(row[5])
-    return ProjectionFailureSummary(
-        id=str(row[0]),
-        kind=_PROJECTION_KIND.validate_python(row[1]),
-        source_id=str(row[2]),
-        attempt_count=int(str(row[3])),
-        retry_at=(datetime.fromisoformat(str(row[4])) if row[4] is not None else None),
-        error_code=str(last_error.get("code", "unknown")),
-    )
-
-
-def _project(gateway: LangfuseGateway, projection: LangfuseProjection) -> str:
+def _project(gateway: LangfuseGateway, projection: _LangfuseProjection) -> str:
     match projection.kind:
         case "evaluation_manifest":
             return _project_manifest(gateway, EvaluationManifest.model_validate(projection.payload))
@@ -308,7 +147,7 @@ def _project_manifest(gateway: LangfuseGateway, manifest: EvaluationManifest) ->
     return dataset_id
 
 
-def _run_observation(projection: LangfuseProjection, run: EvaluationRun) -> ObservationProjection:
+def _run_observation(projection: _LangfuseProjection, run: EvaluationRun) -> ObservationProjection:
     return _observation(
         projection,
         "EVALUATOR",
@@ -330,7 +169,7 @@ def _run_observation(projection: LangfuseProjection, run: EvaluationRun) -> Obse
 
 
 def _promotion_observation(
-    projection: LangfuseProjection, promotion: PromptPromotionDecision
+    projection: _LangfuseProjection, promotion: PromptPromotionDecision
 ) -> ObservationProjection:
     return _observation(
         projection,
@@ -365,7 +204,7 @@ def _promotion_observation(
 
 
 def _model_call_observation(
-    projection: LangfuseProjection, attempt: ModelCallAttempt
+    projection: _LangfuseProjection, attempt: ModelCallAttempt
 ) -> ObservationProjection:
     usage = (
         ObservationUsage(
@@ -409,7 +248,7 @@ def _model_call_observation(
 
 
 def _observation(
-    projection: LangfuseProjection,
+    projection: _LangfuseProjection,
     observation_type: Literal["EVALUATOR", "EVENT", "GENERATION"],
     name: str,
     input: dict[str, JsonValue],
@@ -577,82 +416,3 @@ def _has_projection_id(metadata: object, projection_id: JsonValue) -> bool:
 
 def _dataset_name(manifest_id: str) -> str:
     return f"job-finder-evaluation-{manifest_id}"
-
-
-def _lease_next(
-    connection: Connection,
-    owner_token: UUID,
-    now: datetime,
-    lease_for: timedelta,
-) -> LangfuseProjection | None:
-    if lease_for <= timedelta(0):
-        raise ValueError("Projection lease duration must be positive")
-    with connection.transaction():
-        row = connection.execute(
-            """
-            WITH candidate AS (
-              SELECT id
-              FROM langfuse_projection_items
-              WHERE state = 'pending'
-                 OR (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
-                 OR (state = 'leased' AND lease_expires_at <= %s)
-              ORDER BY created_at, id
-              FOR UPDATE SKIP LOCKED
-              LIMIT 1
-            )
-            UPDATE langfuse_projection_items item
-            SET state = 'leased', owner_token = %s, lease_expires_at = %s,
-                attempt_count = item.attempt_count + 1, retry_at = NULL
-            FROM candidate
-            WHERE item.id = candidate.id
-            RETURNING item.id, item.kind, item.source_id, item.payload_digest,
-                      item.payload, item.attempt_count
-            """,
-            (now, now, owner_token, now + lease_for),
-        ).fetchone()
-    if row is None:
-        return None
-    return LangfuseProjection.model_validate(
-        {
-            "id": row[0],
-            "idempotency_key": row[0],
-            "kind": row[1],
-            "source_id": row[2],
-            "payload_digest": row[3],
-            "payload": row[4],
-            "attempt_count": row[5],
-        }
-    )
-
-
-def _record_failure(
-    connection: Connection,
-    projection: LangfuseProjection,
-    owner_token: UUID,
-    retry_at: datetime,
-    error_code: Literal["langfuse_unavailable", "invalid_response"],
-    reason: str,
-) -> ProjectionFailed | ProjectionLeaseLost:
-    error = {"code": error_code, "reason": reason}
-    with connection.transaction():
-        changed = connection.execute(
-            """
-            UPDATE langfuse_projection_items
-            SET state = 'failed', owner_token = NULL, lease_expires_at = NULL,
-                retry_at = %s, last_error = %s
-            WHERE id = %s AND state = 'leased' AND owner_token = %s
-            """,
-            (retry_at, Jsonb(error), projection.id, owner_token),
-        ).rowcount
-    if changed != 1:
-        return ProjectionLeaseLost(projection_id=projection.id)
-    return ProjectionFailed(
-        projection_id=projection.id,
-        error_code=error_code,
-        reason=reason,
-    )
-
-
-def _require_autocommit(connection: Connection) -> None:
-    if not connection.autocommit:
-        raise ValueError("Langfuse projection delivery requires an autocommit connection")

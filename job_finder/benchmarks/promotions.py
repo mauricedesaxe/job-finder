@@ -13,6 +13,7 @@ import job_finder.benchmarks.comparisons as _comparisons
 import job_finder.benchmarks.executions as _executions
 import job_finder.benchmarks.manifests as _benchmark_manifests
 import job_finder.benchmarks.scoring as _scoring
+import job_finder.projections.outbox as _projection_outbox
 from job_finder.evaluation.models import ReleaseTarget
 
 _Connection = psycopg.Connection[tuple[object, ...]]
@@ -152,7 +153,7 @@ def record_prompt_promotion_decision(
                 created_at,
             ),
         )
-        _benchmark_manifests.enqueue_projection(
+        _projection_outbox.enqueue_projection(
             connection, "prompt_promotion", promotion.id, promotion, created_at
         )
     return promotion
