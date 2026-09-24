@@ -80,7 +80,7 @@ from job_finder.review.configuration_editor import (
     parse_configuration_form,
     publication_retry_page,
 )
-from job_finder.review.shell import sidebar_page, timestamp
+from job_finder.review.shell import operations_sidebar_page, sidebar_page, timestamp
 from job_finder.review.analytics import (
     AnalyticsService,
     DaySpend,
@@ -123,11 +123,9 @@ from job_finder.review.operations import (
     JobReevaluationNotFound,
     JobReevaluationSourceChanged,
     JobReevaluationUnsupported,
-    OperationsHealth,
     OperationsService,
     OperationsSnapshot,
     OperationsUnavailable,
-    PipelineRunSummary,
     RecoveryAction,
     RunDetail,
     RunListItem,
@@ -583,32 +581,9 @@ def create_review_app(
         return RedirectResponse("/", status_code=303)
 
     @app.route("/operations", methods=["GET"])
-    def operations_page(request: Request) -> HTMLResponse:
-        try:
-            snapshot = operations.load()
-        except psycopg.Error:
-            return _state_response(
-                "Operations status is unavailable",
-                "The database could not be reached. Reload this page to try again.",
-                status_code=503,
-            )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
-            return HTMLResponse(status_code=401)
-        return HTMLResponse(
-            _document(
-                sidebar_page(
-                    "operations",
-                    csrf_token,
-                    _operations_page(
-                        snapshot,
-                        notice=_OPERATIONS_NOTICES.get(request.query_params.get("notice", "")),
-                        now=now(),
-                    ),
-                ),
-                title="Job Finder operations",
-            )
-        )
+    def operations_page(request: Request) -> RedirectResponse:
+        _ = request
+        return RedirectResponse("/operations/runs", status_code=303)
 
     @app.route("/operations/control", methods=["GET"])
     def control_plane_page(request: Request) -> HTMLResponse:
@@ -625,8 +600,8 @@ def create_review_app(
         notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
         return HTMLResponse(
             _document(
-                sidebar_page(
-                    "operations",
+                operations_sidebar_page(
+                    "control",
                     csrf_token,
                     _control_page(
                         control_snapshot,
@@ -787,14 +762,15 @@ def create_review_app(
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
+        notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
         return HTMLResponse(
             _document(
-                sidebar_page(
-                    "operations",
+                operations_sidebar_page(
+                    "activity",
                     csrf_token,
-                    _runs_page(run_items, now=now()),
+                    _runs_page(run_items, notice=notice, now=now()),
                 ),
-                title="Pipeline runs",
+                title="Recent activity",
             )
         )
 
@@ -819,8 +795,8 @@ def create_review_app(
             return HTMLResponse(status_code=401)
         return HTMLResponse(
             _document(
-                sidebar_page(
-                    "operations",
+                operations_sidebar_page(
+                    "activity",
                     csrf_token,
                     _run_detail_page(detail, now=now()),
                 ),
@@ -844,8 +820,8 @@ def create_review_app(
         notice = _FAILURES_NOTICES.get(request.query_params.get("notice", ""))
         return HTMLResponse(
             _document(
-                sidebar_page(
-                    "operations",
+                operations_sidebar_page(
+                    "failures",
                     csrf_token,
                     _failures_page(snapshot, csrf_token, notice=notice, now=now()),
                 ),
@@ -868,8 +844,8 @@ def create_review_app(
             return HTMLResponse(status_code=401)
         return HTMLResponse(
             _document(
-                sidebar_page(
-                    "operations",
+                operations_sidebar_page(
+                    "analytics",
                     csrf_token,
                     _analytics_page(spend, now=now()),
                 ),
@@ -949,7 +925,7 @@ def create_review_app(
         match result:
             case JobReevaluationAccepted():
                 notice = "reevaluation-replayed" if result.replayed else "reevaluation-requested"
-                return RedirectResponse(f"/operations?notice={notice}", status_code=303)
+                return RedirectResponse(f"/operations/runs?notice={notice}", status_code=303)
             case JobReevaluationKeyConflict():
                 return _operations_conflict_response(
                     "This reevaluation request key belongs to another command."
@@ -1786,106 +1762,6 @@ def _review_page(queue: ReviewQueue) -> object:
     )
 
 
-def _operations_page(
-    snapshot: OperationsSnapshot,
-    *,
-    notice: str | None,
-    now: datetime,
-) -> object:
-    health_title, health_detail = {
-        OperationsHealth.CAUGHT_UP: (
-            "Caught up",
-            "No queued work or current failures need attention.",
-        ),
-        OperationsHealth.WORKING: (
-            "Work is in progress",
-            "The pipeline has active or retryable work.",
-        ),
-        OperationsHealth.ACTION_REQUIRED: (
-            "Action required",
-            "Terminal failures or a failed pipeline run need attention. Open the failures "
-            + "panel to recover or dismiss them.",
-        ),
-        OperationsHealth.UNKNOWN: (
-            "Status unknown",
-            "No pipeline run or queued work has been recorded yet.",
-        ),
-    }[snapshot.health]
-    return Div(
-        P(notice, cls="operations-notice", role="status") if notice else None,
-        Div(
-            Small("Owner operations", cls="eyebrow"),
-            H1(health_title),
-            P(health_detail, cls="operations-intro"),
-            A("Open failures →", href="/operations/failures", cls="health-link")
-            if snapshot.health is OperationsHealth.ACTION_REQUIRED
-            else None,
-            cls=f"operations-header health-{snapshot.health.value}",
-        ),
-        Div(
-            _metric("Pending", snapshot.queues.pending, "pending", "pending"),
-            _metric("Leased", snapshot.queues.leased, "leased", "leased"),
-            _metric("Retrying", snapshot.queues.retrying, "retrying", "retrying"),
-            _metric("Completed", snapshot.queues.completed, "completed", "completed"),
-            _metric(
-                "Terminal",
-                snapshot.queues.terminal_error,
-                "terminal error",
-                "terminal errors",
-            ),
-            cls="operations-metrics",
-            aria_label="Job work queue",
-        ),
-        Div(
-            Div(
-                Small("Recorded model spend", cls="eyebrow"),
-                Strong(f"${snapshot.spend.known_usd:,.4f}", cls="spend-value"),
-                P(
-                    _count_phrase(
-                        snapshot.spend.unknown_attempts,
-                        "attempt has no recorded cost",
-                        "attempts have no recorded cost",
-                    ),
-                    cls="operations-muted",
-                ),
-                A(
-                    "Open model spend analytics →",
-                    href="/operations/analytics",
-                    cls="health-link",
-                ),
-                cls="operations-panel spend-panel",
-            ),
-            Div(
-                Small("Dagster control plane", cls="eyebrow"),
-                P(
-                    "Schedules and on-demand runs live on the control plane page.",
-                    cls="operations-muted",
-                ),
-                A("Open the control plane →", href="/operations/control", cls="health-link"),
-                cls="operations-panel",
-            ),
-            cls="operations-grid",
-        ),
-        _runs_panel(snapshot.recent_runs, now=now),
-        Div(
-            Small("Failed work", cls="eyebrow"),
-            H2("Failures and recovery"),
-            P(
-                _count_phrase(
-                    snapshot.queues.retrying + snapshot.queues.terminal_error,
-                    "item failed or hit a terminal error.",
-                    "items failed or hit a terminal error.",
-                ),
-                cls="operations-muted",
-            ),
-            A("Open failures and recovery →", href="/operations/failures", cls="health-link"),
-            cls="operations-section",
-        ),
-        _failures_panel(snapshot.failures, now=now),
-        cls="review-shell operations-shell",
-    )
-
-
 _CONTROL_DESCRIPTIONS = {
     "job_finder": (
         "Runs the full cycle: searches for new jobs, scrapes and filters them, "
@@ -2069,38 +1945,6 @@ def _count_phrase(value: int, singular: str, plural: str) -> str:
     return f"{value} {singular if value == 1 else plural}"
 
 
-def _runs_panel(runs: tuple[PipelineRunSummary, ...], *, now: datetime) -> object:
-    rows = (
-        Ul(*(_run_row(run, now=now) for run in runs), cls="operations-list")
-        if runs
-        else P("No pipeline runs recorded.", cls="operations-empty")
-    )
-    return Div(
-        Small("Recent activity", cls="eyebrow"),
-        H2("Pipeline runs"),
-        rows,
-        cls="operations-section",
-    )
-
-
-def _run_row(run: PipelineRunSummary, *, now: datetime) -> object:
-    if run.completed_at is not None:
-        elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
-        timing = (timestamp(run.started_at, now=now), f" · {_format_duration(elapsed)}")
-    else:
-        timing = (timestamp(run.started_at, now=now),)
-    return Li(
-        A(
-            Div(
-                Strong(run.kind.replace("_", " ").title()),
-                Span(run.status, cls="run-status"),
-            ),
-            Small(*timing),
-            href=f"/operations/runs/{run.id}",
-        ),
-    )
-
-
 def _failures_panel(failures: tuple[FailureSample, ...], *, now: datetime) -> object:
     rows = (
         Ul(
@@ -2164,6 +2008,7 @@ def _failures_page(
             _recovery_rows(attention, csrf_token, now=now),
             cls="operations-section",
         ),
+        _failures_panel(snapshot.failures, now=now),
         Div(
             Small("Quieted on purpose", cls="eyebrow"),
             H2("Dismissed"),
@@ -2307,11 +2152,12 @@ def _dismiss_form(
     )
 
 
-def _runs_page(items: tuple[RunListItem, ...], *, now: datetime) -> object:
+def _runs_page(items: tuple[RunListItem, ...], *, notice: str | None, now: datetime) -> object:
     return Div(
+        P(notice, cls="operations-notice", role="status") if notice else None,
         Div(
             Small("Owner operations", cls="eyebrow"),
-            H1("Pipeline runs"),
+            H1("Recent activity"),
             P(
                 "Every scheduled and on-demand run. A 0-second orchestration tick "
                 + "is an idle tick — nothing was due.",
@@ -2512,7 +2358,6 @@ def _analytics_page(spend: SpendAnalytics, *, now: datetime) -> object:
                 + "Jina (search and scrape) and Langfuse costs are not tracked.",
                 cls="operations-intro",
             ),
-            A("← Operations", href="/operations", cls="back-link"),
             cls="operations-header",
         ),
         Div(
@@ -3321,6 +3166,9 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .sidebar > form { margin-top: auto; padding: 0.75rem; }
 .logout { width: 100%; min-height: 44px; border: 2px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font-weight: 900; }
 .logout:hover, .logout:focus-visible { background: var(--acid); color: var(--accent-ink); }
+.app-shell.operations-shell { grid-template-columns: 240px 200px minmax(0, 1fr); }
+.sub-sidebar { position: sticky; top: 0; align-self: start; height: 100vh; border-right: 2px solid var(--line); background: var(--panel-muted); }
+.sub-sidebar .sub-label { display: flex; align-items: center; min-height: 56px; border-bottom: 2px solid var(--line); }
 .review-header { padding: clamp(2rem, 6vw, 5rem) 0 1.5rem; }
 .review-header .eyebrow { width: fit-content; padding: 0.25rem 0.4rem; background: var(--acid); color: var(--accent-ink); }
 .day-section { margin-top: 2.4rem; }
@@ -3396,11 +3244,6 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .login-card button { width: 100%; min-height: 48px; margin-top: 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
 .error { padding: 0.75rem; border: 2px solid var(--line); background: var(--caution); color: var(--accent-ink); font-weight: 800; }
 .operations-header { margin-top: 1.25rem; padding: clamp(1.5rem, 5vw, 3rem); border: 2px solid var(--line); background: var(--panel); box-shadow: 8px 8px 0 var(--shadow); }
-.operations-header.health-caught_up { box-shadow: 8px 8px 0 var(--acid); }
-.operations-header.health-working, .operations-header.health-unknown { box-shadow: 8px 8px 0 var(--caution); }
-.operations-header.health-action_required { background: var(--caution); color: var(--accent-ink); }
-.health-link { display: inline-flex; align-items: center; min-height: 44px; margin-top: 1.25rem; padding: 0 1rem; border: 2px solid var(--line); background: var(--inverse-bg); color: var(--acid); font-weight: 900; text-decoration: none; }
-.health-link:hover, .health-link:focus-visible { background: var(--acid); color: var(--accent-ink); }
 .operations-notice { margin: 1.25rem 0 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
 .operations-intro { max-width: 54ch; margin: 1rem 0 0; font-size: 1.08rem; line-height: 1.55; }
 .operations-metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 2rem; border: 2px solid var(--line); background: var(--panel); }
@@ -3410,10 +3253,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-metrics small { text-transform: uppercase; letter-spacing: 0.08em; font-weight: 900; }
 .operations-metrics strong { margin-top: 0.25rem; font: 700 2rem Georgia, 'Times New Roman', serif; }
 .operations-metrics span { margin-top: 0.15rem; color: var(--muted); font-size: 0.8rem; }
-.operations-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin-top: 1.25rem; }
-.operations-panel, .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
-.spend-panel { align-self: start; }
-.spend-value { display: block; font: 700 clamp(2rem, 6vw, 4rem) Georgia, 'Times New Roman', serif; letter-spacing: -0.04em; }
+.operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
 .spend-day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .spend-day-value { font: 700 1.05rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
 .spend-bar-fill { height: 12px; margin-top: 0.55rem; background: var(--acid); }
@@ -3470,7 +3310,12 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 @media (max-width: 760px) {
   .review-shell { width: min(100% - 1rem, 1180px); padding-top: 0.5rem; }
   .app-shell { grid-template-columns: 1fr; }
+  .app-shell.operations-shell { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; flex-direction: row; align-items: center; gap: 0.5rem; border-right: 0; border-bottom: 2px solid var(--line); }
+  .sub-sidebar { position: static; height: auto; border-right: 0; border-bottom: 2px solid var(--line); }
+  .sub-sidebar .sub-label { display: none; }
+  .sub-sidebar .shell-nav { display: flex; overflow-x: auto; }
+  .sub-sidebar .shell-link { white-space: nowrap; }
   .sidebar-head { border-bottom: 0; }
   .shell-label { display: none; }
   .shell-nav { display: flex; flex: 1; gap: 0.4rem; padding: 0.5rem; overflow-x: auto; }
@@ -3496,7 +3341,6 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .operations-metrics { grid-template-columns: 1fr; }
   .operations-metrics > div { border-right: 0; border-bottom: 2px solid var(--line); }
   .operations-metrics > div:last-child { border-bottom: 0; }
-  .operations-grid { grid-template-columns: 1fr; }
   .recovery-list { grid-template-columns: 1fr; }
   .schedule-actions { grid-template-columns: 1fr; }
 }

@@ -7,11 +7,19 @@ from typing import Literal
 from fasthtml.common import A, Aside, Button, Div, Form, Input, Main, Nav, Small, Span, Strong
 
 ShellSection = Literal["review", "operations", "configuration"]
+OperationsPage = Literal["activity", "analytics", "control", "failures"]
 
 _SECTIONS: tuple[tuple[ShellSection, str, str], ...] = (
     ("review", "Review", "/"),
-    ("operations", "Operations", "/operations"),
+    ("operations", "Operations", "/operations/runs"),
     ("configuration", "Search setup", "/configuration"),
+)
+
+_OPERATIONS_PAGES: tuple[tuple[OperationsPage, str, str], ...] = (
+    ("activity", "Recent activity", "/operations/runs"),
+    ("analytics", "Analytics", "/operations/analytics"),
+    ("control", "Control plane", "/operations/control"),
+    ("failures", "Recent failures", "/operations/failures"),
 )
 
 _MINUTE = 60
@@ -26,6 +34,35 @@ def sidebar_page(current: ShellSection, csrf_token: str, *content: object) -> ob
         sidebar(csrf_token, current=current),
         Main(*content, cls="app-content"),
         cls="app-shell",
+    )
+
+
+def operations_sidebar_page(current: OperationsPage, csrf_token: str, *content: object) -> object:
+    return Div(
+        sidebar(csrf_token, current="operations"),
+        operations_sub_sidebar(current),
+        Main(*content, cls="app-content"),
+        cls="app-shell operations-shell",
+    )
+
+
+def operations_sub_sidebar(current: OperationsPage) -> object:
+    return Aside(
+        Small("Operations", cls="shell-label sub-label"),
+        Nav(
+            *(
+                A(
+                    label,
+                    href=href,
+                    cls="shell-link",
+                    aria_current="page" if key is current else None,
+                )
+                for key, label, href in _OPERATIONS_PAGES
+            ),
+            aria_label="Operations",
+            cls="shell-nav",
+        ),
+        cls="sub-sidebar",
     )
 
 

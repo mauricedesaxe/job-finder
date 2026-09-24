@@ -7,6 +7,7 @@ from fasthtml.common import to_xml
 
 from job_finder.review.shell import (
     absolute_time,
+    operations_sub_sidebar,
     relative_time,
     sidebar,
     timestamp,
@@ -70,6 +71,16 @@ def test_sidebar_marks_the_current_section() -> None:
     markup = to_xml(sidebar("token", current="operations"))
 
     assert 'href="/"' in markup
-    assert 'href="/operations" aria-current="page"' in markup
+    assert 'href="/operations/runs" aria-current="page"' in markup
     assert 'href="/configuration"' in markup
     assert 'action="/logout"' in markup
+
+
+def test_operations_sub_sidebar_marks_the_current_page() -> None:
+    markup = to_xml(operations_sub_sidebar("control"))
+
+    assert 'href="/operations/runs"' in markup
+    assert 'href="/operations/analytics"' in markup
+    assert 'href="/operations/control" aria-current="page"' in markup
+    assert 'href="/operations/failures"' in markup
+    assert 'aria-label="Operations"' in markup
