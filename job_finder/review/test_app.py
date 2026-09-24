@@ -68,15 +68,12 @@ from job_finder.review.models import (
     ReviewSubmitResult,
 )
 from job_finder.review.operations import (
-    ActionableWork,
     ActivityEntry,
     ActivityPage,
     ActivityQuery,
     ActivityRun,
     ActivityService,
     ActivityWork,
-    DismissalAction,
-    FailureSample,
     JobReevaluationAccepted,
     JobReevaluationCommand,
     JobReevaluationReceipt,
@@ -93,7 +90,6 @@ from job_finder.review.operations import (
     WorkDismissalApplied,
     WorkDismissalCommand,
     WorkDismissalReceipt,
-    WorkDismissalResult,
     RunDetail,
     RunListItem,
     RunsService,
@@ -160,7 +156,7 @@ def test_operations_pages_mark_their_shell_sections() -> None:
     )
 
     runs = client.get("/operations/runs")
-    failures = client.get("/operations/failures")
+    failures = client.get("/operations/failures", follow_redirects=False)
 
     assert (
         'href="/operations/runs" aria-current="page" class="shell-link">Operations</a>' in runs.text
@@ -173,11 +169,12 @@ def test_operations_pages_mark_their_shell_sections() -> None:
     )
     assert "just now" in runs.text
     assert 'title="2026-09-10 12:00 UTC"' in runs.text
+    assert failures.status_code == 303
     assert (
-        'href="/operations/failures" aria-current="page" class="shell-link">Recent failures</a>'
-        in failures.text
+        failures.headers["location"]
+        == "/operations/runs?status=failed&status=retrying&status=terminal"
     )
-    assert 'href="/operations/runs" class="shell-link">Recent activity</a>' in failures.text
+    assert 'href="/operations/failures"' not in runs.text
 
 
 def test_the_review_queue_is_the_landing_page() -> None:
@@ -195,56 +192,6 @@ def test_the_old_review_url_redirects_to_the_landing_page() -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "/"
-
-
-def test_the_failures_page_renders_bounded_recovery_commands() -> None:
-    snapshot = OperationsSnapshot(
-        health=OperationsHealth.ACTION_REQUIRED,
-        queues=QueueCounts(retrying=1, terminal_error=1),
-        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
-        recent_runs=(),
-        failures=(
-            FailureSample(
-                source="job",
-                occurred_at=NOW,
-                summary="provider_timeout: OpenRouter did not respond",
-            ),
-        ),
-        actionable_work=(
-            ActionableWork(
-                job_id=UUID(int=31),
-                state="failed",
-                attempt_count=2,
-                retry_at=NOW,
-                failed_at=NOW,
-                failure_summary="provider_timeout: OpenRouter did not respond",
-            ),
-            ActionableWork(
-                job_id=UUID(int=32),
-                state="terminal_error",
-                attempt_count=3,
-                retry_at=None,
-                failed_at=NOW,
-                failure_summary="invalid_job: Job is invalid",
-            ),
-        ),
-        actionable_work_total=5,
-    )
-    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
-
-    response = client.get("/operations/failures")
-
-    assert response.status_code == 200
-    assert response.text.count('action="/operations/recovery"') == 2
-    assert response.text.count('action="/operations/dismiss"') == 1
-    assert "Retry now" in response.text
-    assert "Recover terminal work" in response.text
-    assert "Dismiss" in response.text
-    assert "Re-runs it with a fresh attempt budget. Past decisions stay put." in response.text
-    assert 'name="expected_attempt_count" value="2"' in response.text
-    assert "Showing the newest 2 of 5" in response.text
-    assert "Recent failures" in response.text
-    assert "provider_timeout: OpenRouter did not respond" in response.text
 
 
 def test_the_operations_home_requires_the_existing_owner_session() -> None:
@@ -628,7 +575,10 @@ def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/operations/failures?notice=work-retried"
+    assert (
+        response.headers["location"]
+        == "/operations/work/00000000-0000-0000-0000-00000000001f?notice=work-retried"
+    )
     assert calls == [
         WorkRecoveryCommand(
             idempotency_key="private-key",
@@ -1873,77 +1823,6 @@ def _operations_snapshot() -> OperationsSnapshot:
     )
 
 
-def test_the_failures_page_separates_dismissed_work_and_offers_undo() -> None:
-    snapshot = OperationsSnapshot(
-        health=OperationsHealth.CAUGHT_UP,
-        queues=QueueCounts(completed=9, terminal_error=1),
-        spend=SpendSummary(known_usd=Decimal(0), unknown_attempts=0),
-        recent_runs=(),
-        failures=(),
-        actionable_work=(
-            ActionableWork(
-                job_id=UUID(int=32),
-                state="terminal_error",
-                attempt_count=3,
-                retry_at=None,
-                failed_at=NOW,
-                failure_summary="invalid_job: Job is invalid",
-                dismissed=True,
-            ),
-        ),
-        actionable_work_total=1,
-        dismissed_terminal=1,
-    )
-    client = _client(_queue(), operations=OperationsService(load=lambda: snapshot))
-
-    response = client.get("/operations/failures")
-
-    assert response.status_code == 200
-    assert "Dismissed" in response.text
-    assert "1 dismissed" in response.text
-    assert "Undo dismissal" in response.text
-    assert 'name="action" value="undo_dismiss"' in response.text
-    assert "No failed work needs recovery." in response.text
-
-
-def test_dismissal_passes_an_exact_typed_command_and_redirects() -> None:
-    calls: list[WorkDismissalCommand] = []
-
-    def dismiss(command: WorkDismissalCommand) -> WorkDismissalResult:
-        calls.append(command)
-        return _applied_dismissal(command)
-
-    client = _client(
-        _queue(),
-        operations=OperationsService(load=lambda: _operations_snapshot(), dismiss=dismiss),
-    )
-
-    response = client.post(
-        "/operations/dismiss",
-        data={
-            "csrf_token": _csrf(client),
-            "job_id": str(UUID(int=32)),
-            "action": "dismiss",
-            "expected_attempt_count": "3",
-            "idempotency_key": "private-key",
-        },
-        follow_redirects=False,
-    )
-
-    assert response.status_code == 303
-    assert response.headers["location"] == "/operations/failures?notice=work-dismissed"
-    assert calls == [
-        WorkDismissalCommand(
-            idempotency_key="private-key",
-            job_id=UUID(int=32),
-            action=DismissalAction.DISMISS,
-            expected_attempt_count=3,
-            actor="owner",
-            requested_at=NOW,
-        )
-    ]
-
-
 def test_dismiss_undo_redirects_with_its_own_notice() -> None:
     client = _client(
         _queue(),
@@ -1966,7 +1845,10 @@ def test_dismiss_undo_redirects_with_its_own_notice() -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/operations/failures?notice=dismiss-undone"
+    assert (
+        response.headers["location"]
+        == "/operations/work/00000000-0000-0000-0000-000000000020?notice=dismiss-undone"
+    )
 
 
 def test_dismissal_requires_csrf_before_calling_the_service() -> None:
@@ -2216,7 +2098,6 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
     assert "Dismissed" in response.text
     assert "Recover terminal work" in response.text
     assert "Dismiss" in response.text
-    assert 'name="return_to" value="detail"' in response.text
     assert 'action="/operations/recovery"' in response.text
     assert 'action="/operations/dismiss"' in response.text
     assert "attempt 2" in response.text
@@ -2314,7 +2195,6 @@ def test_recovery_from_the_detail_page_returns_to_the_detail_page() -> None:
             "expected_state": "failed",
             "expected_attempt_count": "2",
             "idempotency_key": "private-key",
-            "return_to": "detail",
         },
         follow_redirects=False,
     )
@@ -2358,7 +2238,6 @@ def test_dismissal_from_the_detail_page_returns_to_the_detail_page() -> None:
             "action": "dismiss",
             "expected_attempt_count": "3",
             "idempotency_key": "private-key",
-            "return_to": "detail",
         },
         follow_redirects=False,
     )
@@ -2550,16 +2429,14 @@ def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
     assert "Model spend analytics are unavailable" in response.text
 
 
-def test_the_recent_failures_page_links_to_the_analytics_page() -> None:
-    client = _client(
-        _queue(),
-        operations=OperationsService(load=lambda: _operations_snapshot()),
-    )
+def test_the_operations_pages_link_to_each_other() -> None:
+    client = _client(_queue(), activity=_activity_service()[0])
 
-    response = client.get("/operations/failures")
+    runs = client.get("/operations/runs")
 
-    assert response.status_code == 200
-    assert 'href="/operations/analytics"' in response.text
+    assert 'href="/operations/analytics"' in runs.text
+    assert 'href="/operations/control"' in runs.text
+    assert 'href="/operations/failures"' not in runs.text
 
 
 def _applied_dismissal(command: WorkDismissalCommand) -> WorkDismissalApplied:

@@ -124,7 +124,6 @@ from job_finder.review.models import (
 )
 from job_finder.review.operations import (
     ACTIVITY_STATUSES,
-    ActionableWork,
     ActivityEntry,
     ActivityPage,
     ActivityQuery,
@@ -132,7 +131,6 @@ from job_finder.review.operations import (
     ActivityService,
     ActivityWork,
     DismissalAction,
-    FailureSample,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
     JobReevaluationCommand,
@@ -141,7 +139,6 @@ from job_finder.review.operations import (
     JobReevaluationSourceChanged,
     JobReevaluationUnsupported,
     OperationsService,
-    OperationsSnapshot,
     OperationsUnavailable,
     RecoveryAction,
     RunDetail,
@@ -217,7 +214,7 @@ _OPERATIONS_NOTICES = {
     "reevaluation-requested": "Reevaluation queued with the current release target.",
     "reevaluation-replayed": "This reevaluation request was already queued.",
 }
-_FAILURES_NOTICES = {
+_WORK_ACTION_NOTICES = {
     "work-retried": "Work is ready for the next worker now.",
     "terminal-recovered": "Terminal work recovered with a fresh attempt budget.",
     "recovery-replayed": "This recovery request was already applied.",
@@ -758,11 +755,9 @@ def create_review_app(
                     if command.action is RecoveryAction.RETRY_NOW
                     else "terminal-recovered"
                 )
-                if form.get("return_to") == "detail":
-                    return RedirectResponse(
-                        f"/operations/work/{command.job_id}?notice={notice}", status_code=303
-                    )
-                return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
+                return RedirectResponse(
+                    f"/operations/work/{command.job_id}?notice={notice}", status_code=303
+                )
             case WorkRecoveryKeyConflict():
                 return _operations_conflict_response(
                     "This recovery request key belongs to another command."
@@ -867,7 +862,7 @@ def create_review_app(
         csrf_token = request.session.get("csrf_token")
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
-        notice = _FAILURES_NOTICES.get(request.query_params.get("notice", ""))
+        notice = _WORK_ACTION_NOTICES.get(request.query_params.get("notice", ""))
         return HTMLResponse(
             _document(
                 operations_sidebar_page(
@@ -880,28 +875,11 @@ def create_review_app(
         )
 
     @app.route("/operations/failures", methods=["GET"])
-    def failures_page(request: Request) -> HTMLResponse:
-        try:
-            snapshot = operations.load()
-        except psycopg.Error:
-            return _state_response(
-                "Operations status is unavailable",
-                "The database could not be reached. Reload this page to try again.",
-                status_code=503,
-            )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
-            return HTMLResponse(status_code=401)
-        notice = _FAILURES_NOTICES.get(request.query_params.get("notice", ""))
-        return HTMLResponse(
-            _document(
-                operations_sidebar_page(
-                    "failures",
-                    csrf_token,
-                    _failures_page(snapshot, csrf_token, notice=notice, now=now()),
-                ),
-                title="Failures and recovery",
-            )
+    def failures_page(request: Request) -> RedirectResponse:
+        _ = request
+        return RedirectResponse(
+            "/operations/runs?status=failed&status=retrying&status=terminal",
+            status_code=303,
         )
 
     @app.route("/operations/analytics", methods=["GET"])
@@ -961,11 +939,9 @@ def create_review_app(
                     notice = "dismiss-replayed" if result.replayed else "work-dismissed"
                 else:
                     notice = "dismiss-undo-replayed" if result.replayed else "dismiss-undone"
-                if form.get("return_to") == "detail":
-                    return RedirectResponse(
-                        f"/operations/work/{command.job_id}?notice={notice}", status_code=303
-                    )
-                return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
+                return RedirectResponse(
+                    f"/operations/work/{command.job_id}?notice={notice}", status_code=303
+                )
             case WorkDismissalKeyConflict():
                 return _operations_conflict_response(
                     "This dismissal request key belongs to another command."
@@ -2092,223 +2068,8 @@ def _unavailable_schedule_row(label: str, cadence: str, description: str | None)
     )
 
 
-def _metric(label: str, value: int, singular: str, plural: str) -> object:
-    return Div(
-        Small(label),
-        Strong(str(value)),
-        Span(_count_phrase(value, singular, plural)),
-    )
-
-
 def _count_phrase(value: int, singular: str, plural: str) -> str:
     return f"{value} {singular if value == 1 else plural}"
-
-
-def _failures_panel(failures: tuple[FailureSample, ...], *, now: datetime) -> object:
-    rows = (
-        Ul(
-            *(_failure_row(failure, now=now) for failure in failures),
-            cls="operations-list failure-list",
-        )
-        if failures
-        else P("No recent failures recorded.", cls="operations-empty")
-    )
-    return Div(
-        Small("Bounded sample", cls="eyebrow"),
-        H2("Recent failures"),
-        rows,
-        id="failures",
-        cls="operations-section",
-    )
-
-
-def _failures_page(
-    snapshot: OperationsSnapshot,
-    csrf_token: str,
-    *,
-    notice: str | None,
-    now: datetime,
-) -> object:
-    attention = tuple(item for item in snapshot.actionable_work if not item.dismissed)
-    dismissed = tuple(item for item in snapshot.actionable_work if item.dismissed)
-    undisplayed = snapshot.actionable_work_total - len(snapshot.actionable_work)
-    return Div(
-        P(notice, cls="operations-notice", role="status") if notice else None,
-        Div(
-            Small("Owner operations", cls="eyebrow"),
-            H1("Failures and recovery"),
-            P(
-                "Work that failed or hit a terminal error. Recovering re-runs it; "
-                + "dismissing only quiets the alert.",
-                cls="operations-intro",
-            ),
-            cls="operations-header",
-        ),
-        Div(
-            _metric("Retrying", snapshot.queues.retrying, "retrying", "retrying"),
-            _metric(
-                "Terminal",
-                snapshot.queues.terminal_error,
-                "terminal error",
-                "terminal errors",
-            ),
-            _metric(
-                "Dismissed",
-                snapshot.dismissed_terminal,
-                "dismissed",
-                "dismissed",
-            ),
-            cls="operations-metrics",
-            aria_label="Failed work",
-        ),
-        Div(
-            Small("Needs attention", cls="eyebrow"),
-            H2("Failed work"),
-            _recovery_rows(attention, csrf_token, now=now),
-            cls="operations-section",
-        ),
-        _failures_panel(snapshot.failures, now=now),
-        Div(
-            Small("Quieted on purpose", cls="eyebrow"),
-            H2("Dismissed"),
-            Ul(
-                *(_dismissed_row(item, csrf_token, now=now) for item in dismissed),
-                cls="recovery-list",
-            )
-            if dismissed
-            else P("Nothing is dismissed.", cls="operations-empty"),
-            cls="operations-section",
-        )
-        if dismissed
-        else None,
-        P(
-            f"Showing the newest {len(snapshot.actionable_work)} of "
-            + f"{snapshot.actionable_work_total}; recover these to reveal older work.",
-            cls="operations-muted",
-        )
-        if undisplayed > 0
-        else None,
-        cls="review-shell operations-shell",
-    )
-
-
-def _recovery_rows(work: tuple[ActionableWork, ...], csrf_token: str, *, now: datetime) -> object:
-    rows = (
-        Ul(*(_work_recovery_row(item, csrf_token, now=now) for item in work), cls="recovery-list")
-        if work
-        else P("No failed work needs recovery.", cls="operations-empty")
-    )
-    return rows
-
-
-def _work_recovery_row(item: ActionableWork, csrf_token: str, *, now: datetime) -> object:
-    marker = item.retry_at if item.retry_at is not None else item.failed_at
-    timing = (
-        "Scheduled retry: " if item.retry_at is not None else "Terminal since: ",
-        timestamp(marker, now=now),
-    )
-    help_text = (
-        "Sends it back to the worker on the next tick."
-        if item.state == "failed"
-        else "Re-runs it with a fresh attempt budget. Past decisions stay put."
-    )
-    return Li(
-        Div(
-            Strong("Retryable" if item.state == "failed" else "Terminal"),
-            Span(f"Attempt {item.attempt_count}", cls="run-status"),
-        ),
-        Small(str(item.job_id), cls="recovery-id"),
-        P(item.failure_summary),
-        Small(*timing),
-        P(help_text, cls="operations-muted"),
-        Div(
-            _recovery_form(item, csrf_token),
-            _dismiss_form(item, csrf_token, DismissalAction.DISMISS, "Dismiss")
-            if item.state == "terminal_error"
-            else None,
-            cls="schedule-actions",
-        ),
-    )
-
-
-def _dismissed_row(item: ActionableWork, csrf_token: str, *, now: datetime) -> object:
-    return Li(
-        Div(
-            Strong("Terminal"),
-            Span(f"Attempt {item.attempt_count}", cls="run-status"),
-        ),
-        Small(str(item.job_id), cls="recovery-id"),
-        P(item.failure_summary),
-        Small("Terminal since: ", timestamp(item.failed_at, now=now)),
-        Form(
-            Input(type="hidden", name="csrf_token", value=csrf_token),
-            Input(type="hidden", name="job_id", value=str(item.job_id)),
-            Input(type="hidden", name="action", value=DismissalAction.UNDO_DISMISS.value),
-            Input(
-                type="hidden",
-                name="expected_attempt_count",
-                value=str(item.attempt_count),
-            ),
-            Input(
-                type="hidden",
-                name="idempotency_key",
-                value=secrets.token_urlsafe(32),
-            ),
-            Button("Undo dismissal", type="submit", cls="operation-button secondary"),
-            action="/operations/dismiss",
-            method="post",
-        ),
-    )
-
-
-def _recovery_form(item: ActionableWork, csrf_token: str) -> object:
-    action = RecoveryAction.RETRY_NOW if item.state == "failed" else RecoveryAction.RECOVER_TERMINAL
-    return Form(
-        Input(type="hidden", name="csrf_token", value=csrf_token),
-        Input(type="hidden", name="job_id", value=str(item.job_id)),
-        Input(type="hidden", name="action", value=action.value),
-        Input(type="hidden", name="expected_state", value=item.state),
-        Input(
-            type="hidden",
-            name="expected_attempt_count",
-            value=str(item.attempt_count),
-        ),
-        Input(
-            type="hidden",
-            name="idempotency_key",
-            value=secrets.token_urlsafe(32),
-        ),
-        Button(
-            "Retry now" if action is RecoveryAction.RETRY_NOW else "Recover terminal work",
-            type="submit",
-            cls="operation-button",
-        ),
-        action="/operations/recovery",
-        method="post",
-    )
-
-
-def _dismiss_form(
-    item: ActionableWork, csrf_token: str, action: DismissalAction, label: str
-) -> object:
-    return Form(
-        Input(type="hidden", name="csrf_token", value=csrf_token),
-        Input(type="hidden", name="job_id", value=str(item.job_id)),
-        Input(type="hidden", name="action", value=action.value),
-        Input(
-            type="hidden",
-            name="expected_attempt_count",
-            value=str(item.attempt_count),
-        ),
-        Input(
-            type="hidden",
-            name="idempotency_key",
-            value=secrets.token_urlsafe(32),
-        ),
-        Button(label, type="submit", cls="operation-button secondary"),
-        action="/operations/dismiss",
-        method="post",
-    )
 
 
 def _activity_content(
@@ -2806,15 +2567,6 @@ def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
     )
 
 
-def _failure_row(failure: FailureSample, *, now: datetime) -> object:
-    return Li(
-        Div(
-            Strong(failure.source.title()), timestamp(failure.occurred_at, now=now), cls="row-head"
-        ),
-        P(failure.summary),
-    )
-
-
 def _format_duration(total_seconds: int) -> str:
     minutes, seconds = divmod(total_seconds, 60)
     hours, minutes = divmod(minutes, 60)
@@ -3283,7 +3035,6 @@ def _work_detail_form(
         Input(type="hidden", name="expected_state", value=detail.state),
         Input(type="hidden", name="expected_attempt_count", value=str(detail.attempt_count)),
         Input(type="hidden", name="idempotency_key", value=secrets.token_urlsafe(32)),
-        Input(type="hidden", name="return_to", value="detail"),
         Button(label, type="submit", cls="operation-button"),
         action="/operations/recovery",
         method="post",
@@ -3299,7 +3050,6 @@ def _work_detail_dismiss_form(
         Input(type="hidden", name="action", value=action.value),
         Input(type="hidden", name="expected_attempt_count", value=str(detail.attempt_count)),
         Input(type="hidden", name="idempotency_key", value=secrets.token_urlsafe(32)),
-        Input(type="hidden", name="return_to", value="detail"),
         Button(label, type="submit", cls="operation-button secondary"),
         action="/operations/dismiss",
         method="post",
@@ -3819,14 +3569,14 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 @media (max-width: 760px) {
   .work-actions { grid-template-columns: 1fr; }
 }
-.operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
+.operations-list li > small { display: block; margin-top: 0.4rem; color: var(--muted); }
 .run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
 .run-link { display: block; text-decoration: none; }
 .run-link:hover, .run-link:focus-visible { background: var(--acid); color: var(--accent-ink); }
 .run-row { display: grid; gap: 0.2rem; }
 .run-link-hint { font-weight: 900; font-size: 0.8rem; }
 .discovery-row > div { display: flex; justify-content: space-between; gap: 1rem; }
-.failure-list p { margin-bottom: 0; overflow-wrap: anywhere; }
+.operations-list .operations-muted p { margin-bottom: 0; overflow-wrap: anywhere; }
 .schedule-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
 .schedule-list > li { padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
 .schedule-list > li > div > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
@@ -3838,11 +3588,6 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operation-button { width: 100%; min-height: 42px; padding: 0 0.6rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
 .operation-button.secondary { background: var(--panel); color: var(--ink); }
 .operation-button:disabled { cursor: not-allowed; opacity: 0.5; }
-.recovery-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; list-style: none; margin: 1rem 0 0; padding: 0; }
-.recovery-list > li { min-width: 0; padding: 1rem; border: 2px solid var(--line); background: var(--surface-raised); }
-.recovery-list > li > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
-.recovery-list p { margin: 0.65rem 0; color: var(--muted); overflow-wrap: anywhere; }
-.recovery-list form { margin-top: 0.8rem; }
 .recovery-id { display: block; margin-top: 0.35rem; overflow-wrap: anywhere; color: var(--muted); }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -3897,7 +3642,6 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
   .operations-metrics { grid-template-columns: 1fr; }
   .operations-metrics > div { border-right: 0; border-bottom: 2px solid var(--line); }
   .operations-metrics > div:last-child { border-bottom: 0; }
-  .recovery-list { grid-template-columns: 1fr; }
   .schedule-actions { grid-template-columns: 1fr; }
 }
 @media (max-width: 360px) {

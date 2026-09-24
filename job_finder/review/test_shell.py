@@ -82,5 +82,5 @@ def test_operations_sub_sidebar_marks_the_current_page() -> None:
     assert 'href="/operations/runs"' in markup
     assert 'href="/operations/analytics"' in markup
     assert 'href="/operations/control" aria-current="page"' in markup
-    assert 'href="/operations/failures"' in markup
+    assert "/operations/failures" not in markup
     assert 'aria-label="Operations"' in markup
