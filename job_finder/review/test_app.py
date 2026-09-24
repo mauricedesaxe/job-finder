@@ -2110,6 +2110,7 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "5,200 ms" in response.text
     assert "z-ai/glm-4.6" in response.text
     assert "$1.1000" in response.text
+    assert "spend-row-head" in response.text
     assert "up to 5200 ms" in response.text
     assert 'href="/operations/runs/00000000-0000-0000-0000-000000000007"' in response.text
     assert (
