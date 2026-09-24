@@ -31,24 +31,6 @@ class AtsAvailable(AtsModel):
     compensation: CompensationObservation | None = None
 
 
-_PERIOD_BY_UNIT: dict[str, CompensationPeriod] = {
-    "year": "year",
-    "month": "month",
-    "week": "week",
-    "day": "day",
-    "hour": "hour",
-}
-
-
-def compensation_period_from_interval(interval: str | None) -> CompensationPeriod | None:
-    if interval is None:
-        return None
-    parts = interval.strip().split()
-    if len(parts) != 2:
-        return None
-    return _PERIOD_BY_UNIT.get(parts[1].lower())
-
-
 class AtsUnavailable(AtsModel):
     kind: Literal["unavailable"] = "unavailable"
     source: AtsSource

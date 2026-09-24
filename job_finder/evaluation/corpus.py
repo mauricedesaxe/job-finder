@@ -13,7 +13,7 @@ from job_finder.benchmarks.identity import canonical_digest
 from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.ats.models import AtsAvailable
-from job_finder.ats.policy import ats_structural_filter, format_ats_block
+from job_finder.ats.policy import ats_structural_filter, format_ats_description
 from job_finder.evaluation.models import EvaluationOutcome, EvaluationResult, evaluation_outcome
 from job_finder.jobs.models import JobListing, StructuralRejection
 from job_finder.jobs.scraping import detect_source, extract_company_from_url
@@ -197,7 +197,7 @@ def evaluate_corpus_case(
     if isinstance(case, AtsEvaluationCorpusCase):
         job = job.model_copy(
             update={
-                "description": f"{format_ats_block(case.evidence)}\n\n{job.description}",
+                "description": format_ats_description(case.evidence, job.description),
                 "location": case.evidence.location,
             }
         )

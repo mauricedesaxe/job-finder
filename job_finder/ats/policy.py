@@ -42,3 +42,7 @@ def format_ats_block(data: AtsAvailable) -> str:
         lines.append(f"- Country fallback when locations are non-geographic: {data.country}")
     lines.append("---")
     return "\n".join(lines)
+
+
+def format_ats_description(data: AtsAvailable, body: str) -> str:
+    return f"{format_ats_block(data)}\n\n{body}"
