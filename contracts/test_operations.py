@@ -1176,8 +1176,8 @@ def test_spend_analytics_reads_totals_days_models_and_runs(
             (release.id,),
         ).fetchone() or pytest.fail("bootstrap release has no members")
         for run, key, started, kind in (
-            (recent_run_id, f"spend:{recent_run_id}", now - timedelta(hours=4), "orchestration"),
-            (older_run_id, f"spend:{older_run_id}", now - timedelta(days=45), "orchestration"),
+            (recent_run_id, f"spend:{recent_run_id}", now - timedelta(hours=4), "discovery"),
+            (older_run_id, f"spend:{older_run_id}", now - timedelta(days=44), "discovery"),
         ):
             connection.execute(
                 """
@@ -1321,7 +1321,7 @@ def test_spend_analytics_reads_totals_days_models_and_runs(
             input_tokens=100,
             output_tokens=50,
             latency_ms=90,
-            observed_at=now - timedelta(days=45),
+            observed_at=now - timedelta(days=44),
             response_model="glm-4.6",
         )
 
@@ -1343,7 +1343,9 @@ def test_spend_analytics_reads_totals_days_models_and_runs(
         assert spend.days[0].known_cost_usd == Decimal("0.35")
 
         assert [item.model for item in spend.models] == ["glm-4.6", "gpt-5-mini"]
-        assert spend.models[0].calls == 2
+        assert spend.models[0].calls == 3
+        assert spend.models[0].accepted == 2
+        assert spend.models[0].errors == 1
         assert spend.models[0].known_cost_usd == Decimal("1.25")
         assert spend.models[0].input_tokens == 110
         assert spend.models[0].output_tokens == 55
