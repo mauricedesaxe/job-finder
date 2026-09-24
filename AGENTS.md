@@ -63,7 +63,8 @@ A file's name describes the subject it owns. The review queue and feedback live
 in `job_finder/review/queue.py` and `job_finder/review/feedback.py`; do not
 recreate a generic review persistence module or compatibility facade. Immutable
 benchmark manifests, scoring, executions, comparisons, and promotions live in
-their subject-named modules under `job_finder/benchmarks/`.
+their subject-named modules under `job_finder/benchmarks/`. Projection outbox,
+Langfuse delivery, rebuild, and smoke operations live under `job_finder/projections/`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

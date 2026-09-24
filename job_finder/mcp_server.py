@@ -74,7 +74,6 @@ from job_finder.configuration_service import (
     validate_search_configuration,
 )
 from job_finder.database import Connection, ConnectionFactory
-from job_finder.evaluation.langfuse import ProjectionQueueStatus, load_projection_queue_status
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 from job_finder.evaluation.prompt_releases import PromptReleaseError
 from job_finder.evaluation.release_targets import (
@@ -91,6 +90,7 @@ from job_finder.evaluation.relevance_releases import (
     RelevanceExecutionPolicy,
     RelevanceReleaseError,
 )
+from job_finder.projections.outbox import ProjectionQueueStatus, load_projection_queue_status
 from job_finder.review.feedback import (
     FeedbackCurationFilter,
     ReviewFeedback,

@@ -27,11 +27,11 @@ from job_finder.execution_budget import (
     reserve_job_capacity,
     settle_execution_budget,
 )
-from job_finder.evaluation.langfuse import (
+from job_finder.projections.langfuse import create_langfuse_projection_sender
+from job_finder.projections.outbox import (
     ProjectionDelivered,
     ProjectionFailed,
     ProjectionIdle,
-    create_langfuse_projection_sender,
     deliver_next_projection,
 )
 from job_finder.pipeline.orchestration import (
