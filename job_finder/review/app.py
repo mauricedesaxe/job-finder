@@ -907,6 +907,7 @@ def create_review_app(
                 scripts=(
                     Script(src=_STATIC_URLS["frappe-charts.min.umd.js"]),
                     Script(src=_STATIC_URLS["spend-chart-init.js"]),
+                    Script(src=_STATIC_URLS["latency-chart-init.js"]),
                 ),
             )
         )
@@ -2489,6 +2490,7 @@ def _analytics_page(spend: SpendAnalytics) -> object:
             aria_label="Model spend totals",
         ),
         _spend_days_section(spend.days),
+        _spend_latency_section(spend.days) if spend.days else None,
         _spend_models_section(spend.models),
         cls="review-shell operations-shell",
     )
@@ -2513,7 +2515,9 @@ def _spend_days_section(days: tuple[DaySpend, ...]) -> object:
     )
 
 
-def _spend_chart(days: tuple[DaySpend, ...]) -> object:
+def _day_chart_frame(
+    days: tuple[DaySpend, ...],
+) -> tuple[tuple[DaySpend, ...], list[str], list[str], list[str]]:
     ordered = tuple(reversed(days))
     labels = [f"{day.day:%b} {day.day.day}" for day in ordered]
     details = []
@@ -2526,8 +2530,14 @@ def _spend_chart(days: tuple[DaySpend, ...]) -> object:
     for day in ordered:
         for part in day.by_model:
             totals[part.model] = totals.get(part.model, Decimal(0)) + part.known_cost_usd
+    models = sorted(totals, key=lambda name: (-totals[name], name))
+    return ordered, labels, details, models
+
+
+def _spend_chart(days: tuple[DaySpend, ...]) -> object:
+    ordered, labels, details, models = _day_chart_frame(days)
     datasets = []
-    for model in sorted(totals, key=lambda name: (-totals[name], name)):
+    for model in models:
         model_costs = [
             next((part.known_cost_usd for part in day.by_model if part.model == model), Decimal(0))
             for day in ordered
@@ -2548,6 +2558,41 @@ def _spend_chart(days: tuple[DaySpend, ...]) -> object:
         Script(payload, type="application/json", id="spend-per-day-data"),
         role="img",
         aria_label="Bar chart of model spend per day over the last 30 days",
+    )
+
+
+def _spend_latency_section(days: tuple[DaySpend, ...]) -> object:
+    return Div(
+        Small("Last 30 days", cls="eyebrow"),
+        H2("Call latency"),
+        P(
+            "For each model and day, 9 in 10 calls were faster than the bar "
+            + "(the 90th percentile call time).",
+            cls="operations-muted",
+        ),
+        _spend_latency_chart(days),
+        cls="operations-section",
+    )
+
+
+def _spend_latency_chart(days: tuple[DaySpend, ...]) -> object:
+    ordered, labels, details, models = _day_chart_frame(days)
+    datasets = []
+    for model in models:
+        p90_latencies = [
+            next((part.p90_latency_ms for part in day.by_model if part.model == model), None)
+            for day in ordered
+        ]
+        datasets.append({"name": model, "values": p90_latencies})
+    payload = json.dumps(
+        {"labels": labels, "details": details, "datasets": datasets},
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+    return Div(
+        Div(id="latency-per-day-chart", cls="spend-chart"),
+        Script(payload, type="application/json", id="latency-per-day-data"),
+        role="img",
+        aria_label="Bar chart of 90th percentile model call latency by day over the last 30 days",
     )
 
 

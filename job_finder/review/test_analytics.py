@@ -42,18 +42,25 @@ def test_day_spend_rejects_a_model_breakdown_that_does_not_add_up() -> None:
             accepted=2,
             errors=0,
             known_cost_usd=Decimal("0.50"),
-            by_model=(DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("0.25")),),
+            by_model=(
+                DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("0.25"), p90_latency_ms=40),
+            ),
         )
 
 
 def test_day_model_spend_rejects_negative_spend() -> None:
     with pytest.raises(ValueError, match="cannot be negative"):
-        DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("-0.01"))
+        DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("-0.01"), p90_latency_ms=40)
+
+
+def test_day_model_spend_rejects_negative_latency() -> None:
+    with pytest.raises(ValueError, match="latency values cannot be negative"):
+        DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("0.25"), p90_latency_ms=-1)
 
 
 def test_day_model_spend_rejects_a_blank_model_name() -> None:
     with pytest.raises(ValueError, match="model name must not be empty"):
-        DayModelSpend(model="", known_cost_usd=Decimal("0.25"))
+        DayModelSpend(model="", known_cost_usd=Decimal("0.25"), p90_latency_ms=40)
 
 
 def test_model_spend_rejects_a_blank_model_name() -> None:

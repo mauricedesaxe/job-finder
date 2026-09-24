@@ -2313,8 +2313,16 @@ def _spend_analytics() -> SpendAnalytics:
                 errors=1,
                 known_cost_usd=Decimal("1.0000"),
                 by_model=(
-                    DayModelSpend(model="z-ai/glm-4.6", known_cost_usd=Decimal("0.9000")),
-                    DayModelSpend(model="openai/gpt-5-mini", known_cost_usd=Decimal("0.1000")),
+                    DayModelSpend(
+                        model="z-ai/glm-4.6",
+                        known_cost_usd=Decimal("0.9000"),
+                        p90_latency_ms=3000,
+                    ),
+                    DayModelSpend(
+                        model="openai/gpt-5-mini",
+                        known_cost_usd=Decimal("0.1000"),
+                        p90_latency_ms=1200,
+                    ),
                 ),
             ),
             DaySpend(
@@ -2323,7 +2331,13 @@ def _spend_analytics() -> SpendAnalytics:
                 accepted=1,
                 errors=1,
                 known_cost_usd=Decimal("0.2345"),
-                by_model=(DayModelSpend(model="z-ai/glm-4.6", known_cost_usd=Decimal("0.2345")),),
+                by_model=(
+                    DayModelSpend(
+                        model="z-ai/glm-4.6",
+                        known_cost_usd=Decimal("0.2345"),
+                        p90_latency_ms=4100,
+                    ),
+                ),
             ),
         ),
         models=(
@@ -2384,12 +2398,17 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     assert response.status_code == 200
     library_match = re.search(r'src="(/static/frappe-charts[^"]+)"', response.text)
     init_match = re.search(r'src="(/static/spend-chart-init[^"]+)"', response.text)
+    latency_init_match = re.search(r'src="(/static/latency-chart-init[^"]+)"', response.text)
     assert library_match is not None
     assert init_match is not None
+    assert latency_init_match is not None
     assert re.fullmatch(
         r"/static/frappe-charts\.min\.umd\.[0-9a-f]{10}\.js", library_match.group(1)
     )
     assert re.fullmatch(r"/static/spend-chart-init\.[0-9a-f]{10}\.js", init_match.group(1))
+    assert re.fullmatch(
+        r"/static/latency-chart-init\.[0-9a-f]{10}\.js", latency_init_match.group(1)
+    )
     assert 'id="spend-per-day-chart"' in response.text
     assert "Sep 9" in response.text
     assert "Sep 10" in response.text
@@ -2409,17 +2428,36 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     assert executable_inline_scripts == []
 
 
+def test_the_analytics_page_charts_p90_latency_per_model_per_day() -> None:
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 200
+    assert 'id="latency-per-day-chart"' in response.text
+    assert "Call latency" in response.text
+    assert "9 in 10 calls were faster than the bar" in response.text
+    assert (
+        '{"name": "z-ai/glm-4.6", "values": [4100, 3000]}, '
+        + '{"name": "openai/gpt-5-mini", "values": [null, 1200]}'
+        in response.text
+    )
+
+
 def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
 
     page = client.get("/operations/analytics")
     library_match = re.search(r'src="(/static/frappe-charts[^"]+)"', page.text)
     init_match = re.search(r'src="(/static/spend-chart-init[^"]+)"', page.text)
+    latency_init_match = re.search(r'src="(/static/latency-chart-init[^"]+)"', page.text)
     assert library_match is not None
     assert init_match is not None
+    assert latency_init_match is not None
 
     library = client.get(library_match.group(1))
     init_script = client.get(init_match.group(1))
+    latency_init_script = client.get(latency_init_match.group(1))
     stale_url = client.get("/static/spend-chart-init.js")
     missing = client.get("/static/nope.js")
 
@@ -2430,6 +2468,10 @@ def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     assert init_script.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert "frappe.Chart" in init_script.text
     assert "stacked: true" in init_script.text
+    assert latency_init_script.status_code == 200
+    assert latency_init_script.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert "frappe.Chart" in latency_init_script.text
+    assert "stacked" not in latency_init_script.text
     assert stale_url.status_code == 404
     assert missing.status_code == 404
 
@@ -2454,6 +2496,7 @@ def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
     assert "$0.0000" in response.text
     assert "No model calls were recorded in the last 30 days." in response.text
     assert "No model calls were recorded." in response.text
+    assert "latency-per-day-chart" not in response.text
 
 
 def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
