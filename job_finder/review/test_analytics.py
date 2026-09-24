@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import UUID
 
 import pytest
 
-from job_finder.review.analytics import DaySpend, ModelSpend, RunSpend, SpendAnalytics
+from job_finder.review.analytics import DaySpend, ModelSpend, SpendAnalytics
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
@@ -59,7 +58,6 @@ def test_spend_analytics_rejects_totals_that_do_not_add_up() -> None:
             max_latency_ms=900,
             days=(),
             models=(),
-            runs=(),
         )
 
 
@@ -75,7 +73,6 @@ def test_spend_analytics_rejects_negative_totals() -> None:
             max_latency_ms=0,
             days=(),
             models=(),
-            runs=(),
         )
 
 
@@ -90,15 +87,6 @@ def test_spend_analytics_accepts_a_consistent_zero_state() -> None:
         max_latency_ms=0,
         days=(),
         models=(),
-        runs=(
-            RunSpend(
-                id=UUID(int=1),
-                kind="orchestration",
-                started_at=NOW,
-                calls=0,
-                known_cost_usd=Decimal(0),
-            ),
-        ),
     )
 
     assert spend.calls == 0
