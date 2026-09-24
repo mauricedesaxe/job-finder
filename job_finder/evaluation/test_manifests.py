@@ -5,17 +5,19 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
-from job_finder.evaluation.manifests import (
-    EvaluateManifestCommand,
+from job_finder.benchmarks.manifests import (
     EvaluationCaseInput,
     EvaluationManifest,
     EvaluationManifestCase,
+    ManifestPolicy,
+)
+from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
+from job_finder.evaluation.manifests import (
+    EvaluateManifestCommand,
     EvaluationMetrics,
     EvaluationRun,
     EvaluationRunTelemetry,
     EvaluationTrialResult,
-    ManifestPolicy,
     RunningEvaluationExecution,
     aggregate_evaluation_telemetry,
     compare_runs,

@@ -6,6 +6,12 @@ from uuid import UUID
 import pytest
 from pydantic import TypeAdapter
 
+from job_finder.benchmarks.manifests import (
+    EvaluationCaseInput,
+    EvaluationManifest,
+    EvaluationManifestCase,
+    ManifestPolicy,
+)
 from job_finder.config import LangfuseSettings
 from job_finder.evaluation.models import (
     InputDigest,
@@ -25,13 +31,9 @@ from job_finder.evaluation.langfuse import (
     create_langfuse_projection_sender,
 )
 from job_finder.evaluation.manifests import (
-    EvaluationCaseInput,
-    EvaluationManifest,
-    EvaluationManifestCase,
     EvaluationMetrics,
     EvaluationRun,
     EvaluationTrialResult,
-    ManifestPolicy,
     PromptPromotionDecision,
 )
 

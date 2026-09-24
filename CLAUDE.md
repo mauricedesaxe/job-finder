@@ -93,8 +93,9 @@ Langfuse             ← retryable projections (never a decision input)
   lockfile-checked, and land in their own commit.
 - **Modules are domain models.** A file's name describes the subject it owns
   (`prompt_releases.py`, `title_deduplication.py`; the review queue and feedback
-  live in `review/queue.py` and `review/feedback.py`). If a candidate filename
-  describes a role rather than a piece of the domain, push back on the design.
+  live in `review/queue.py` and `review/feedback.py`; immutable benchmark
+  evidence lives in `benchmarks/manifests.py`). If a candidate filename describes
+  a role rather than a piece of the domain, push back on the design.
 
 ## Type system
 

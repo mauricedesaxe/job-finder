@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psycopg
 
+from job_finder.benchmarks.manifests import EvaluationManifestCase
 from job_finder.discovery.exchange_rates import (
     ExchangeRateSnapshot,
     fetch_exchange_rates,
@@ -22,7 +23,6 @@ from job_finder.evaluation.manifests import (
     CaseEvaluator,
     EvaluateManifestCommand,
     EvaluationExecutionState,
-    EvaluationManifestCase,
     run_manifest,
 )
 from job_finder.evaluation.models import (
