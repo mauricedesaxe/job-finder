@@ -54,7 +54,7 @@ from job_finder.provider_credentials import (
     credential_cipher,
     resolve_execution_provider_credentials,
 )
-from job_finder.review.postgres import enqueue_rejected_audit_sample
+from job_finder.review.queue import enqueue_rejected_audit_sample
 
 HeartbeatSender = Callable[[str], None]
 

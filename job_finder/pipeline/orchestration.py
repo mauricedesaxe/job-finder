@@ -86,7 +86,7 @@ from job_finder.pipeline.state import (
     register_discoveries,
     terminally_fail_job_claim,
 )
-from job_finder.review.postgres import enqueue_qualified_review_item
+from job_finder.review.queue import enqueue_qualified_review_item
 from job_finder.search_configuration import (
     SearchQuery,
     build_search_queries,

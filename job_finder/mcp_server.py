@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-import psycopg
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -46,6 +44,7 @@ from job_finder.configuration_service import (
     save_search_configuration_draft,
     validate_search_configuration,
 )
+from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.langfuse import ProjectionQueueStatus, load_projection_queue_status
 from job_finder.evaluation.manifests import (
     CuratedReviewEvent,
@@ -86,16 +85,16 @@ from job_finder.evaluation.relevance_releases import (
     RelevanceExecutionPolicy,
     RelevanceReleaseError,
 )
-from job_finder.review.models import FeedbackCurationFilter, ReviewFeedback, ReviewFeedbackPage
-from job_finder.review.postgres import (
+from job_finder.review.feedback import (
+    FeedbackCurationFilter,
+    ReviewFeedback,
+    ReviewFeedbackPage,
     ReviewFeedbackNotFound,
     list_review_feedback,
     load_review_feedback,
 )
 from job_finder.search_configuration import SearchConfiguration, SearchConfigurationDraft
 
-Connection = psycopg.Connection[tuple[object, ...]]
-ConnectionFactory = Callable[[], AbstractContextManager[Connection]]
 Clock = Callable[[], datetime]
 EvaluationRunner = Callable[[Connection, EvaluateManifestCommand], EvaluationExecutionState]
 _DEFAULT_MAX_FALSE_POSITIVE_RATE = Decimal("0.05")

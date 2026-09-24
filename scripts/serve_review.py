@@ -15,6 +15,7 @@ from job_finder.provider_credentials import (
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.control_plane import dagster_control_plane_service
+from job_finder.review.feedback import postgres_review_feedback_service
 from job_finder.review.analytics import postgres_analytics_service
 from job_finder.review.operations import (
     postgres_activity_service,
@@ -27,7 +28,7 @@ from job_finder.review.owner_access import (
     import_legacy_owner_password,
     postgres_owner_access_service,
 )
-from job_finder.review.postgres import postgres_review_service
+from job_finder.review.queue import postgres_review_queue_service
 
 
 def create_app() -> FastHTML:
@@ -75,9 +76,10 @@ def create_app() -> FastHTML:
             _ = connection.execute("SELECT 1").fetchone()
 
     return create_review_app(
-        postgres_review_service(connect),
+        postgres_review_queue_service(connect),
         postgres_configuration_editor_service(connect),
         settings,
+        feedback_service=postgres_review_feedback_service(connect),
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
         onboarding_progress_service=postgres_onboarding_progress_service(connect),

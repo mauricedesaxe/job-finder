@@ -3,8 +3,13 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from job_finder.review.models import ReviewItem, ReviewJob, ReviewQueue, ReviewSubmission
-from job_finder.review.postgres import deterministic_rejected_sample
+from job_finder.review.feedback import ReviewSubmission
+from job_finder.review.queue import (
+    ReviewItem,
+    ReviewJob,
+    ReviewQueue,
+    deterministic_rejected_sample,
+)
 
 
 def test_selects_a_small_stable_rejected_audit_sample() -> None:

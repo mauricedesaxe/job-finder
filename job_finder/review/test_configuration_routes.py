@@ -36,14 +36,14 @@ from job_finder.review.configuration_editor import (
     ConfigurationEditorService,
     ConfigurationEditorState,
 )
-from job_finder.review.models import ReviewQueue, ReviewSaved
+from job_finder.review.feedback import ReviewFeedbackService, ReviewSaved
 from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerAccessService,
     OwnerAccessState,
     OwnerBootstrapConflict,
 )
-from job_finder.review.postgres import ReviewService
+from job_finder.review.queue import ReviewQueue, ReviewQueueService
 from job_finder.search_configuration import (
     ActiveSearchConfiguration,
     DEFAULT_SEARCH_CONFIGURATION,
@@ -596,15 +596,16 @@ def test_configuration_database_failure_is_a_retryable_503() -> None:
         publish=service.publish,
         activate=service.activate,
     )
-    review = ReviewService(
-        review_queue=lambda: ReviewQueue(),
-        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
+    queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue())
+    feedback_service = ReviewFeedbackService(
+        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1))
     )
     client = TestClient(
         create_review_app(
-            review,
+            queue_service,
             service,
             SETTINGS,
+            feedback_service=feedback_service,
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -638,15 +639,16 @@ def test_malformed_transport_is_a_400_and_unknown_notice_is_not_reflected() -> N
 
 
 def _client(harness: ServiceHarness, *, authenticate: bool = True) -> TestClient:
-    review = ReviewService(
-        review_queue=lambda: ReviewQueue(),
-        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
+    queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue())
+    feedback_service = ReviewFeedbackService(
+        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1))
     )
     client = TestClient(
         create_review_app(
-            review,
+            queue_service,
             harness.service(),
             SETTINGS,
+            feedback_service=feedback_service,
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )

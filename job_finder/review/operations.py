@@ -12,8 +12,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.models import PromptReleaseId, RelevanceReleaseId
-from job_finder.review.postgres import Connection, ConnectionFactory
 
 PipelineRunStatus = Literal["running", "completed", "failed"]
 FailureSource = Literal["pipeline", "job"]
