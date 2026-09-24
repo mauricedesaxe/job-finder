@@ -4,14 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from uuid import UUID
 
 from job_finder.review.operations import OperationsUnavailable
 from job_finder.review.postgres import Connection, ConnectionFactory
 
 SPEND_DAY_LIMIT = 30
 SPEND_MODEL_LIMIT = 10
-SPEND_RUN_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -58,21 +56,6 @@ class ModelSpend:
 
 
 @dataclass(frozen=True)
-class RunSpend:
-    id: UUID
-    kind: str
-    started_at: datetime
-    calls: int
-    known_cost_usd: Decimal
-
-    def __post_init__(self) -> None:
-        if self.calls < 0 or self.known_cost_usd < 0:
-            raise ValueError("spend values cannot be negative")
-        if not self.kind:
-            raise ValueError("run kind must not be empty")
-
-
-@dataclass(frozen=True)
 class SpendAnalytics:
     known_usd: Decimal
     calls: int
@@ -83,7 +66,6 @@ class SpendAnalytics:
     max_latency_ms: int
     days: tuple[DaySpend, ...]
     models: tuple[ModelSpend, ...]
-    runs: tuple[RunSpend, ...]
 
     def __post_init__(self) -> None:
         if (
@@ -122,14 +104,11 @@ def load_spend_analytics(
     *,
     day_limit: int = SPEND_DAY_LIMIT,
     model_limit: int = SPEND_MODEL_LIMIT,
-    run_limit: int = SPEND_RUN_LIMIT,
 ) -> SpendAnalytics:
     if day_limit < 1:
         raise ValueError("spend day limit must be positive")
     if model_limit < 1:
         raise ValueError("spend model limit must be positive")
-    if run_limit < 1:
-        raise ValueError("spend run limit must be positive")
 
     totals_row = connection.execute(
         """
@@ -173,18 +152,6 @@ def load_spend_analytics(
         (model_limit,),
     ).fetchall()
 
-    run_rows = connection.execute(
-        """
-        SELECT run.id, run.kind, run.started_at, count(m.id), COALESCE(sum(m.cost_usd), 0)
-        FROM pipeline_runs run
-        JOIN model_call_attempts m ON m.pipeline_run_id = run.id
-        GROUP BY run.id, run.kind, run.started_at
-        ORDER BY run.started_at DESC, run.id DESC
-        LIMIT %s
-        """,
-        (run_limit,),
-    ).fetchall()
-
     return SpendAnalytics(
         known_usd=Decimal(str(totals_row[0])),
         calls=int(str(totals_row[1])),
@@ -195,7 +162,6 @@ def load_spend_analytics(
         max_latency_ms=int(str(totals_row[6])),
         days=tuple(_parse_day_spend(row) for row in day_rows),
         models=tuple(_parse_model_spend(row) for row in model_rows),
-        runs=tuple(_parse_run_spend(row) for row in run_rows),
     )
 
 
@@ -227,21 +193,4 @@ def _parse_model_spend(row: tuple[object, ...]) -> ModelSpend:
         output_tokens=int(str(row[5])),
         known_cost_usd=Decimal(str(row[6])),
         max_latency_ms=int(str(row[7])),
-    )
-
-
-def _parse_run_spend(row: tuple[object, ...]) -> RunSpend:
-    run_id, kind, started_at = row[0], row[1], row[2]
-    if not isinstance(run_id, UUID):
-        raise RuntimeError("Spend run id is invalid")
-    if not isinstance(kind, str) or not kind:
-        raise RuntimeError("Spend run kind is invalid")
-    if not isinstance(started_at, datetime):
-        raise RuntimeError("Spend run start time is invalid")
-    return RunSpend(
-        id=run_id,
-        kind=kind,
-        started_at=started_at,
-        calls=int(str(row[3])),
-        known_cost_usd=Decimal(str(row[4])),
     )

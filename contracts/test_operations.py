@@ -1152,7 +1152,7 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
             load_run_detail(connection, uuid4())
 
 
-def test_spend_analytics_reads_totals_days_models_and_runs(
+def test_spend_analytics_reads_totals_days_and_models(
     authority_schema: str,
 ) -> None:
     now = datetime.now(UTC)
@@ -1350,12 +1350,6 @@ def test_spend_analytics_reads_totals_days_models_and_runs(
         assert spend.models[0].input_tokens == 110
         assert spend.models[0].output_tokens == 55
         assert spend.models[0].max_latency_ms == 90
-
-        assert [item.id for item in spend.runs] == [recent_run_id, older_run_id]
-        assert spend.runs[0].calls == 3
-        assert spend.runs[0].known_cost_usd == Decimal("0.35")
-        assert spend.runs[1].calls == 1
-        assert spend.runs[1].known_cost_usd == Decimal("1.00")
 
         bounded = load_spend_analytics(connection, day_limit=45)
         assert len(bounded.days) == 2

@@ -33,7 +33,6 @@ from job_finder.review.analytics import (
     AnalyticsService,
     DaySpend,
     ModelSpend,
-    RunSpend,
     SpendAnalytics,
 )
 from job_finder.review.app import create_review_app
@@ -2082,15 +2081,6 @@ def _spend_analytics() -> SpendAnalytics:
                 max_latency_ms=2100,
             ),
         ),
-        runs=(
-            RunSpend(
-                id=UUID(int=7),
-                kind="orchestration",
-                started_at=NOW - timedelta(hours=3),
-                calls=4,
-                known_cost_usd=Decimal("1.0000"),
-            ),
-        ),
     )
 
 
@@ -2112,7 +2102,6 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "$1.1000" in response.text
     assert "spend-row-head" in response.text
     assert "up to 5200 ms" in response.text
-    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000007"' in response.text
     assert (
         'href="/operations/analytics" aria-current="page" class="shell-link">Analytics</a>'
         in response.text
@@ -2145,7 +2134,6 @@ def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
         max_latency_ms=0,
         days=(),
         models=(),
-        runs=(),
     )
     client = _client(_queue(), analytics=AnalyticsService(load=lambda: empty))
 
@@ -2155,7 +2143,6 @@ def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
     assert "$0.0000" in response.text
     assert "No model calls were recorded in the last 30 days." in response.text
     assert "No model calls were recorded." in response.text
-    assert "No pipeline runs with model calls were recorded." in response.text
 
 
 def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:

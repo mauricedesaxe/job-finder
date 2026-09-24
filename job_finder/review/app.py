@@ -85,7 +85,6 @@ from job_finder.review.analytics import (
     AnalyticsService,
     DaySpend,
     ModelSpend,
-    RunSpend,
     SpendAnalytics,
 )
 from job_finder.review.control_plane import (
@@ -847,7 +846,7 @@ def create_review_app(
                 operations_sidebar_page(
                     "analytics",
                     csrf_token,
-                    _analytics_page(spend, now=now()),
+                    _analytics_page(spend),
                 ),
                 title="Model spend",
             )
@@ -2348,7 +2347,7 @@ def _run_not_found_response() -> HTMLResponse:
     )
 
 
-def _analytics_page(spend: SpendAnalytics, *, now: datetime) -> object:
+def _analytics_page(spend: SpendAnalytics) -> object:
     return Div(
         Div(
             Small("Owner operations", cls="eyebrow"),
@@ -2389,7 +2388,6 @@ def _analytics_page(spend: SpendAnalytics, *, now: datetime) -> object:
         ),
         _spend_days_section(spend.days),
         _spend_models_section(spend.models),
-        _spend_runs_section(spend.runs, now=now),
         cls="review-shell operations-shell",
     )
 
@@ -2461,38 +2459,6 @@ def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
         )
         if models
         else P("No model calls were recorded.", cls="operations-empty"),
-        cls="operations-section",
-    )
-
-
-def _spend_runs_section(runs: tuple[RunSpend, ...], *, now: datetime) -> object:
-    return Div(
-        Small("Newest runs with recorded calls", cls="eyebrow"),
-        H2("Spend by run"),
-        Ul(
-            *(
-                Li(
-                    A(
-                        Div(
-                            Div(
-                                Strong(run.kind.replace("_", " ").title()),
-                                Strong(f"${run.known_cost_usd:,.4f}"),
-                            ),
-                            Small(
-                                f"{run.calls} calls · ",
-                                timestamp(run.started_at, now=now),
-                            ),
-                        ),
-                        href=f"/operations/runs/{run.id}",
-                        cls="run-link",
-                    ),
-                )
-                for run in runs
-            ),
-            cls="operations-list",
-        )
-        if runs
-        else P("No pipeline runs with model calls were recorded.", cls="operations-empty"),
         cls="operations-section",
     )
 
