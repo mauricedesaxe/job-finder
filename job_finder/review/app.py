@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, assert_never, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
 import psycopg
@@ -33,9 +33,11 @@ from fasthtml.common import (
     Li,
     Main,
     Meta,
+    Option,
     P,
     Pre,
     Section,
+    Select,
     Small,
     Span,
     Strong,
@@ -49,7 +51,7 @@ from fasthtml.common import (
 )
 from pydantic import SecretStr, ValidationError
 from starlette.responses import PlainTextResponse
-from starlette.datastructures import FormData
+from starlette.datastructures import FormData, QueryParams
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -112,7 +114,14 @@ from job_finder.review.models import (
     ReviewSubmission,
 )
 from job_finder.review.operations import (
+    ACTIVITY_STATUSES,
     ActionableWork,
+    ActivityEntry,
+    ActivityPage,
+    ActivityQuery,
+    ActivityRun,
+    ActivityService,
+    ActivityWork,
     DismissalAction,
     FailureSample,
     JobReevaluationAccepted,
@@ -127,7 +136,6 @@ from job_finder.review.operations import (
     OperationsUnavailable,
     RecoveryAction,
     RunDetail,
-    RunListItem,
     RunNotFound,
     RunsService,
     WorkDismissalApplied,
@@ -220,6 +228,7 @@ def create_review_app(
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
     runs_service: RunsService | None = None,
+    activity_service: ActivityService | None = None,
     analytics_service: AnalyticsService | None = None,
     control_service: ControlPlaneService | None = None,
     actor: str = "owner",
@@ -227,6 +236,7 @@ def create_review_app(
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
     runs = runs_service or RunsService()
+    activity = activity_service or ActivityService()
     analytics = analytics_service or AnalyticsService()
     controls = control_service or unavailable_control_plane_service()
     dagster_configured = control_service is not None
@@ -750,11 +760,12 @@ def create_review_app(
 
     @app.route("/operations/runs", methods=["GET"])
     def pipeline_runs_page(request: Request) -> HTMLResponse:
+        query = _activity_query_from_params(request.query_params)
         try:
-            run_items = runs.list(50)
-        except psycopg.Error:
+            page = activity.list(query)
+        except (OperationsUnavailable, psycopg.Error):
             return _state_response(
-                "Pipeline runs are unavailable",
+                "Recent activity is unavailable",
                 "The database could not be reached. Reload this page to try again.",
                 status_code=503,
             )
@@ -762,12 +773,23 @@ def create_review_app(
         if not isinstance(csrf_token, str):
             return HTMLResponse(status_code=401)
         notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
+        next_href = (
+            _activity_href(request.query_params, cursor=page.next_cursor)
+            if page.next_cursor is not None
+            else None
+        )
         return HTMLResponse(
             _document(
                 operations_sidebar_page(
                     "activity",
                     csrf_token,
-                    _runs_page(run_items, notice=notice, now=now()),
+                    _activity_content(
+                        page,
+                        filters=request.query_params,
+                        next_href=next_href,
+                        notice=notice,
+                        now=now(),
+                    ),
                 ),
                 title="Recent activity",
             )
@@ -2151,47 +2173,137 @@ def _dismiss_form(
     )
 
 
-def _runs_page(items: tuple[RunListItem, ...], *, notice: str | None, now: datetime) -> object:
+def _activity_content(
+    page: ActivityPage,
+    *,
+    filters: QueryParams,
+    next_href: str | None,
+    notice: str | None,
+    now: datetime,
+) -> object:
+    query = _activity_query_from_params(filters)
+    has_filters = bool(
+        query.statuses or query.kind or query.from_at is not None or query.to_at is not None
+    )
+    empty = (
+        P("No activity matches these filters.", cls="operations-empty")
+        if has_filters
+        else P("No activity recorded yet.", cls="operations-empty")
+    )
+    rows = Ul(
+        *(_activity_row(entry, now=now) for entry in page.entries),
+        cls="operations-list run-list",
+    )
     return Div(
         P(notice, cls="operations-notice", role="status") if notice else None,
         Div(
             Small("Owner operations", cls="eyebrow"),
             H1("Recent activity"),
             P(
-                "Every scheduled and on-demand run. A 0-second orchestration tick "
+                "Pipeline runs and job work, newest first. A 0-second orchestration tick "
                 + "is an idle tick — nothing was due.",
                 cls="operations-intro",
             ),
             cls="operations-header",
         ),
-        Div(
-            Small("Latest runs", cls="eyebrow"),
-            H2("Runs"),
-            Ul(
-                *(_run_list_row(item, now=now) for item in items),
-                cls="operations-list run-list",
-            )
-            if items
-            else P("No pipeline runs recorded.", cls="operations-empty"),
-            cls="operations-section",
-        ),
+        _activity_filter_form(filters),
+        rows if page.entries else empty,
+        A("Next page →", href=next_href, cls="retry activity-next")
+        if next_href is not None
+        else None,
         cls="review-shell operations-shell",
     )
 
 
-def _run_list_row(item: RunListItem, *, now: datetime) -> object:
-    timing = (timestamp(item.started_at, now=now),)
-    if item.completed_at is not None:
-        elapsed = max(0, int((item.completed_at - item.started_at).total_seconds()))
-        timing = (timestamp(item.started_at, now=now), f" · {_format_duration(elapsed)}")
+_ACTIVITY_STATUS_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("running", "Running"),
+    ("completed", "Completed"),
+    ("failed", "Failed"),
+    ("retrying", "Retrying"),
+    ("terminal", "Terminal"),
+    ("dismissed", "Dismissed"),
+)
+_ACTIVITY_KIND_OPTIONS = ("work", "discovery", "processing", "reconcile", "evaluation")
+
+
+def _activity_filter_form(params: QueryParams) -> object:
+    selected = set(params.getlist("status"))
+    kind = params.get("kind")
+    return Form(
+        Div(
+            *(
+                Label(
+                    Input(
+                        type="checkbox",
+                        name="status",
+                        value=value,
+                        checked=True if value in selected else None,
+                    ),
+                    Span(label),
+                    cls="filter-check",
+                )
+                for value, label in _ACTIVITY_STATUS_OPTIONS
+            ),
+            cls="filter-checks",
+        ),
+        Div(
+            Label(
+                "Kind",
+                Select(
+                    Option("Any kind", value="", selected=True if not kind else None),
+                    *(
+                        Option(
+                            option.title(),
+                            value=option,
+                            selected=True if option == kind else None,
+                        )
+                        for option in _ACTIVITY_KIND_OPTIONS
+                    ),
+                    name="kind",
+                ),
+                cls="filter-kind",
+            ),
+            Label(
+                "From",
+                Input(type="date", name="from", value=params.get("from") or None),
+                cls="filter-date",
+            ),
+            Label(
+                "To",
+                Input(type="date", name="to", value=params.get("to") or None),
+                cls="filter-date",
+            ),
+            Button("Apply filters", type="submit", cls="operation-button"),
+            A("Clear", href="/operations/runs", cls="filter-clear"),
+            cls="filter-controls",
+        ),
+        action="/operations/runs",
+        method="get",
+        cls="activity-filters",
+    )
+
+
+def _activity_row(entry: ActivityEntry, *, now: datetime) -> object:
+    if isinstance(entry.item, ActivityRun):
+        return _activity_run_row(entry, now=now)
+    return _activity_work_row(entry, now=now)
+
+
+def _activity_run_row(entry: ActivityEntry, *, now: datetime) -> object:
+    run = entry.item
+    assert isinstance(run, ActivityRun)
+    timing = (timestamp(run.started_at, now=now),)
+    if run.completed_at is not None:
+        elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
+        timing = (timestamp(run.started_at, now=now), f" · {_format_duration(elapsed)}")
     headline = (
         "Idle tick — nothing was due."
-        if item.idle_tick
+        if run.idle_tick
         else " · ".join(
             (
-                f"{item.discoveries} discovered",
-                f"{item.processed_jobs} processed",
-                f"{item.model_calls} model calls",
+                f"{run.discoveries} discovered",
+                f"{run.processed_jobs} processed",
+                f"{run.model_calls} model calls",
             )
         )
     )
@@ -2199,18 +2311,87 @@ def _run_list_row(item: RunListItem, *, now: datetime) -> object:
         A(
             Div(
                 Div(
-                    Strong(item.kind.replace("_", " ").title()),
-                    Span(item.status, cls="run-status"),
+                    Strong(run.kind.replace("_", " ").title()),
+                    Span(entry.status, cls="run-status"),
+                    cls="row-head",
                 ),
                 Small(*timing),
                 P(headline, cls="operations-muted"),
                 Div(Strong("Open run →"), cls="run-link-hint"),
                 cls="run-row",
             ),
-            href=f"/operations/runs/{item.id}",
+            href=f"/operations/runs/{run.id}",
             cls="run-link",
         ),
     )
+
+
+def _activity_work_row(entry: ActivityEntry, *, now: datetime) -> object:
+    work = entry.item
+    assert isinstance(work, ActivityWork)
+    timing: tuple[object, ...] = (f"Attempt {work.attempt_count} · ",)
+    if work.retry_at is not None:
+        timing += ("Retry ", timestamp(work.retry_at, now=now))
+    else:
+        timing += (timestamp(work.occurred_at, now=now),)
+    return Li(
+        Div(
+            Div(
+                Strong("Job work"),
+                Span(entry.status, cls="run-status"),
+                cls="row-head",
+            ),
+            Small(*timing),
+            P(work.failure_summary, cls="operations-muted") if work.failure_summary else None,
+            cls="run-row",
+        ),
+    )
+
+
+def _activity_date(params: QueryParams, key: str) -> datetime | None:
+    raw = params.get(key)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _activity_query_from_params(params: QueryParams) -> ActivityQuery:
+    statuses = frozenset(value for value in params.getlist("status") if value in ACTIVITY_STATUSES)
+    kind = params.get("kind")
+    if kind not in _ACTIVITY_KIND_OPTIONS:
+        kind = None
+    try:
+        return ActivityQuery(
+            statuses=statuses,
+            kind=kind,
+            from_at=_activity_date(params, "from"),
+            to_at=_activity_date(params, "to"),
+            limit=50,
+            cursor=params.get("cursor") or None,
+        )
+    except ValueError:
+        return ActivityQuery(limit=50)
+
+
+def _activity_href(params: QueryParams, *, cursor: str | None = None) -> str:
+    pairs: list[tuple[str, str]] = [
+        ("status", value) for value in params.getlist("status") if value in ACTIVITY_STATUSES
+    ]
+    kind = params.get("kind")
+    if kind in _ACTIVITY_KIND_OPTIONS:
+        pairs.append(("kind", kind))
+    for key in ("from", "to"):
+        value = params.get(key)
+        if value and _activity_date(params, key) is not None:
+            pairs.append((key, value))
+    if cursor is not None:
+        pairs.append(("cursor", cursor))
+    if not pairs:
+        return "/operations/runs"
+    return "/operations/runs?" + urlencode(pairs)
 
 
 def _run_detail_page(detail: RunDetail, *, now: datetime) -> object:
@@ -2445,7 +2626,7 @@ def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
                         Div(
                             Strong(m.model),
                             Strong(f"${m.known_cost_usd:,.4f}"),
-                            cls="spend-row-head",
+                            cls="row-head",
                         ),
                         Small(
                             f"{m.calls} calls · {m.input_tokens} in / {m.output_tokens} out"
@@ -2465,7 +2646,9 @@ def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
 
 def _failure_row(failure: FailureSample, *, now: datetime) -> object:
     return Li(
-        Div(Strong(failure.source.title()), timestamp(failure.occurred_at, now=now)),
+        Div(
+            Strong(failure.source.title()), timestamp(failure.occurred_at, now=now), cls="row-head"
+        ),
         P(failure.summary),
     )
 
@@ -3233,12 +3416,21 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .spend-chart-bar { width: 100%; min-height: 2px; background: var(--acid); }
 .spend-chart-value { margin-top: 0.35rem; font: 700 0.78rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
 .spend-chart-label { margin-top: 0.1rem; color: var(--muted); font-size: 0.62rem; white-space: nowrap; }
-.spend-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
 .operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
 .operations-list li { padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
-.operations-list li > div { display: flex; justify-content: space-between; gap: 1rem; }
+.row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.activity-filters { margin-top: 1.25rem; padding: 1rem; border: 2px solid var(--line); background: var(--panel); }
+.filter-checks { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; }
+.filter-check { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 700; }
+.filter-check input { width: 18px; height: 18px; accent-color: var(--accent-ink); }
+.filter-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-top: 0.85rem; }
+.filter-kind, .filter-date { display: grid; gap: 0.25rem; font-size: 0.8rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.08em; }
+.filter-kind select, .filter-date input { min-height: 42px; padding: 0 0.5rem; border: 2px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; }
+.filter-controls .operation-button { width: auto; min-width: 132px; }
+.filter-clear { display: inline-flex; align-items: center; min-height: 42px; padding: 0 0.6rem; font-weight: 900; }
+.activity-next { margin-top: 1.25rem; }
 .operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
 .run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
 .run-link { display: block; text-decoration: none; }

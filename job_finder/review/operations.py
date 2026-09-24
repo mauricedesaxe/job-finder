@@ -630,7 +630,7 @@ def _parse_run_item(row: tuple[object, ...]) -> RunListItem:
 ActivityEntryStatus = Literal["running", "completed", "failed", "retrying", "terminal", "dismissed"]
 ActivityEntryType = Literal["run", "work"]
 
-_ACTIVITY_STATUSES: frozenset[str] = frozenset(
+ACTIVITY_STATUSES: frozenset[str] = frozenset(
     {"running", "completed", "failed", "retrying", "terminal", "dismissed"}
 )
 
@@ -709,7 +709,7 @@ class ActivityQuery:
     cursor: str | None = None
 
     def __post_init__(self) -> None:
-        unknown = self.statuses - _ACTIVITY_STATUSES
+        unknown = self.statuses - ACTIVITY_STATUSES
         if unknown:
             raise ValueError(f"Unknown activity statuses: {sorted(unknown)}")
         if self.limit < 1:
