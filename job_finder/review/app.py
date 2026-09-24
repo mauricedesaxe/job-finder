@@ -82,7 +82,12 @@ from job_finder.review.configuration_editor import (
     parse_configuration_form,
     publication_retry_page,
 )
-from job_finder.review.shell import operations_sidebar_page, sidebar_page, timestamp
+from job_finder.review.shell import (
+    absolute_time,
+    operations_sidebar_page,
+    sidebar_page,
+    timestamp,
+)
 from job_finder.review.analytics import (
     AnalyticsService,
     DaySpend,
@@ -150,6 +155,9 @@ from job_finder.review.operations import (
     WorkRecoveryKeyConflict,
     WorkRecoveryNotFound,
     WorkRecoveryStaleState,
+    WorkAttemptSummary,
+    WorkItemDetail,
+    WorkItemNotFound,
     unknown_operations_service,
 )
 from job_finder.review.onboarding import OnboardingProgressService
@@ -739,6 +747,10 @@ def create_review_app(
                     if command.action is RecoveryAction.RETRY_NOW
                     else "terminal-recovered"
                 )
+                if form.get("return_to") == "detail":
+                    return RedirectResponse(
+                        f"/operations/work/{command.job_id}?notice={notice}", status_code=303
+                    )
                 return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
             case WorkRecoveryKeyConflict():
                 return _operations_conflict_response(
@@ -825,6 +837,37 @@ def create_review_app(
             )
         )
 
+    @app.route("/operations/work/{job_id}", methods=["GET"])
+    def work_item_page(job_id: str, request: Request) -> HTMLResponse:
+        try:
+            parsed_id = UUID(job_id)
+        except ValueError:
+            return _work_item_not_found_response()
+        try:
+            detail = operations.work_detail(parsed_id)
+        except WorkItemNotFound:
+            return _work_item_not_found_response()
+        except (OperationsUnavailable, psycopg.Error):
+            return _state_response(
+                "Work item detail is unavailable",
+                "The database could not be reached. Reload this page to try again.",
+                status_code=503,
+            )
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            return HTMLResponse(status_code=401)
+        notice = _FAILURES_NOTICES.get(request.query_params.get("notice", ""))
+        return HTMLResponse(
+            _document(
+                operations_sidebar_page(
+                    "activity",
+                    csrf_token,
+                    _work_item_page(detail, csrf_token, notice=notice),
+                ),
+                title="Job work",
+            )
+        )
+
     @app.route("/operations/failures", methods=["GET"])
     def failures_page(request: Request) -> HTMLResponse:
         try:
@@ -903,6 +946,10 @@ def create_review_app(
                     notice = "dismiss-replayed" if result.replayed else "work-dismissed"
                 else:
                     notice = "dismiss-undo-replayed" if result.replayed else "dismiss-undone"
+                if form.get("return_to") == "detail":
+                    return RedirectResponse(
+                        f"/operations/work/{command.job_id}?notice={notice}", status_code=303
+                    )
                 return RedirectResponse(f"/operations/failures?notice={notice}", status_code=303)
             case WorkDismissalKeyConflict():
                 return _operations_conflict_response(
@@ -2993,6 +3040,192 @@ def _work_recovery_not_found_response() -> HTMLResponse:
     )
 
 
+def _work_item_not_found_response() -> HTMLResponse:
+    return _state_response(
+        "Work item was not found",
+        "The requested work item does not exist or never reached the work queue.",
+        action=A("Back to recent activity", href="/operations/runs", cls="retry"),
+        status_code=404,
+    )
+
+
+_WORK_STATE_LABELS = {
+    "pending": "Pending",
+    "leased": "Running",
+    "failed": "Retrying",
+    "completed": "Completed",
+    "terminal_error": "Terminal",
+}
+
+
+def _work_item_page(
+    detail: WorkItemDetail,
+    csrf_token: str,
+    *,
+    notice: str | None,
+) -> object:
+    status = "Dismissed" if detail.dismissed else _WORK_STATE_LABELS.get(detail.state, detail.state)
+    status_class = "dismissed" if detail.dismissed else detail.state
+    return Div(
+        P(notice, cls="operations-notice", role="status") if notice else None,
+        Div(
+            Small("Owner operations", cls="eyebrow"),
+            H1("Job work"),
+            P(
+                "Everything recorded for this work item, and the actions you can take on it.",
+                cls="operations-intro",
+            ),
+            cls="operations-header",
+        ),
+        Div(
+            Small("Current state", cls="eyebrow"),
+            H2("Status"),
+            Div(
+                Strong("State"),
+                Span(status, cls=f"schedule-state {status_class}"),
+                Small(str(detail.job_id), cls="recovery-id"),
+                cls="work-status-row",
+            ),
+            cls="operations-section",
+        ),
+        _work_item_facts(detail),
+        _work_item_actions(detail, csrf_token),
+        _work_attempt_history(detail.attempts),
+        cls="review-shell operations-shell",
+    )
+
+
+def _work_item_facts(detail: WorkItemDetail) -> object:
+    rows: list[tuple[str, str]] = [("Attempt count", str(detail.attempt_count))]
+    if detail.failure_summary:
+        rows.append(("Failure", detail.failure_summary))
+    if detail.retry_at is not None:
+        rows.append(("Retry scheduled", absolute_time(detail.retry_at)))
+    if detail.last_failed_at is not None:
+        rows.append(("Last failed", absolute_time(detail.last_failed_at)))
+    rows.append(("Created", absolute_time(detail.created_at)))
+    if detail.completed_at is not None:
+        rows.append(("Completed", absolute_time(detail.completed_at)))
+    rows.append(("Dismissed", "Yes" if detail.dismissed else "No"))
+    if detail.dismissed:
+        if detail.dismissed_at is not None:
+            rows.append(("Dismissed at", absolute_time(detail.dismissed_at)))
+        if detail.dismissed_by:
+            rows.append(("Dismissed by", detail.dismissed_by))
+    return Div(
+        Small("Work facts", cls="eyebrow"),
+        H2("Facts"),
+        Ul(
+            *(Li(Div(Strong(label), Span(value), cls="row-head")) for label, value in rows),
+            cls="operations-list",
+        ),
+        cls="operations-section",
+    )
+
+
+def _work_item_actions(detail: WorkItemDetail, csrf_token: str) -> object:
+    forms: list[object] = []
+    if detail.state == "failed":
+        forms.append(_work_detail_form(detail, csrf_token, RecoveryAction.RETRY_NOW, "Retry now"))
+    if detail.state == "terminal_error" and not detail.dismissed:
+        forms.append(
+            _work_detail_form(
+                detail, csrf_token, RecoveryAction.RECOVER_TERMINAL, "Recover terminal work"
+            )
+        )
+    if detail.state == "terminal_error":
+        if detail.dismissed:
+            forms.append(
+                _work_detail_dismiss_form(
+                    detail, csrf_token, DismissalAction.UNDO_DISMISS, "Undo dismissal"
+                )
+            )
+        else:
+            forms.append(
+                _work_detail_dismiss_form(detail, csrf_token, DismissalAction.DISMISS, "Dismiss")
+            )
+    if not forms:
+        return None
+    return Div(
+        Small("Actions", cls="eyebrow"),
+        H2("Take action"),
+        P(
+            "Actions are idempotent: repeating one is safe, and conflicting changes are refused.",
+            cls="operations-muted",
+        ),
+        Div(*forms, cls="schedule-actions work-actions"),
+        cls="operations-section",
+    )
+
+
+def _work_detail_form(
+    detail: WorkItemDetail, csrf_token: str, action: RecoveryAction, label: str
+) -> object:
+    return Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="job_id", value=str(detail.job_id)),
+        Input(type="hidden", name="action", value=action.value),
+        Input(type="hidden", name="expected_state", value=detail.state),
+        Input(type="hidden", name="expected_attempt_count", value=str(detail.attempt_count)),
+        Input(type="hidden", name="idempotency_key", value=secrets.token_urlsafe(32)),
+        Input(type="hidden", name="return_to", value="detail"),
+        Button(label, type="submit", cls="operation-button"),
+        action="/operations/recovery",
+        method="post",
+    )
+
+
+def _work_detail_dismiss_form(
+    detail: WorkItemDetail, csrf_token: str, action: DismissalAction, label: str
+) -> object:
+    return Form(
+        Input(type="hidden", name="csrf_token", value=csrf_token),
+        Input(type="hidden", name="job_id", value=str(detail.job_id)),
+        Input(type="hidden", name="action", value=action.value),
+        Input(type="hidden", name="expected_attempt_count", value=str(detail.attempt_count)),
+        Input(type="hidden", name="idempotency_key", value=secrets.token_urlsafe(32)),
+        Input(type="hidden", name="return_to", value="detail"),
+        Button(label, type="submit", cls="operation-button secondary"),
+        action="/operations/dismiss",
+        method="post",
+    )
+
+
+def _work_attempt_history(attempts: tuple[WorkAttemptSummary, ...]) -> object:
+    rows = (
+        Ul(
+            *(
+                Li(
+                    Div(
+                        Strong(f"{attempt.operation_key} · attempt {attempt.attempt_number}"),
+                        Span(attempt.status, cls="run-status"),
+                        cls="row-head",
+                    ),
+                    Small(
+                        absolute_time(attempt.started_at)
+                        if attempt.started_at is not None
+                        else "Not started"
+                    ),
+                    P(attempt.error_summary, cls="operations-muted")
+                    if attempt.error_summary
+                    else None,
+                    Small(f"{attempt.model_calls} model calls · ${attempt.known_cost_usd:,.4f}"),
+                )
+                for attempt in attempts
+            ),
+            cls="operations-list",
+        )
+        if attempts
+        else P("No processing attempts were recorded.", cls="operations-empty")
+    )
+    return Div(
+        Small("Every processing attempt", cls="eyebrow"),
+        H2("History"),
+        rows,
+        cls="operations-section",
+    )
+
+
 def _reevaluation_not_found_response() -> HTMLResponse:
     return _state_response(
         "Source decision was not found",
@@ -3431,6 +3664,11 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .filter-controls .operation-button { width: auto; min-width: 132px; }
 .filter-clear { display: inline-flex; align-items: center; min-height: 42px; padding: 0 0.6rem; font-weight: 900; }
 .activity-next { margin-top: 1.25rem; }
+.work-status-row { display: grid; gap: 0.3rem; }
+.work-actions { grid-template-columns: 1fr 1fr; max-width: 560px; }
+@media (max-width: 760px) {
+  .work-actions { grid-template-columns: 1fr; }
+}
 .operations-list li > small, .failure-list p { display: block; margin-top: 0.4rem; color: var(--muted); }
 .run-status { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 900; }
 .run-link { display: block; text-decoration: none; }

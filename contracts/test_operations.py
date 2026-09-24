@@ -25,6 +25,7 @@ from job_finder.review.operations import (
     ActivityQuery,
     ActivityRun,
     DismissalAction,
+    WorkItemNotFound,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
     JobReevaluationCommand,
@@ -46,6 +47,7 @@ from job_finder.review.operations import (
     WorkRecoveryStaleState,
     load_activity_page,
     load_operations_snapshot,
+    load_work_item_detail,
     load_pipeline_runs,
     load_run_detail,
     dismiss_work,
@@ -1601,3 +1603,95 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
 
         with pytest.raises(ValueError):
             load_activity_page(connection, ActivityQuery(cursor="garbage!"))
+
+
+def test_work_item_detail_reads_state_dismissal_and_attempt_history(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    job_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at, completed_at
+            ) VALUES (%s, %s, 'processing', 'work-detail-contract', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (run_id, f"work-detail:{run_id}", release.id, now - timedelta(hours=1), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/work-detail', %s, %s)
+            """,
+            (job_id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_work_items (
+              job_id, discovery_run_id, keyword, state, attempt_count, created_at,
+              last_failed_at, retry_at, last_error
+            ) VALUES (
+              %s, %s, 'python', 'failed', 2, %s, %s, %s,
+              '{"retryability":"retryable","code":"provider_timeout",
+                "reason":"Provider did not respond"}'::jsonb
+            )
+            """,
+            (
+                job_id,
+                run_id,
+                now - timedelta(hours=1),
+                now - timedelta(minutes=5),
+                now + timedelta(minutes=10),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO processing_attempts (
+              id, pipeline_run_id, job_id, operation_key, attempt_number, input_digest,
+              status, started_at, completed_at, error
+            ) VALUES (%s, %s, %s, 'evaluation', 1, %s, 'failed', %s, %s,
+              '{"retryability":"retryable","code":"provider_timeout",
+                "reason":"Provider did not respond"}'::jsonb
+            )
+            """,
+            (
+                uuid4(),
+                run_id,
+                job_id,
+                "e" * 64,
+                now - timedelta(minutes=5),
+                now - timedelta(minutes=4),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO work_dismissals (job_id, attempt_count, actor, dismissed_at)
+            VALUES (%s, 1, 'owner', %s)
+            """,
+            (job_id, now - timedelta(minutes=40)),
+        )
+
+        detail = load_work_item_detail(connection, job_id)
+
+        assert detail.state == "failed"
+        assert detail.attempt_count == 2
+        assert detail.failure_summary is not None
+        assert "provider_timeout" in detail.failure_summary
+        assert detail.retry_at == now + timedelta(minutes=10)
+        assert detail.dismissed is False
+        assert detail.dismissed_at is None
+        assert len(detail.attempts) == 1
+        attempt = detail.attempts[0]
+        assert attempt.operation_key == "evaluation"
+        assert attempt.run_id == run_id
+        assert attempt.model_calls == 0
+
+        with pytest.raises(WorkItemNotFound):
+            load_work_item_detail(connection, uuid4())

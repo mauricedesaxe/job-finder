@@ -96,12 +96,15 @@ from job_finder.review.operations import (
     RunDetail,
     RunListItem,
     RunsService,
-    WorkItemState,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
     WorkRecoveryReceipt,
     WorkRecoveryResult,
     WorkRecoveryStaleState,
+    WorkAttemptSummary,
+    WorkItemNotFound,
+    WorkItemDetail,
+    WorkItemState,
 )
 from job_finder.review.owner_access import (
     OnboardingStage,
@@ -2132,6 +2135,215 @@ def test_the_activity_page_survives_a_broken_cursor() -> None:
 
     assert response.status_code == 200
     assert "Open run →" in response.text
+
+
+def _work_item_detail(
+    *,
+    state: WorkItemState = "terminal_error",
+    retry_at: datetime | None = None,
+    dismissed: bool = False,
+    dismissed_at: datetime | None = None,
+    dismissed_by: str | None = None,
+) -> WorkItemDetail:
+    return WorkItemDetail(
+        job_id=UUID(int=31),
+        state=state,
+        attempt_count=3,
+        created_at=NOW - timedelta(hours=2),
+        completed_at=NOW - timedelta(hours=1, minutes=59),
+        last_failed_at=NOW - timedelta(minutes=30),
+        retry_at=retry_at,
+        failure_summary="provider_timeout: OpenRouter did not respond",
+        discovery_run_id=UUID(int=7),
+        dismissed=dismissed,
+        dismissed_at=dismissed_at,
+        dismissed_by=dismissed_by,
+        attempts=(
+            WorkAttemptSummary(
+                operation_key="evaluation",
+                attempt_number=2,
+                status="failed",
+                started_at=NOW - timedelta(minutes=30),
+                completed_at=NOW - timedelta(minutes=29),
+                run_id=UUID(int=7),
+                model_calls=2,
+                known_cost_usd=Decimal("0.25"),
+                error_summary="provider_timeout: OpenRouter did not respond",
+            ),
+        ),
+    )
+
+
+def test_the_work_item_page_shows_failure_context_and_actions() -> None:
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert "Job work" in response.text
+    assert 'class="schedule-state terminal_error"' in response.text
+    assert ">Terminal<" in response.text
+    assert "provider_timeout: OpenRouter did not respond" in response.text
+    assert "Attempt count" in response.text
+    assert "Dismissed" in response.text
+    assert "Recover terminal work" in response.text
+    assert "Dismiss" in response.text
+    assert 'name="return_to" value="detail"' in response.text
+    assert 'action="/operations/recovery"' in response.text
+    assert 'action="/operations/dismiss"' in response.text
+    assert "attempt 2" in response.text
+    assert "2 model calls · $0.2500" in response.text
+    assert 'aria-current="page" class="shell-link">Recent activity</a>' in response.text
+
+
+def test_the_work_item_page_offers_retry_for_failed_work() -> None:
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(
+            state="failed",
+            retry_at=NOW + timedelta(minutes=9),
+        ),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert ">Retrying<" in response.text
+    assert "Retry now" in response.text
+    assert "Recover terminal work" not in response.text
+    assert ">Dismiss</button>" not in response.text
+
+
+def test_the_work_item_page_offers_undo_for_dismissed_work() -> None:
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(
+            dismissed=True,
+            dismissed_at=NOW - timedelta(hours=1),
+            dismissed_by="owner",
+        ),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert 'class="schedule-state dismissed"' in response.text
+    assert ">Dismissed<" in response.text
+    assert "Undo dismissal" in response.text
+    assert "Dismiss<" not in response.text
+
+
+def test_the_work_item_page_hides_actions_for_healthy_work() -> None:
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(state="completed"),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert "Take action" not in response.text
+
+
+def test_an_unknown_work_item_renders_the_not_found_page() -> None:
+    def missing_work(_job: UUID) -> WorkItemDetail:
+        raise WorkItemNotFound("Work item does not exist")
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), work_detail=missing_work),
+    )
+
+    missing = client.get(f"/operations/work/{UUID(int=99)}")
+    malformed = client.get("/operations/work/not-a-uuid")
+
+    assert missing.status_code == 404
+    assert "Work item was not found" in missing.text
+    assert malformed.status_code == 404
+
+
+def test_recovery_from_the_detail_page_returns_to_the_detail_page() -> None:
+    calls: list[WorkRecoveryCommand] = []
+
+    def recover(command: WorkRecoveryCommand) -> WorkRecoveryResult:
+        calls.append(command)
+        return _applied_recovery(command)
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), recover=recover),
+    )
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+            "return_to": "detail",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert (
+        response.headers["location"]
+        == "/operations/work/00000000-0000-0000-0000-00000000001f?notice=work-retried"
+    )
+    assert calls[0].job_id == UUID(int=31)
+
+
+def test_dismissal_from_the_detail_page_returns_to_the_detail_page() -> None:
+    client = _client(
+        _queue(),
+        operations=OperationsService(
+            load=lambda: _operations_snapshot(),
+            dismiss=lambda command: WorkDismissalApplied(
+                receipt=WorkDismissalReceipt(
+                    idempotency_key=command.idempotency_key,
+                    job_id=command.job_id,
+                    action=command.action,
+                    expected_attempt_count=command.expected_attempt_count,
+                    actor=command.actor,
+                    requested_at=command.requested_at,
+                    outcome="applied",
+                    prior_state="terminal_error",
+                    prior_attempt_count=3,
+                    resulting_attempt_count=None,
+                ),
+                replayed=False,
+            ),
+        ),
+    )
+
+    response = client.post(
+        "/operations/dismiss",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "dismiss",
+            "expected_attempt_count": "3",
+            "idempotency_key": "private-key",
+            "return_to": "detail",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert (
+        response.headers["location"]
+        == "/operations/work/00000000-0000-0000-0000-00000000001f?notice=work-dismissed"
+    )
 
 
 def test_an_unknown_run_id_renders_the_not_found_page() -> None:
