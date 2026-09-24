@@ -739,12 +739,12 @@ def postgres_activity_service(connect: ConnectionFactory) -> ActivityService:
     return ActivityService(list=list_page)
 
 
-def _encode_activity_cursor(entry: ActivityEntry) -> str:
+def encode_activity_cursor(entry: ActivityEntry) -> str:
     raw = f"{entry.occurred_at.isoformat()}|{entry.entry_type}|{entry.ref}"
     return base64.urlsafe_b64encode(raw.encode()).decode()
 
 
-def _decode_activity_cursor(cursor: str) -> tuple[datetime, str, str]:
+def decode_activity_cursor(cursor: str) -> tuple[datetime, str, str]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
         occurred_raw, entry_type, ref = raw.split("|", 2)
@@ -839,7 +839,7 @@ def load_activity_page(connection: Connection, query: ActivityQuery) -> Activity
         conditions.append("a.occurred_at < %s")
         parameters.append(query.to_at)
     if query.cursor is not None:
-        cursor_at, cursor_type, cursor_ref = _decode_activity_cursor(query.cursor)
+        cursor_at, cursor_type, cursor_ref = decode_activity_cursor(query.cursor)
         conditions.append("ROW(a.occurred_at, a.entry_type, a.ref)" + " < ROW(%s, %s, %s)")
         parameters.extend((cursor_at, cursor_type, cursor_ref))
 
@@ -860,7 +860,7 @@ def load_activity_page(connection: Connection, query: ActivityQuery) -> Activity
 
     has_more = len(rows) > query.limit
     entries = tuple(_parse_activity_row(row) for row in rows[: query.limit])
-    next_cursor = _encode_activity_cursor(entries[-1]) if has_more and entries else None
+    next_cursor = encode_activity_cursor(entries[-1]) if has_more and entries else None
     return ActivityPage(entries=entries, next_cursor=next_cursor)
 
 

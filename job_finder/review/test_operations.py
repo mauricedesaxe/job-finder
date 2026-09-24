@@ -25,8 +25,8 @@ from job_finder.review.operations import (
     SpendSummary,
     WorkItemState,
     WorkRecoveryCommand,
-    _decode_activity_cursor,
-    _encode_activity_cursor,
+    decode_activity_cursor,
+    encode_activity_cursor,
     operations_health,
     unknown_operations_service,
 )
@@ -290,8 +290,8 @@ def test_activity_cursor_round_trips_through_encoding() -> None:
         item=_activity_run("completed"),
     )
 
-    cursor = _encode_activity_cursor(entry)
-    occurred_at, entry_type, ref = _decode_activity_cursor(cursor)
+    cursor = encode_activity_cursor(entry)
+    occurred_at, entry_type, ref = decode_activity_cursor(cursor)
 
     assert occurred_at == NOW
     assert entry_type == "run"
@@ -301,4 +301,4 @@ def test_activity_cursor_round_trips_through_encoding() -> None:
 @pytest.mark.parametrize("cursor", ["", "not-base64!!", "x", "abc"])
 def test_activity_cursor_rejects_garbage(cursor: str) -> None:
     with pytest.raises(ValueError):
-        _decode_activity_cursor(cursor)
+        decode_activity_cursor(cursor)
