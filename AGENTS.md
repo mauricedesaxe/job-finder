@@ -47,6 +47,16 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Background jobs must keep the control plane true
+
+`/operations/control` in the review app is the owner-facing description of the
+background system: it names every schedule and explains the pipeline DAG. If
+you change how background jobs work — schedules, cadence, job names, or
+pipeline stages in `job_finder/dagster.py` or `job_finder/pipeline/` — update
+the control plane in the same change: `CONTROL_DEFINITIONS` in
+`job_finder/review/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
+pipeline explainer in `job_finder/review/app.py`. See "Dagster" in CLAUDE.md.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
 

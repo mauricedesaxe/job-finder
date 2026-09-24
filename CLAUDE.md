@@ -186,9 +186,20 @@ profiles, frozen fixtures — enforces decisions; the LLM only informs them.
 - Dagster storage lives in the `dagster` PostgreSQL schema (see `dagster.yaml`
   and `JOB_FINDER_DAGSTER_POSTGRES_DSN`); domain tables stay in `public`. The
   two namespaces must not mix — both name a `jobs` table.
-- Schedules: full discovery Wednesdays 07:00 UTC, work-queue drain every 15
-  minutes, rejected-audit sample daily 00:15 UTC, Langfuse projection every
-  minute (self-enables when Langfuse keys are present).
+- Schedules: full pipeline daily 07:00 UTC (search + a first processing
+  batch), work-queue drain every 15 minutes, rejected-audit sample daily
+  00:15 UTC, Langfuse projection every minute (self-enables when Langfuse
+  keys are present).
+- **The control plane page is the background system's contract.** The owner
+  reads `/operations/control` to learn what runs, when, and why; it names and
+  describes every schedule and explains the pipeline DAG. Any change to how
+  background jobs work — schedules, cadence, job names, pipeline stages in
+  `job_finder/dagster.py` or `job_finder/pipeline/` — must update the page in
+  the same change: `CONTROL_DEFINITIONS` in
+  `job_finder/review/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
+  pipeline explainer in `job_finder/review/app.py` (update
+  `job_finder/review/test_app.py` to match). A change that alters the DAG
+  without updating the control plane is incomplete.
 
 ## Deployment
 
