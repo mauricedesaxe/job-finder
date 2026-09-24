@@ -280,6 +280,43 @@ def test_activity_entries_map_to_one_unified_status(
     assert entry.status == expected
 
 
+def _activity_entry(item: ActivityRun | ActivityWork) -> ActivityEntry:
+    return ActivityEntry(occurred_at=NOW, ref="ref", item=item)
+
+
+def _productive_run() -> ActivityRun:
+    run = _activity_run("completed")
+    return ActivityRun(
+        id=run.id,
+        kind=run.kind,
+        status=run.status,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        discoveries=4,
+        processing_attempts=0,
+        processed_jobs=0,
+        model_calls=0,
+        known_cost_usd=run.known_cost_usd,
+        error_summary=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        (_activity_run("completed"), False),
+        (_productive_run(), True),
+        (_activity_run("failed"), True),
+        (_activity_work("pending"), True),
+        (_activity_work("completed"), True),
+    ],
+)
+def test_activity_entries_know_whether_they_did_something(
+    item: ActivityRun | ActivityWork, expected: bool
+) -> None:
+    assert _activity_entry(item).did_something is expected
+
+
 def test_activity_query_rejects_unknown_statuses_limits_and_cursors() -> None:
     with pytest.raises(ValueError):
         ActivityQuery(statuses=frozenset({"exploded"}))

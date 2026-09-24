@@ -2255,13 +2255,17 @@ def _activity_work_entry(
 
 
 def _activity_service(
-    *entries: ActivityEntry, cursor: str | None = None
+    *entries: ActivityEntry, cursor: str | None = None, hidden_no_op_count: int = 0
 ) -> tuple[ActivityService, list[ActivityQuery]]:
     captured: list[ActivityQuery] = []
 
     def list_page(query: ActivityQuery) -> ActivityPage:
         captured.append(query)
-        return ActivityPage(entries=tuple(entries), next_cursor=cursor)
+        return ActivityPage(
+            entries=tuple(entries),
+            next_cursor=cursor,
+            hidden_no_op_count=hidden_no_op_count,
+        )
 
     return ActivityService(list=list_page), captured
 
@@ -2304,6 +2308,16 @@ def test_the_activity_page_renders_the_filter_form() -> None:
     assert "Apply filters" in listing.text
 
 
+def test_the_activity_page_counts_hidden_entries() -> None:
+    activity, _ = _activity_service(hidden_no_op_count=2)
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert "2 entries that did nothing hidden." in listing.text
+    assert "All matching activity is hidden." in listing.text
+
+
 def test_the_run_detail_page_keeps_its_run_content() -> None:
     runs = RunsService(
         detail=lambda _run_id: RunDetail(
@@ -2341,7 +2355,13 @@ def test_the_activity_page_passes_filters_to_the_query() -> None:
     assert query.kind == "work"
     assert query.from_at == datetime(2026, 9, 1, tzinfo=UTC)
     assert query.to_at == datetime(2026, 9, 10, tzinfo=UTC)
+    assert query.show_no_ops is False
     assert "No activity matches these filters." in filtered.text
+
+    showing = client.get("/operations/runs?show_noops=1")
+
+    assert captured[1].show_no_ops is True
+    assert 'name="show_noops" value="1" checked' in showing.text
 
     empty = client.get("/operations/runs")
 

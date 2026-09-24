@@ -1589,7 +1589,7 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
         def statuses(page: ActivityPage) -> list[str]:
             return [entry.status for entry in page.entries]
 
-        everything = load_activity_page(connection, ActivityQuery(limit=50))
+        everything = load_activity_page(connection, ActivityQuery(limit=50, show_no_ops=True))
         assert len(everything.entries) == 6
         assert refs(everything) == [
             str(retry_job_id),
@@ -1608,6 +1608,12 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
             "completed",
         ]
         assert everything.next_cursor is None
+        assert everything.hidden_no_op_count == 0
+
+        defaults = load_activity_page(connection, ActivityQuery(limit=50))
+        assert str(completed_run_id) not in {entry.ref for entry in defaults.entries}
+        assert len(defaults.entries) == 5
+        assert defaults.hidden_no_op_count == 1
 
         run_entry = next(e for e in everything.entries if e.entry_type == "run")
         assert isinstance(run_entry.item, ActivityRun)
@@ -1617,6 +1623,7 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
 
         failed_only = load_activity_page(connection, ActivityQuery(statuses=frozenset({"failed"})))
         assert refs(failed_only) == [str(failed_run_id)]
+        assert failed_only.hidden_no_op_count == 0
 
         attention = load_activity_page(
             connection, ActivityQuery(statuses=frozenset({"retrying", "terminal", "dismissed"}))
@@ -1643,10 +1650,12 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
             str(failed_run_id),
         ]
 
-        first = load_activity_page(connection, ActivityQuery(limit=3))
+        first = load_activity_page(connection, ActivityQuery(limit=3, show_no_ops=True))
         assert refs(first) == refs(everything)[:3]
         assert first.next_cursor is not None
-        second = load_activity_page(connection, ActivityQuery(limit=3, cursor=first.next_cursor))
+        second = load_activity_page(
+            connection, ActivityQuery(limit=3, cursor=first.next_cursor, show_no_ops=True)
+        )
         assert refs(second) == refs(everything)[3:]
         assert second.next_cursor is None
 
@@ -1706,7 +1715,7 @@ def test_activity_pagination_neither_duplicates_nor_skips_tied_entries(
         def refs(page: ActivityPage) -> list[str]:
             return [entry.ref for entry in page.entries]
 
-        everything = load_activity_page(connection, ActivityQuery(limit=50))
+        everything = load_activity_page(connection, ActivityQuery(limit=50, show_no_ops=True))
         assert len(everything.entries) == 6
         assert {entry.ref for entry in everything.entries[:3]} == {
             str(job_id) for job_id in tied_job_ids
@@ -1716,7 +1725,9 @@ def test_activity_pagination_neither_duplicates_nor_skips_tied_entries(
         pages: list[ActivityPage] = []
         cursor: str | None = None
         for _ in range(10):
-            page = load_activity_page(connection, ActivityQuery(limit=2, cursor=cursor))
+            page = load_activity_page(
+                connection, ActivityQuery(limit=2, cursor=cursor, show_no_ops=True)
+            )
             pages.append(page)
             cursor = page.next_cursor
             if cursor is None:
@@ -1973,3 +1984,48 @@ def test_work_item_detail_reads_state_dismissal_and_attempt_history(
 
         with pytest.raises(WorkItemNotFound):
             load_work_item_detail(connection, uuid4())
+
+
+def test_activity_page_can_exclude_no_op_runs(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    idle_run_id = uuid4()
+    busy_run_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        for run, key, kind, started in (
+            (idle_run_id, f"idle:{idle_run_id}", "processing", now - timedelta(hours=2)),
+            (busy_run_id, f"busy:{busy_run_id}", "processing", now - timedelta(hours=1)),
+        ):
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                  id, idempotency_key, kind, implementation_ref, prompt_release_id,
+                  parameters, status, started_at, completed_at
+                ) VALUES (%s, %s, %s, 'noops-contract', %s, '{}'::jsonb,
+                  'completed', %s, %s)
+                """,
+                (run, key, kind, release.id, started, started),
+            )
+        job_id = uuid4()
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, 'https://example.com/noops', %s, %s)
+            """,
+            (job_id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO job_discoveries (pipeline_run_id, job_id, keyword, domain, discovered_at)
+            VALUES (%s, %s, 'python', 'example.com', %s)
+            """,
+            (busy_run_id, job_id, now - timedelta(minutes=30)),
+        )
+
+        everything = load_activity_page(connection, ActivityQuery(show_no_ops=True))
+        assert {entry.ref for entry in everything.entries} >= {str(idle_run_id), str(busy_run_id)}
+
+        busy_only = load_activity_page(connection, ActivityQuery())
+        assert {entry.ref for entry in busy_only.entries} == {str(busy_run_id)}
