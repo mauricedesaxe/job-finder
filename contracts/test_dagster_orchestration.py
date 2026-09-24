@@ -37,7 +37,9 @@ from job_finder.pipeline.orchestration import (
     process_claimed_jobs,
 )
 from job_finder.pipeline.state import (
+    JobWorkClaim,
     claim_next_job,
+    complete_job_claim,
     fail_job_claim,
     fail_orchestration_run,
     prepare_orchestration_run,
@@ -1321,6 +1323,134 @@ def test_qualified_job_runs_evaluation_enrichment_and_deduplication(
         assert cast(int, output_tokens) > 0
         assert cost_usd is not None
         assert response_model == JEV_MODEL
+
+
+def test_rolls_back_qualified_terminal_state_when_claim_completion_fails(
+    authority_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://jobs.lever.co/acme/rollback"
+    model_outputs: Iterator[tuple[str, Mapping[str, object]]] = iter(
+        (
+            (
+                "enrich_job",
+                {
+                    "title": "Senior Product Engineer",
+                    "company": "Acme",
+                    "description": "Build the product.",
+                    "location": "Remote",
+                },
+            ),
+        )
+    )
+
+    def model_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        tool_name, output = next(model_outputs)
+        return _model_response(tool_name, output)
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-rollback", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+
+        def fail_after_claim_completion(
+            completion_connection: psycopg.Connection[tuple[object, ...]],
+            claim: JobWorkClaim,
+            *,
+            decision_id: str,
+            completed_at: datetime,
+        ) -> bool:
+            assert completion_connection is connection
+            assert complete_job_claim(
+                completion_connection,
+                claim,
+                decision_id=decision_id,
+                completed_at=completed_at,
+            )
+            terminal_state = completion_connection.execute(
+                """
+                SELECT (SELECT count(*) FROM job_snapshots WHERE job_id = %s),
+                       (SELECT count(*)
+                        FROM evaluation_decisions d
+                        JOIN job_snapshots s ON s.id = d.snapshot_id
+                        WHERE s.job_id = %s),
+                       (SELECT count(*) FROM pipeline_receipts
+                        WHERE operation_key = 'process_qualified_job' AND job_id = %s),
+                       (SELECT count(*) FROM review_items
+                        WHERE evaluation_id = %s AND lane = 'qualified'),
+                       state, terminal_decision_id
+                FROM job_work_items
+                WHERE job_id = %s
+                """,
+                (claim.job_id, claim.job_id, claim.job_id, decision_id, claim.job_id),
+            ).fetchone()
+            assert terminal_state == (1, 1, 1, 1, "completed", decision_id)
+            raise RuntimeError("claim completion failed")
+
+        with monkeypatch.context() as completion_patch:
+            completion_patch.setattr(
+                "job_finder.pipeline.orchestration.complete_job_claim",
+                fail_after_claim_completion,
+            )
+            with pytest.raises(RuntimeError, match="claim completion failed"):
+                _ = process_claimed_jobs(
+                    connection,
+                    run,
+                    PipelineBoundaries(
+                        search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                        scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                        fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
+                        model_sender=model_sender,
+                        jev_sender=_qualifying_jev_call,
+                    ),
+                    openrouter_api_key="test-key",
+                    typesafe_api_key="test-key",
+                    owner_token=uuid4(),
+                    observed_at=now,
+                    max_items=1,
+                    lease_for=timedelta(minutes=5),
+                    retry_after=timedelta(minutes=2),
+                    enable_ats_enrichment=False,
+                    now=lambda: now,
+                )
+
+        rolled_back = connection.execute(
+            """
+            SELECT (SELECT count(*) FROM job_snapshots WHERE raw_url = %s),
+                   (SELECT count(*)
+                    FROM evaluation_decisions d
+                    JOIN job_snapshots s ON s.id = d.snapshot_id
+                    WHERE s.raw_url = %s),
+                   (SELECT count(*)
+                    FROM pipeline_receipts r
+                    JOIN jobs j ON j.id = r.job_id
+                    WHERE r.operation_key = 'process_qualified_job' AND j.raw_url = %s),
+                   (SELECT count(*)
+                    FROM review_items i
+                    JOIN evaluation_decisions d ON d.id = i.evaluation_id
+                    JOIN job_snapshots s ON s.id = d.snapshot_id
+                    WHERE s.raw_url = %s AND i.lane = 'qualified'),
+                   w.state, w.terminal_decision_id, w.completed_at, w.owner_token
+            FROM job_work_items w
+            JOIN jobs j ON j.id = w.job_id
+            WHERE j.raw_url = %s
+            """,
+            (raw_url, raw_url, raw_url, raw_url, raw_url),
+        ).fetchone()
+
+    assert rolled_back == (0, 0, 0, 0, "failed", None, None, None)
 
 
 def test_reevaluation_processes_the_pinned_snapshot_without_rewriting_history(

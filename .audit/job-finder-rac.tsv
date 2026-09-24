@@ -1,0 +1,4 @@
+ts	phase	decision	why	evidence	result
+2026-09-24T17:15:00Z	frame	sequence the architecture program as one verified and merged bead at a time	each change must remain small enough to diagnose and safe enough to land independently	job-finder-rac dependency graph	first work unit job-finder-rac.1.1
+2026-09-24T17:20:00Z	baseline	installed the uv version required by the repository before running checks	the sandbox uv 0.9.7 could not parse metadata written for uv 0.10 or newer	pyproject.toml:33	480 unit tests passed with uv 0.12.18
+2026-09-24T17:29:15Z	foundation	added a PostgreSQL contract that fails after real claim completion inside the terminal transaction	the test must prove all terminal writes share one connection and one rollback boundary	contracts/test_dagster_orchestration.py	unit lint and type gates passed; PostgreSQL proof pending CI
