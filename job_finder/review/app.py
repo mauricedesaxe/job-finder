@@ -33,6 +33,7 @@ from fasthtml.common import (
     Li,
     Main,
     Meta,
+    Ol,
     Option,
     P,
     Pre,
@@ -1785,21 +1786,54 @@ def _review_page(queue: ReviewQueue) -> object:
 
 _CONTROL_DESCRIPTIONS = {
     "job_finder": (
-        "Runs the full cycle: searches for new jobs, scrapes and filters them, "
-        + "then evaluates them against the current release."
+        "Runs every configured search, registers what it finds in the work queue, then "
+        + "pushes a first batch through scrape, filters, and evaluation. Whatever it does "
+        + "not finish waits in the queue."
     ),
     "job_work_queue": (
-        "Every 15 minutes: claims due jobs and pushes them through scraping and "
-        + "evaluation. Ticks that find nothing due finish in seconds."
+        "Drains the work queue: claims due jobs and pushes them through scrape, filters, "
+        + "and evaluation, so a job found this morning is decided today. The queue only "
+        + "holds what discovery and retries put there, so quiet ticks finish in seconds."
     ),
     "review_sample": (
-        "Once a day: enqueues a sample of yesterday's rejected jobs so you can "
-        + "audit them in the review queue."
+        "Enqueues a sample of yesterday's rejected jobs so you can audit them in the "
+        + "review queue."
     ),
-    "langfuse_projection": (
-        "Every minute: ships telemetry to Langfuse. It never influences decisions."
-    ),
+    "langfuse_projection": ("Ships telemetry to Langfuse. It never influences decisions."),
 }
+
+_PIPELINE_STEPS = (
+    (
+        "Search",
+        "The Full pipeline run searches Jina with every configured query and registers "
+        + "each job URL it finds as a work item in the Postgres work queue.",
+    ),
+    (
+        "Claim",
+        "A worker claims one work item at a time under a short lease, so two runs can "
+        + "never work on the same job.",
+    ),
+    (
+        "Scrape",
+        "Jina fetches the full posting. A scrape too thin to read goes back to the "
+        + "queue for a later try.",
+    ),
+    (
+        "Filter",
+        "Cheap deterministic checks run first: ATS evidence (Greenhouse, Lever, Ashby, "
+        + "Workable), then structural rules. Most jobs stop here.",
+    ),
+    (
+        "Evaluate",
+        "Surviving jobs are scored by the active prompt release against your criteria. "
+        + "Every model call is recorded in Postgres.",
+    ),
+    (
+        "Decide",
+        "Qualified jobs enter today's review queue; rejections are recorded, and a "
+        + "daily sample of them is queued for audit.",
+    ),
+)
 
 
 def _control_page(
@@ -1818,11 +1852,32 @@ def _control_page(
             Small("Owner operations", cls="eyebrow"),
             H1("Control plane"),
             P(
-                "Dagster owns the schedules. Changes are re-checked before applying, "
-                + "and every launch is idempotent.",
+                "What runs in the background, when, and why. Dagster owns the schedules; "
+                + "this page reads them and commands them. Changes are re-checked before "
+                + "applying, and every launch is idempotent.",
                 cls="operations-intro",
             ),
             cls="operations-header",
+        ),
+        Div(
+            Small("How it works", cls="eyebrow"),
+            H2("From search to decision"),
+            Ol(
+                *(
+                    Li(Strong(name), P(description), cls=f"pipeline-step-{name.lower()}")
+                    for name, description in _PIPELINE_STEPS
+                ),
+                cls="pipeline-steps",
+            ),
+            P(
+                "The Work queue schedule repeats the claim-through-decide steps every 15 "
+                + "minutes, so a job found this morning is not decided tomorrow, and failed "
+                + "work comes back there on retry. Review sample fills your daily audit. The "
+                + "Langfuse projection copies telemetry out after decisions are made — it "
+                + "never changes one.",
+                cls="operations-muted",
+            ),
+            cls="operations-section",
         ),
         Div(
             Small("Schedules", cls="eyebrow"),
@@ -1832,17 +1887,8 @@ def _control_page(
                 cls="operations-muted",
             )
             if snapshot is not None
-            else P(
-                "Dagster is not configured for this app. Set JOB_FINDER_DAGSTER_GRAPHQL_URL "
-                + "(and optionally JOB_FINDER_DAGSTER_REPOSITORY_LOCATION and "
-                + "JOB_FINDER_DAGSTER_REPOSITORY_NAME) in the review app's environment, "
-                + "then restart."
-            )
-            if not dagster_configured
-            else P(
-                "Dagster could not be reached, so schedule controls are disabled. The control "
-                + f"plane reported: {control_error}. Pipeline evidence elsewhere stays current.",
-                cls="operations-muted",
+            else _controls_off_banner(
+                dagster_configured=dagster_configured, control_error=control_error
             ),
             Ul(
                 *(
@@ -1866,6 +1912,37 @@ def _control_page(
             cls="operations-section",
         ),
         cls="review-shell operations-shell",
+    )
+
+
+def _controls_off_banner(
+    *,
+    dagster_configured: bool,
+    control_error: str | None,
+) -> object:
+    if not dagster_configured:
+        return Div(
+            Strong("Schedule controls are off: Dagster is not configured for this app."),
+            P(
+                "This page reads live schedule state from the Dagster API. Set "
+                + "JOB_FINDER_DAGSTER_GRAPHQL_URL (and optionally "
+                + "JOB_FINDER_DAGSTER_REPOSITORY_LOCATION and "
+                + "JOB_FINDER_DAGSTER_REPOSITORY_NAME) in the review app's environment, "
+                + "then restart. Until then every schedule below shows as Unavailable and "
+                + "its buttons do nothing. Pipeline evidence elsewhere stays current.",
+            ),
+            cls="operations-alert",
+        )
+    return Div(
+        Strong("Schedule controls are off: this app cannot reach Dagster."),
+        P(
+            f"The Dagster API reported: {control_error}. The schedules live in Dagster; "
+            + "this page only reads and commands them, so while it cannot connect, every "
+            + "schedule below shows as Unavailable and its buttons do nothing. Check that "
+            + "the Dagster webserver is up and that JOB_FINDER_DAGSTER_GRAPHQL_URL points "
+            + "at it from this app, then reload. Pipeline evidence elsewhere stays current.",
+        ),
+        cls="operations-alert",
     )
 
 
@@ -1943,7 +2020,7 @@ def _unavailable_schedule_row(label: str, cadence: str, description: str | None)
             Div(
                 Button("Run now", type="button", disabled=True, cls="operation-button"),
                 Button(
-                    "Change schedule",
+                    "Pause or resume",
                     type="button",
                     disabled=True,
                     cls="operation-button secondary",
@@ -3401,6 +3478,12 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .error { padding: 0.75rem; border: 2px solid var(--line); background: var(--caution); color: var(--accent-ink); font-weight: 800; }
 .operations-header { margin-top: 1.25rem; padding: clamp(1.5rem, 5vw, 3rem); border: 2px solid var(--line); background: var(--panel); box-shadow: 8px 8px 0 var(--shadow); }
 .operations-notice { margin: 1.25rem 0 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
+.operations-alert { margin: 1rem 0 0; padding: 0.8rem 1rem; border: 2px solid var(--line); background: var(--caution); color: var(--accent-ink); }
+.operations-alert p { margin: 0.4rem 0 0; line-height: 1.5; }
+.pipeline-steps { list-style: none; counter-reset: pipeline-step; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
+.pipeline-steps > li { counter-increment: pipeline-step; padding: 0.8rem; border-bottom: 2px solid var(--line); background: var(--surface-raised); }
+.pipeline-steps > li::before { content: counter(pipeline-step); display: inline-block; margin-right: 0.5rem; padding: 0 0.45rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
+.pipeline-steps p { margin: 0.35rem 0 0; color: var(--muted); line-height: 1.5; }
 .operations-intro { max-width: 54ch; margin: 1rem 0 0; font-size: 1.08rem; line-height: 1.55; }
 .operations-metrics { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 2rem; border: 2px solid var(--line); background: var(--panel); }
 .operations-metrics > div { min-width: 0; padding: 0.8rem; border-right: 2px solid var(--line); }
