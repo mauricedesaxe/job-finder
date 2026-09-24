@@ -69,6 +69,12 @@ from job_finder.review.models import (
 )
 from job_finder.review.operations import (
     ActionableWork,
+    ActivityEntry,
+    ActivityPage,
+    ActivityQuery,
+    ActivityRun,
+    ActivityService,
+    ActivityWork,
     DismissalAction,
     FailureSample,
     JobReevaluationAccepted,
@@ -146,7 +152,7 @@ def test_operations_pages_mark_their_shell_sections() -> None:
     client = _client(
         _queue(),
         operations=OperationsService(load=lambda: snapshot),
-        runs=RunsService(list=lambda _limit: (_run_item(value=1),)),
+        activity=_activity_service(_activity_run_entry(value=1))[0],
     )
 
     runs = client.get("/operations/runs")
@@ -1708,6 +1714,7 @@ def _client(
     *,
     operations: OperationsService | None = None,
     runs: RunsService | None = None,
+    activity: ActivityService | None = None,
     analytics: AnalyticsService | None = None,
     controls: ControlPlaneService | None = None,
 ) -> TestClient:
@@ -1720,6 +1727,7 @@ def _client(
             owner_access_service=OWNER_ACCESS,
             operations_service=operations,
             runs_service=runs,
+            activity_service=activity,
             analytics_service=analytics,
             control_service=controls,
             now=lambda: NOW,
@@ -1994,9 +2002,70 @@ def _run_item(
     )
 
 
-def test_the_runs_page_labels_idle_ticks_and_links_runs() -> None:
+def _activity_run_entry(
+    *, value: int = 1, kind: str = "orchestration", idle: bool = False
+) -> ActivityEntry:
+    item = _run_item(value=value, kind=kind, idle=idle)
+    return ActivityEntry(
+        occurred_at=item.started_at,
+        ref=str(item.id),
+        item=ActivityRun(
+            id=item.id,
+            kind=item.kind,
+            status=item.status,
+            started_at=item.started_at,
+            completed_at=item.completed_at,
+            discoveries=item.discoveries,
+            processing_attempts=item.processing_attempts,
+            processed_jobs=item.processed_jobs,
+            model_calls=item.model_calls,
+            known_cost_usd=item.known_cost_usd,
+            error_summary=item.error_summary,
+        ),
+    )
+
+
+def _activity_work_entry(
+    *,
+    value: int = 9,
+    state: str = "failed",
+    dismissed: bool = False,
+) -> ActivityEntry:
+    return ActivityEntry(
+        occurred_at=NOW,
+        ref=str(UUID(int=value)),
+        item=ActivityWork(
+            job_id=UUID(int=value),
+            state=cast(WorkItemState, state),
+            attempt_count=2,
+            occurred_at=NOW,
+            retry_at=NOW if state == "failed" else None,
+            failure_summary="provider_timeout: OpenRouter did not respond",
+            dismissed=dismissed,
+        ),
+    )
+
+
+def _activity_service(
+    *entries: ActivityEntry, cursor: str | None = None
+) -> tuple[ActivityService, list[ActivityQuery]]:
+    captured: list[ActivityQuery] = []
+
+    def list_page(query: ActivityQuery) -> ActivityPage:
+        captured.append(query)
+        return ActivityPage(entries=tuple(entries), next_cursor=cursor)
+
+    return ActivityService(list=list_page), captured
+
+
+def test_the_activity_page_renders_runs_work_filters_and_pagination() -> None:
+    activity, _ = _activity_service(
+        _activity_run_entry(value=1, idle=True),
+        _activity_run_entry(value=2, kind="discovery"),
+        _activity_work_entry(value=9, state="failed"),
+        cursor="next-cursor-token",
+    )
     runs = RunsService(
-        list=lambda _limit: (_run_item(value=1, idle=True), _run_item(value=2, kind="discovery")),
         detail=lambda _run_id: RunDetail(
             item=_run_item(value=2, kind="discovery"),
             parameters={},
@@ -2007,7 +2076,7 @@ def test_the_runs_page_labels_idle_ticks_and_links_runs() -> None:
             decisions=(),
         ),
     )
-    client = _client(_queue(), runs=runs)
+    client = _client(_queue(), runs=runs, activity=activity)
 
     listing = client.get("/operations/runs")
 
@@ -2015,6 +2084,15 @@ def test_the_runs_page_labels_idle_ticks_and_links_runs() -> None:
     assert "Idle tick — nothing was due." in listing.text
     assert "4 discovered · 3 processed · 2 model calls" in listing.text
     assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
+    assert "Job work" in listing.text
+    assert ">retrying</span>" in listing.text
+    assert "provider_timeout: OpenRouter did not respond" in listing.text
+    assert 'class="row-head"' in listing.text
+    assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
+    assert "Next page →" in listing.text
+    assert 'name="status" value="failed"' in listing.text
+    assert 'name="kind"' in listing.text
+    assert 'name="from"' in listing.text
 
     detail = client.get("/operations/runs/00000000-0000-0000-0000-000000000002")
 
@@ -2023,6 +2101,37 @@ def test_the_runs_page_labels_idle_ticks_and_links_runs() -> None:
     assert "No jobs were discovered by this run." in detail.text
     assert "1 call returned no usage, so it has no recorded cost." in detail.text
     assert 'href="/operations/runs"' in detail.text
+
+
+def test_the_activity_page_passes_filters_to_the_query() -> None:
+    activity, captured = _activity_service()
+    client = _client(_queue(), activity=activity)
+
+    filtered = client.get(
+        "/operations/runs?status=failed&status=retrying&kind=work&from=2026-09-01&to=2026-09-10"
+    )
+
+    assert filtered.status_code == 200
+    query = captured[0]
+    assert query.statuses == frozenset({"failed", "retrying"})
+    assert query.kind == "work"
+    assert query.from_at == datetime(2026, 9, 1, tzinfo=UTC)
+    assert query.to_at == datetime(2026, 9, 10, tzinfo=UTC)
+    assert "No activity matches these filters." in filtered.text
+
+    empty = client.get("/operations/runs")
+
+    assert "No activity recorded yet." in empty.text
+
+
+def test_the_activity_page_survives_a_broken_cursor() -> None:
+    activity, _ = _activity_service(_activity_run_entry(value=1))
+    client = _client(_queue(), activity=activity)
+
+    response = client.get("/operations/runs?cursor=broken-cursor")
+
+    assert response.status_code == 200
+    assert "Open run →" in response.text
 
 
 def test_an_unknown_run_id_renders_the_not_found_page() -> None:
@@ -2100,7 +2209,7 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "5,200 ms" in response.text
     assert "z-ai/glm-4.6" in response.text
     assert "$1.1000" in response.text
-    assert "spend-row-head" in response.text
+    assert "row-head" in response.text
     assert "up to 5200 ms" in response.text
     assert (
         'href="/operations/analytics" aria-current="page" class="shell-link">Analytics</a>'
