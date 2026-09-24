@@ -9,12 +9,12 @@ from typing import Literal
 
 import psycopg
 
-from job_finder.evaluation.manifest_execution import run_stored_manifest
-from job_finder.evaluation.manifests import (
+from job_finder.benchmarks.executions import (
     CompletedEvaluationExecution,
     EvaluateManifestCommand,
     FailedEvaluationExecution,
 )
+from job_finder.evaluation.manifest_execution import run_stored_manifest
 from job_finder.evaluation.prompt_releases import (
     bootstrap_prompt_release,
 )

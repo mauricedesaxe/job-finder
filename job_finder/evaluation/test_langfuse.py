@@ -6,12 +6,15 @@ from uuid import UUID
 import pytest
 from pydantic import TypeAdapter
 
+from job_finder.benchmarks.executions import EvaluationRun
 from job_finder.benchmarks.manifests import (
     EvaluationCaseInput,
     EvaluationManifest,
     EvaluationManifestCase,
     ManifestPolicy,
 )
+from job_finder.benchmarks.promotions import PromptPromotionDecision
+from job_finder.benchmarks.scoring import EvaluationMetrics, EvaluationTrialResult
 from job_finder.config import LangfuseSettings
 from job_finder.evaluation.models import (
     InputDigest,
@@ -29,12 +32,6 @@ from job_finder.evaluation.langfuse import (
     LangfuseUnavailable,
     ObservationProjection,
     create_langfuse_projection_sender,
-)
-from job_finder.evaluation.manifests import (
-    EvaluationMetrics,
-    EvaluationRun,
-    EvaluationTrialResult,
-    PromptPromotionDecision,
 )
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)

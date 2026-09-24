@@ -28,6 +28,16 @@ import job_finder.configuration_service as configuration_service_module
 import job_finder.evaluation.manifest_execution as manifest_execution_module
 import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.ats.models import CompensationObservation
+from job_finder.benchmarks.comparisons import preview_run_comparison
+from job_finder.benchmarks.executions import (
+    CompletedEvaluationExecution,
+    EvaluateManifestCommand,
+    FailedEvaluationExecution,
+    exchange_rate_snapshot_digest,
+    load_evaluation_execution_by_key,
+    load_run,
+    run_manifest,
+)
 from job_finder.benchmarks.manifests import (
     EvaluationManifestCase,
     ManifestPolicy,
@@ -37,6 +47,7 @@ from job_finder.benchmarks.manifests import (
     list_manifests,
     preview_manifest,
 )
+from job_finder.benchmarks.promotions import record_prompt_promotion_decision
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
     ActivationTargetUnpublished,
@@ -78,17 +89,6 @@ from job_finder.evaluation.langfuse import (
     ProjectionFailed,
     deliver_next_projection,
     load_projection_queue_status,
-)
-from job_finder.evaluation.manifests import (
-    CompletedEvaluationExecution,
-    EvaluateManifestCommand,
-    FailedEvaluationExecution,
-    exchange_rate_snapshot_digest,
-    load_evaluation_execution_by_key,
-    load_run,
-    preview_run_comparison,
-    record_prompt_promotion_decision,
-    run_manifest,
 )
 from job_finder.evaluation.prompt_releases import (
     bootstrap_prompt_release,

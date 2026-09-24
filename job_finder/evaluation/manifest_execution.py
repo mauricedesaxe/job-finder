@@ -9,6 +9,12 @@ from uuid import uuid4
 import psycopg
 
 from job_finder.benchmarks.manifests import EvaluationManifestCase
+from job_finder.benchmarks.executions import (
+    CaseEvaluator,
+    EvaluateManifestCommand,
+    EvaluationExecutionState,
+    run_manifest,
+)
 from job_finder.discovery.exchange_rates import (
     ExchangeRateSnapshot,
     fetch_exchange_rates,
@@ -18,12 +24,6 @@ from job_finder.evaluation.evaluate import evaluate_job
 from job_finder.evaluation.jev import (
     JevCriterionObservation,
     evaluate_prompt as evaluate_jev_prompt,
-)
-from job_finder.evaluation.manifests import (
-    CaseEvaluator,
-    EvaluateManifestCommand,
-    EvaluationExecutionState,
-    run_manifest,
 )
 from job_finder.evaluation.models import (
     CriterionResult,

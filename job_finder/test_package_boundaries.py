@@ -16,26 +16,76 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/review/configuration_editor.py", "starlette"),
     ("job_finder/review/shell.py", "fasthtml"),
 }
-_MOVED_MANIFEST_SYMBOLS = frozenset(
-    {
-        "CuratedReviewEvent",
-        "EvaluationCaseInput",
-        "EvaluationManifest",
-        "EvaluationManifestCase",
-        "ManifestOperationError",
-        "ManifestPolicy",
-        "ManifestSummary",
-        "ManifestSummaryPage",
-        "create_manifest",
-        "enqueue_projection",
-        "exclude_review_event",
-        "include_review_event",
-        "list_manifests",
-        "load_manifest",
-        "preview_manifest",
-        "summarize_manifest",
-    }
-)
+_BENCHMARK_PUBLIC_SYMBOLS = {
+    "manifests.py": frozenset(
+        {
+            "CuratedReviewEvent",
+            "EvaluationCaseInput",
+            "EvaluationManifest",
+            "EvaluationManifestCase",
+            "ManifestOperationError",
+            "ManifestPolicy",
+            "ManifestSummary",
+            "ManifestSummaryPage",
+            "create_manifest",
+            "enqueue_projection",
+            "exclude_review_event",
+            "include_review_event",
+            "list_manifests",
+            "load_manifest",
+            "preview_manifest",
+            "summarize_manifest",
+        }
+    ),
+    "scoring.py": frozenset(
+        {
+            "EvaluationMetrics",
+            "EvaluationTrialResult",
+            "score_results",
+            "score_trial",
+        }
+    ),
+    "executions.py": frozenset(
+        {
+            "CaseEvaluator",
+            "CaseEvaluatorFactory",
+            "CompletedEvaluationExecution",
+            "EvaluateManifestCommand",
+            "EvaluationExecution",
+            "EvaluationExecutionFailure",
+            "EvaluationExecutionState",
+            "EvaluationRun",
+            "EvaluationRunTelemetry",
+            "FailedEvaluationExecution",
+            "LegacyEvaluateManifestCommand",
+            "RequestObservationRecorder",
+            "RunningEvaluationExecution",
+            "aggregate_evaluation_telemetry",
+            "exchange_rate_snapshot_digest",
+            "load_evaluation_execution",
+            "load_evaluation_execution_by_key",
+            "load_run",
+            "run_manifest",
+        }
+    ),
+    "comparisons.py": frozenset(
+        {
+            "EvaluationCaseTransition",
+            "EvaluationRunComparison",
+            "EvaluationTrialTransition",
+            "compare_runs",
+            "preview_run_comparison",
+            "promotion_eligibility_failures",
+        }
+    ),
+    "promotions.py": frozenset(
+        {
+            "PromptPromotionDecision",
+            "load_promotion_decision",
+            "record_prompt_promotion_decision",
+        }
+    ),
+}
 _PACKAGE_ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _PACKAGE_ROOT.parent
 _OLD_MANIFEST_MODULE = "job_finder.evaluation.manifests"
@@ -68,7 +118,7 @@ def _imported_modules(path: Path) -> set[str]:
     return modules
 
 
-def _bound_names(path: Path) -> set[str]:
+def _public_definitions(path: Path) -> set[str]:
     names: set[str] = set()
     for node in _parse(path).body:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -76,9 +126,7 @@ def _bound_names(path: Path) -> set[str]:
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             names.update(target.id for target in targets if isinstance(target, ast.Name))
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update(alias.asname or alias.name.partition(".")[0] for alias in node.names)
-    return names
+    return {name for name in names if not name.startswith("_")}
 
 
 def _attribute_name(node: ast.expr) -> str | None:
@@ -114,48 +162,6 @@ def _dynamic_imported_modules(tree: ast.Module) -> set[str]:
     }
 
 
-def _old_manifest_aliases(path: Path, tree: ast.Module) -> set[str]:
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            aliases.update(
-                alias.asname
-                for alias in node.names
-                if alias.name == _OLD_MANIFEST_MODULE and alias.asname is not None
-            )
-        elif isinstance(node, ast.ImportFrom):
-            module = _absolute_from_module(path, node)
-            aliases.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if f"{module}.{alias.name}" == _OLD_MANIFEST_MODULE
-            )
-    return aliases
-
-
-def _stale_manifest_references(path: Path) -> set[str]:
-    tree = _parse(path)
-    aliases = _old_manifest_aliases(path, tree)
-    stale: set[str] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.ImportFrom)
-            and _absolute_from_module(path, node) == _OLD_MANIFEST_MODULE
-        ):
-            names = {alias.name for alias in node.names}
-            stale.update(
-                _MOVED_MANIFEST_SYMBOLS if "*" in names else names & _MOVED_MANIFEST_SYMBOLS
-            )
-        elif isinstance(node, ast.Attribute):
-            name = _attribute_name(node)
-            for prefix in (_OLD_MANIFEST_MODULE, *aliases):
-                if name in {f"{prefix}.{symbol}" for symbol in _MOVED_MANIFEST_SYMBOLS}:
-                    stale.add(name)
-    if _OLD_MANIFEST_MODULE in _dynamic_imported_modules(tree):
-        stale.add("dynamic-import")
-    return stale
-
-
 def test_framework_sdks_stay_in_adapter_modules() -> None:
     observed: set[tuple[str, str]] = set()
 
@@ -176,18 +182,20 @@ def test_framework_sdks_stay_in_adapter_modules() -> None:
     assert observed == _ALLOWED_FRAMEWORK_IMPORTS
 
 
-def test_benchmark_manifest_import_boundaries() -> None:
-    owner_names = _bound_names(_PACKAGE_ROOT / "benchmarks" / "manifests.py")
-    legacy_names = _bound_names(_PACKAGE_ROOT / "evaluation" / "manifests.py")
-    assert _MOVED_MANIFEST_SYMBOLS <= owner_names
-    assert _MOVED_MANIFEST_SYMBOLS.isdisjoint(legacy_names)
+def test_benchmark_modules_own_their_public_symbols() -> None:
+    benchmark_root = _PACKAGE_ROOT / "benchmarks"
+    assert (benchmark_root / "__init__.py").read_text() == ""
+    assert (_PACKAGE_ROOT / "evaluation" / "__init__.py").read_text() == ""
+    assert not (_PACKAGE_ROOT / "evaluation" / "manifests.py").exists()
+    for filename, expected_symbols in _BENCHMARK_PUBLIC_SYMBOLS.items():
+        assert _public_definitions(benchmark_root / filename) == expected_symbols
 
     source_roots = (_PACKAGE_ROOT, _REPOSITORY_ROOT / "contracts", _REPOSITORY_ROOT / "scripts")
     stale_imports = {
-        f"{path.relative_to(_REPOSITORY_ROOT)}:{name}"
+        path.relative_to(_REPOSITORY_ROOT).as_posix()
         for source_root in source_roots
         for path in source_root.rglob("*.py")
-        for name in _stale_manifest_references(path)
+        if _OLD_MANIFEST_MODULE in _imported_modules(path)
     }
     assert not stale_imports
 
@@ -195,6 +203,7 @@ def test_benchmark_manifest_import_boundaries() -> None:
         _PACKAGE_ROOT / "evaluation" / "evaluate.py",
         _PACKAGE_ROOT / "evaluation" / "jev.py",
         _PACKAGE_ROOT / "evaluation" / "openrouter.py",
+        _PACKAGE_ROOT / "evaluation" / "release_targets.py",
     ):
         assert not any(
             module == "job_finder.benchmarks" or module.startswith("job_finder.benchmarks.")

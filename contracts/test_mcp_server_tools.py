@@ -15,6 +15,12 @@ from fastmcp.exceptions import ToolError
 from psycopg import sql
 from pydantic import TypeAdapter
 
+from job_finder.benchmarks.comparisons import EvaluationRunComparison
+from job_finder.benchmarks.executions import (
+    CompletedEvaluationExecution,
+    EvaluateManifestCommand,
+    run_manifest,
+)
 from job_finder.benchmarks.manifests import (
     CuratedReviewEvent,
     EvaluationManifestCase,
@@ -24,17 +30,11 @@ from job_finder.benchmarks.manifests import (
     create_manifest,
     include_review_event,
 )
+from job_finder.benchmarks.promotions import PromptPromotionDecision
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.langfuse import ProjectionQueueStatus
-from job_finder.evaluation.manifests import (
-    CompletedEvaluationExecution,
-    EvaluateManifestCommand,
-    EvaluationRunComparison,
-    PromptPromotionDecision,
-    run_manifest,
-)
 from job_finder.evaluation.models import EvaluationResult, Qualified, ReleaseTarget
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release, load_prompt_release
 from job_finder.evaluation.release_targets import (
