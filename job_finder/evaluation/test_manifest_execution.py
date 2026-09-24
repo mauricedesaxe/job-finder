@@ -3,8 +3,8 @@ from uuid import UUID
 
 import pytest
 
+from job_finder.benchmarks.manifests import EvaluationCaseInput, EvaluationManifestCase
 from job_finder.evaluation.manifest_execution import _case_evaluator  # pyright: ignore[reportPrivateUsage]
-from job_finder.evaluation.manifests import EvaluationCaseInput, EvaluationManifestCase
 from job_finder.evaluation.models import ProviderRequestObservation, ReleaseTarget
 from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.evaluation.relevance_releases import (

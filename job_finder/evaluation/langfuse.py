@@ -13,10 +13,10 @@ from langfuse import Langfuse
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from job_finder.benchmarks.manifests import EvaluationManifest
 from job_finder.config import LangfuseSettings
 from job_finder.evaluation.models import ModelCallAttempt
 from job_finder.evaluation.manifests import (
-    EvaluationManifest,
     EvaluationRun,
     PromptPromotionDecision,
 )
