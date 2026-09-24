@@ -1347,6 +1347,9 @@ def test_spend_analytics_reads_totals_days_and_models(
         assert spend.days[0].accepted == 2
         assert spend.days[0].errors == 1
         assert spend.days[0].known_cost_usd == Decimal("0.35")
+        assert [part.model for part in spend.days[0].by_model] == ["glm-4.6", "gpt-5-mini"]
+        assert spend.days[0].by_model[0].known_cost_usd == Decimal("0.25")
+        assert spend.days[0].by_model[1].known_cost_usd == Decimal("0.10")
 
         assert [item.model for item in spend.models] == ["glm-4.6", "gpt-5-mini"]
         assert spend.models[0].calls == 3
@@ -1359,6 +1362,8 @@ def test_spend_analytics_reads_totals_days_and_models(
 
         bounded = load_spend_analytics(connection, day_limit=45)
         assert len(bounded.days) == 2
+        assert [part.model for part in bounded.days[1].by_model] == ["glm-4.6"]
+        assert bounded.days[1].by_model[0].known_cost_usd == Decimal("1.00")
 
 
 def test_activity_page_merges_runs_and_work_with_filters_and_pagination(

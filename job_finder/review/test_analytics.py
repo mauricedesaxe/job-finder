@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from job_finder.review.analytics import DaySpend, ModelSpend, SpendAnalytics
+from job_finder.review.analytics import DayModelSpend, DaySpend, ModelSpend, SpendAnalytics
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
@@ -18,6 +18,7 @@ def test_day_spend_rejects_outcomes_that_do_not_add_up_to_the_calls() -> None:
             accepted=1,
             errors=1,
             known_cost_usd=Decimal("0.50"),
+            by_model=(),
         )
 
 
@@ -29,7 +30,30 @@ def test_day_spend_rejects_negative_spend() -> None:
             accepted=2,
             errors=0,
             known_cost_usd=Decimal("-0.01"),
+            by_model=(),
         )
+
+
+def test_day_spend_rejects_a_model_breakdown_that_does_not_add_up() -> None:
+    with pytest.raises(ValueError, match="model spend does not add up"):
+        DaySpend(
+            day=NOW.date(),
+            calls=2,
+            accepted=2,
+            errors=0,
+            known_cost_usd=Decimal("0.50"),
+            by_model=(DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("0.25")),),
+        )
+
+
+def test_day_model_spend_rejects_negative_spend() -> None:
+    with pytest.raises(ValueError, match="cannot be negative"):
+        DayModelSpend(model="glm-4.6", known_cost_usd=Decimal("-0.01"))
+
+
+def test_day_model_spend_rejects_a_blank_model_name() -> None:
+    with pytest.raises(ValueError, match="model name must not be empty"):
+        DayModelSpend(model="", known_cost_usd=Decimal("0.25"))
 
 
 def test_model_spend_rejects_a_blank_model_name() -> None:

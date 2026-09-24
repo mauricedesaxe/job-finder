@@ -13,18 +13,33 @@ SPEND_MODEL_LIMIT = 10
 
 
 @dataclass(frozen=True)
+class DayModelSpend:
+    model: str
+    known_cost_usd: Decimal
+
+    def __post_init__(self) -> None:
+        if self.known_cost_usd < 0:
+            raise ValueError("spend values cannot be negative")
+        if not self.model:
+            raise ValueError("model name must not be empty")
+
+
+@dataclass(frozen=True)
 class DaySpend:
     day: date
     calls: int
     accepted: int
     errors: int
     known_cost_usd: Decimal
+    by_model: tuple[DayModelSpend, ...]
 
     def __post_init__(self) -> None:
         if self.calls < 0 or self.accepted < 0 or self.errors < 0 or self.known_cost_usd < 0:
             raise ValueError("spend values cannot be negative")
         if self.accepted + self.errors != self.calls:
             raise ValueError("day outcomes do not add up to the recorded calls")
+        if sum(part.known_cost_usd for part in self.by_model) != self.known_cost_usd:
+            raise ValueError("day model spend does not add up to the recorded spend")
 
 
 @dataclass(frozen=True)
@@ -125,14 +140,14 @@ def load_spend_analytics(
 
     day_rows = connection.execute(
         """
-        SELECT (observed_at AT TIME ZONE 'UTC')::date AS day, count(*),
+        SELECT (observed_at AT TIME ZONE 'UTC')::date AS day, requested_model, count(*),
                count(*) FILTER (WHERE status = 'accepted'),
                count(*) FILTER (WHERE status <> 'accepted'),
                COALESCE(sum(cost_usd), 0)
         FROM model_call_attempts
         WHERE observed_at >= now() - (%s * interval '1 day')
-        GROUP BY day
-        ORDER BY day DESC
+        GROUP BY day, requested_model
+        ORDER BY day DESC, COALESCE(sum(cost_usd), 0) DESC, requested_model
         """,
         (day_limit,),
     ).fetchall()
@@ -160,30 +175,50 @@ def load_spend_analytics(
         input_tokens=int(str(totals_row[4])),
         output_tokens=int(str(totals_row[5])),
         max_latency_ms=int(str(totals_row[6])),
-        days=tuple(_parse_day_spend(row) for row in day_rows),
+        days=_parse_day_spend(day_rows),
         models=tuple(_parse_model_spend(row) for row in model_rows),
     )
 
 
-def _parse_day_spend(row: tuple[object, ...]) -> DaySpend:
-    parsed_day = row[0]
-    if isinstance(parsed_day, datetime):
-        parsed_day = parsed_day.date()
-    if not isinstance(parsed_day, date):
-        raise RuntimeError("Spend day is invalid")
-    return DaySpend(
-        day=parsed_day,
-        calls=int(str(row[1])),
-        accepted=int(str(row[2])),
-        errors=int(str(row[3])),
-        known_cost_usd=Decimal(str(row[4])),
+def _parse_day_spend(rows: list[tuple[object, ...]]) -> tuple[DaySpend, ...]:
+    grouped: dict[date, list[tuple[object, ...]]] = {}
+    for row in rows:
+        grouped.setdefault(_parse_day(row[0]), []).append(row)
+    return tuple(
+        DaySpend(
+            day=day,
+            calls=sum(int(str(row[2])) for row in day_rows),
+            accepted=sum(int(str(row[3])) for row in day_rows),
+            errors=sum(int(str(row[4])) for row in day_rows),
+            known_cost_usd=sum((Decimal(str(row[5])) for row in day_rows), Decimal(0)),
+            by_model=tuple(
+                DayModelSpend(
+                    model=_validated_model_name(row[1]),
+                    known_cost_usd=Decimal(str(row[5])),
+                )
+                for row in day_rows
+            ),
+        )
+        for day, day_rows in grouped.items()
     )
 
 
-def _parse_model_spend(row: tuple[object, ...]) -> ModelSpend:
-    model = row[0]
-    if not isinstance(model, str) or not model:
+def _parse_day(value: object) -> date:
+    if isinstance(value, datetime):
+        value = value.date()
+    if not isinstance(value, date):
+        raise RuntimeError("Spend day is invalid")
+    return value
+
+
+def _validated_model_name(value: object) -> str:
+    if not isinstance(value, str) or not value:
         raise RuntimeError("Spend model name is invalid")
+    return value
+
+
+def _parse_model_spend(row: tuple[object, ...]) -> ModelSpend:
+    model = _validated_model_name(row[0])
     return ModelSpend(
         model=model,
         calls=int(str(row[1])),
