@@ -1616,8 +1616,19 @@ def _activity_content(
     has_filters = bool(
         query.statuses or query.kind or query.from_at is not None or query.to_at is not None
     )
+    hidden_note = (
+        P(
+            f"{_count_phrase(page.hidden_no_op_count, 'entry', 'entries')} that did nothing "
+            + "hidden. Select 'Show entries that did nothing' to see them.",
+            cls="operations-muted",
+        )
+        if not query.show_no_ops
+        else None
+    )
     empty = (
-        P("No activity matches these filters.", cls="operations-empty")
+        P("All matching activity is hidden.", cls="operations-empty")
+        if page.hidden_no_op_count and not query.show_no_ops
+        else P("No activity matches these filters.", cls="operations-empty")
         if has_filters
         else P("No activity recorded yet.", cls="operations-empty")
     )
@@ -1638,6 +1649,7 @@ def _activity_content(
             cls="operations-header",
         ),
         _activity_filter_form(filters),
+        hidden_note,
         rows if page.entries else empty,
         A("Next page →", href=next_href, cls="retry activity-next")
         if next_href is not None
@@ -1676,6 +1688,16 @@ def _activity_filter_form(params: QueryParams) -> object:
                 for value, label in _ACTIVITY_STATUS_OPTIONS
             ),
             cls="filter-checks",
+        ),
+        Label(
+            Input(
+                type="checkbox",
+                name="show_noops",
+                value="1",
+                checked=True if params.get("show_noops") == "1" else None,
+            ),
+            Span("Show entries that did nothing"),
+            cls="filter-check",
         ),
         Div(
             Label(
@@ -1807,6 +1829,7 @@ def _activity_query_from_params(params: QueryParams) -> ActivityQuery:
             to_at=_activity_date(params, "to"),
             limit=50,
             cursor=params.get("cursor") or None,
+            show_no_ops=params.get("show_noops") == "1",
         )
     except ValueError:
         return ActivityQuery(limit=50)
@@ -1823,6 +1846,8 @@ def _activity_href(params: QueryParams, *, cursor: str | None = None) -> str:
         value = params.get(key)
         if value and _activity_date(params, key) is not None:
             pairs.append((key, value))
+    if params.get("show_noops") == "1":
+        pairs.append(("show_noops", "1"))
     if cursor is not None:
         pairs.append(("cursor", cursor))
     if not pairs:
