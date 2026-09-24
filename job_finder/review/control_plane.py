@@ -36,7 +36,7 @@ class ControlDefinition:
 
 
 CONTROL_DEFINITIONS = (
-    ControlDefinition("job_finder", "job_finder_schedule", "Discovery", "Daily at 07:00 UTC"),
+    ControlDefinition("job_finder", "job_finder_schedule", "Full pipeline", "Daily at 07:00 UTC"),
     ControlDefinition(
         "job_work_queue",
         "job_work_queue_schedule",

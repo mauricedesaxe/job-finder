@@ -259,10 +259,10 @@ def test_the_operations_home_requires_the_existing_owner_session() -> None:
 
 
 _CONTROL_DESCRIPTION_MATCHES = {
-    "job_finder": "searches for new jobs",
+    "job_finder": "registers what it finds in the work queue",
     "job_work_queue": "claims due jobs",
-    "review_sample": "enqueues a sample of yesterday's rejected jobs",
-    "langfuse_projection": "ships telemetry to Langfuse",
+    "review_sample": "a sample of yesterday's rejected jobs",
+    "langfuse_projection": "Ships telemetry to Langfuse",
 }
 
 
@@ -278,6 +278,9 @@ def test_the_control_plane_page_renders_all_live_schedule_controls() -> None:
         assert _CONTROL_DESCRIPTION_MATCHES[definition.job_name] in response.text
         assert f'value="{definition.job_name}"' in response.text
         assert f'value="{definition.schedule_name}"' in response.text
+    assert "From search to decision" in response.text
+    assert "two runs can never work on the same job" in response.text
+    assert "a job found this morning is not decided tomorrow" in response.text
     assert "in 11 days" in response.text
     assert 'title="2026-09-21 13:00 UTC"' in response.text
     assert response.text.count('action="/operations/run"') == 4
@@ -290,7 +293,9 @@ def test_the_control_plane_page_names_a_missing_configuration() -> None:
     response = client.get("/operations/control")
 
     assert response.status_code == 200
+    assert "Dagster is not configured for this app" in response.text
     assert "JOB_FINDER_DAGSTER_GRAPHQL_URL" in response.text
+    assert response.text.count("schedule-state unavailable") == 4
     assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
 
 
@@ -312,8 +317,10 @@ def test_the_control_plane_page_reports_an_unreachable_dagster() -> None:
     response = client.get("/operations/control")
 
     assert response.status_code == 200
-    assert "Dagster could not be reached" in response.text
+    assert "this app cannot reach Dagster" in response.text
     assert "Dagster GraphQL request failed" in response.text
+    assert "Schedule controls are off" in response.text
+    assert "Pipeline evidence elsewhere stays current" in response.text
 
 
 def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
