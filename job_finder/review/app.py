@@ -2444,7 +2444,11 @@ def _spend_models_section(models: tuple[ModelSpend, ...]) -> object:
             *(
                 Li(
                     Div(
-                        Div(Strong(m.model), Strong(f"${m.known_cost_usd:,.4f}")),
+                        Div(
+                            Strong(m.model),
+                            Strong(f"${m.known_cost_usd:,.4f}"),
+                            cls="spend-row-head",
+                        ),
                         Small(
                             f"{m.calls} calls · {m.input_tokens} in / {m.output_tokens} out"
                             + f" · up to {m.max_latency_ms} ms"
@@ -3263,6 +3267,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .spend-chart-bar { width: 100%; min-height: 2px; background: var(--acid); }
 .spend-chart-value { margin-top: 0.35rem; font: 700 0.78rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
 .spend-chart-label { margin-top: 0.1rem; color: var(--muted); font-size: 0.62rem; white-space: nowrap; }
+.spend-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
 .operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }
