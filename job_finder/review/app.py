@@ -2407,9 +2407,11 @@ def _spend_days_section(days: tuple[DaySpend, ...]) -> object:
     return Div(
         Small("Last 30 days", cls="eyebrow"),
         H2("Spend per day"),
-        Ul(
-            *(_spend_day_row(day, peak) for day in days),
-            cls="operations-list spend-day-list",
+        Div(
+            *(_spend_day_column(day, peak) for day in reversed(days)),
+            cls="spend-chart",
+            role="img",
+            aria_label="Bar chart of model spend per day over the last 30 days",
         )
         if days
         else P("No model calls were recorded in the last 30 days.", cls="operations-empty"),
@@ -2417,19 +2419,20 @@ def _spend_days_section(days: tuple[DaySpend, ...]) -> object:
     )
 
 
-def _spend_day_row(day: DaySpend, peak: Decimal) -> object:
-    width = int(day.known_cost_usd / peak * 100) if peak else 0
-    return Li(
-        Div(
-            Strong(day.day.isoformat()),
-            Small(
-                _count_phrase(day.accepted, "accepted call", "accepted calls")
-                + (f" · {day.errors} returned no usage" if day.errors else "")
-            ),
-            Strong(f"${day.known_cost_usd:,.4f}", cls="spend-day-value"),
-            cls="spend-day-head",
-        ),
-        Div(cls="spend-bar-fill", style=f"width: {width}%") if width else None,
+def _spend_day_column(day: DaySpend, peak: Decimal) -> object:
+    height = round(day.known_cost_usd / peak * 100) if peak else 0
+    label = f"{day.day:%b} {day.day.day}"
+    detail = _count_phrase(day.accepted, "accepted call", "accepted calls")
+    if day.errors:
+        detail += f" · {day.errors} returned no usage"
+    return Div(
+        Div(Div(cls="spend-chart-bar", style=f"height: {height}%"), cls="spend-chart-track"),
+        Strong(f"${day.known_cost_usd:,.2f}", cls="spend-chart-value")
+        if day.known_cost_usd
+        else None,
+        Small(label, cls="spend-chart-label"),
+        title=f"{label}, {day.day.year} · {detail} · ${day.known_cost_usd:,.4f}",
+        cls="spend-chart-col",
     )
 
 
@@ -3254,10 +3257,12 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .operations-metrics strong { margin-top: 0.25rem; font: 700 2rem Georgia, 'Times New Roman', serif; }
 .operations-metrics span { margin-top: 0.15rem; color: var(--muted); font-size: 0.8rem; }
 .operations-section { padding: 1.25rem; border: 2px solid var(--line); background: var(--panel); }
-.spend-day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
-.spend-day-value { font: 700 1.05rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
-.spend-bar-fill { height: 12px; margin-top: 0.55rem; background: var(--acid); }
-.operations-list .spend-bar-fill { display: block; }
+.spend-chart { display: flex; align-items: stretch; gap: 0.35rem; margin-top: 1.25rem; padding: 1rem; border: 2px solid var(--line); background: var(--surface-raised); overflow-x: auto; }
+.spend-chart-col { display: flex; flex: 1 0 1.6rem; flex-direction: column; align-items: center; justify-content: flex-end; min-width: 0; }
+.spend-chart-track { display: flex; align-items: flex-end; width: 100%; height: 9rem; }
+.spend-chart-bar { width: 100%; min-height: 2px; background: var(--acid); }
+.spend-chart-value { margin-top: 0.35rem; font: 700 0.78rem Georgia, 'Times New Roman', serif; white-space: nowrap; }
+.spend-chart-label { margin-top: 0.1rem; color: var(--muted); font-size: 0.62rem; white-space: nowrap; }
 .operations-muted, .operations-empty { color: var(--muted); line-height: 1.5; }
 .operations-section { margin-top: 1.25rem; }
 .operations-list { list-style: none; margin: 1rem 0 0; padding: 0; border: 2px solid var(--line); border-bottom: 0; }

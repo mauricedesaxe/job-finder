@@ -2108,10 +2108,6 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "1,200" in response.text
     assert "900 in / 300 out" in response.text
     assert "5,200 ms" in response.text
-    assert NOW.date().isoformat() in response.text
-    assert "$1.0000" in response.text
-    assert "$0.2345" in response.text
-    assert "spend-bar-fill" in response.text
     assert "z-ai/glm-4.6" in response.text
     assert "$1.1000" in response.text
     assert "up to 5200 ms" in response.text
@@ -2121,6 +2117,20 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
         in response.text
     )
     assert 'href="/operations" class="back-link"' not in response.text
+
+
+def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 200
+    assert "spend-chart-bar" in response.text
+    assert "Sep 9" in response.text
+    assert "Sep 10" in response.text
+    assert "$1.00" in response.text
+    assert "$0.23" in response.text
+    assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage · $1.0000" in response.text
 
 
 def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
