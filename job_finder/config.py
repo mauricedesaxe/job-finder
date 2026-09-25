@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import ClassVar
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -172,6 +173,8 @@ class OrchestrationSettings(BaseModel):
     jina_api_key: str | None = None
     credential_encryption_key: SecretStr | None = None
     implementation_ref: str = Field(min_length=1)
+    implementation_artifact_path: Path | None = None
+    enable_split_execution: bool = False
     enable_ats_enrichment: bool = True
     search_worker_count: int = Field(default=8, gt=0, le=32)
     work_batch_size: int = Field(default=100, gt=0, le=1000)
@@ -182,6 +185,10 @@ class OrchestrationSettings(BaseModel):
 
     @classmethod
     def from_environment(cls) -> OrchestrationSettings:
+        split_enabled = os.environ.get("JOB_FINDER_ENABLE_SPLIT_EXECUTION") == "true"
+        artifact_path = os.environ.get("JOB_FINDER_IMPLEMENTATION_ARTIFACT")
+        if split_enabled and not artifact_path:
+            raise ValueError("Split execution requires JOB_FINDER_IMPLEMENTATION_ARTIFACT")
         return cls.model_validate(
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),
@@ -192,6 +199,8 @@ class OrchestrationSettings(BaseModel):
                 or None,
                 "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF")
                 or os.environ.get("RAILWAY_GIT_COMMIT_SHA"),
+                "implementation_artifact_path": artifact_path,
+                "enable_split_execution": split_enabled,
                 "enable_ats_enrichment": os.environ.get("ENABLE_ATS_ENRICHMENT", "true") == "true",
                 "search_worker_count": os.environ.get("JOB_FINDER_SEARCH_WORKER_COUNT", "8"),
                 "work_batch_size": os.environ.get("JOB_FINDER_WORK_BATCH_SIZE", "100"),

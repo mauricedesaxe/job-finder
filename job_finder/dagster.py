@@ -22,6 +22,7 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exch
 from job_finder.execution_budget import (
     ExecutionAdmitted,
     ExecutionBlocked,
+    SplitExecutionAdmitted,
     admit_scheduled_execution,
     reserve_discovery,
     reserve_job_capacity,
@@ -49,6 +50,7 @@ from job_finder.pipeline.runs import (
     complete_orchestration_run,
     fail_orchestration_run,
     prepare_orchestration_run,
+    prepare_split_orchestration_run,
 )
 from job_finder.provider_credentials import (
     ExecutionProviderCredentials,
@@ -80,7 +82,12 @@ def job_finder_cycle(
     with job_finder.connection() as connection:
         run_key = f"dagster:{context.run.run_id}"
         admission = admit_scheduled_execution(
-            connection, idempotency_key=run_key, requested_at=observed_at
+            connection,
+            idempotency_key=run_key,
+            requested_at=observed_at,
+            artifact_path=(
+                settings.implementation_artifact_path if settings.enable_split_execution else None
+            ),
         )
         ping_heartbeat(settings.discovery_heartbeat_url)
         if isinstance(admission, ExecutionBlocked):
@@ -155,7 +162,12 @@ def job_work_queue_cycle(
     with job_finder.connection() as connection:
         run_key = f"dagster:{context.run.run_id}"
         admission = admit_scheduled_execution(
-            connection, idempotency_key=run_key, requested_at=observed_at
+            connection,
+            idempotency_key=run_key,
+            requested_at=observed_at,
+            artifact_path=(
+                settings.implementation_artifact_path if settings.enable_split_execution else None
+            ),
         )
         ping_heartbeat(settings.work_queue_heartbeat_url)
         if isinstance(admission, ExecutionBlocked):
@@ -292,9 +304,23 @@ def _prepare_run(
     connection: Connection,
     context: AssetExecutionContext,
     settings: OrchestrationSettings,
-    admission: ExecutionAdmitted,
+    admission: ExecutionAdmitted | SplitExecutionAdmitted,
     observed_at: datetime,
 ) -> OrchestrationRun:
+    if isinstance(admission, SplitExecutionAdmitted):
+        artifact_path = settings.implementation_artifact_path
+        if artifact_path is None:
+            raise RuntimeError("Split execution requires an implementation artifact")
+        return prepare_split_orchestration_run(
+            connection,
+            idempotency_key=f"dagster:{context.run.run_id}",
+            implementation_ref=settings.implementation_ref,
+            acquisition_policy_revision_id=admission.acquisition_policy_revision_id,
+            qualification_target_id=admission.qualification_target_id,
+            artifact_path=artifact_path,
+            started_at=observed_at,
+            fetch_rates=lambda: _fetch_rates(observed_at),
+        )
     return prepare_orchestration_run(
         connection,
         idempotency_key=f"dagster:{context.run.run_id}",

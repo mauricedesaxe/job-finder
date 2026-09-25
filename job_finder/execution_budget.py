@@ -4,14 +4,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, ClassVar, Literal, TypeAlias, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from job_finder.acquisition_policy import AcquisitionPolicyRevisionId, SearchQuerySource
+from job_finder.acquisition_policy_service import load_acquisition_policy_revision
 from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 from job_finder.evaluation.prompt_releases import PromptRelease
+from job_finder.evaluation.qualification_components import QualificationTargetId
+from job_finder.evaluation.qualification_prompt_compilations import (
+    load_compiled_qualification_target,
+)
 from job_finder.evaluation.release_targets import load_release_target
 from job_finder.evaluation.relevance_releases import (
     GeminiExecutionPolicy,
@@ -19,6 +26,7 @@ from job_finder.evaluation.relevance_releases import (
     JevFaithfulExecutionPolicy,
     RelevanceExecutionPolicy,
     RelevanceRelease,
+    load_relevance_release,
 )
 from job_finder.evaluation.jev import JevRetryPolicy
 from job_finder.evaluation.openrouter import RetryPolicy as OpenRouterRetryPolicy
@@ -83,6 +91,20 @@ class ExecutionAdmitted(ExecutionBudgetModel):
     estimate: ExecutionEstimate
 
 
+class SplitExecutionAdmitted(ExecutionBudgetModel):
+    kind: Literal["admitted"] = "admitted"
+    max_jobs: int
+    acquisition_policy_revision_id: Annotated[
+        AcquisitionPolicyRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    qualification_target_id: Annotated[QualificationTargetId, Field(pattern=r"^[0-9a-f]{64}$")]
+    acquisition_generation: int = Field(ge=0)
+    qualification_generation: int = Field(ge=0)
+    budget_policy_version: int = Field(ge=1)
+    run_allowance_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=8)
+    estimate: ExecutionEstimate
+
+
 class ExecutionBlocked(ExecutionBudgetModel):
     kind: Literal["blocked"] = "blocked"
     reason: Literal[
@@ -91,10 +113,11 @@ class ExecutionBlocked(ExecutionBudgetModel):
         "configuration_exceeds_policy",
         "monthly_budget_exhausted",
         "already_consumed",
+        "qualification_target_not_active",
     ]
 
 
-ExecutionAdmission: TypeAlias = ExecutionAdmitted | ExecutionBlocked
+ExecutionAdmission: TypeAlias = ExecutionAdmitted | SplitExecutionAdmitted | ExecutionBlocked
 
 _SCHEDULABLE_ONBOARDING_STAGES = frozenset(
     {OnboardingStage.COMPLETE, OnboardingStage.LEGACY_OWNER_IMPORT}
@@ -117,7 +140,7 @@ class BudgetSetupService:
 
 
 def estimate_execution(
-    configuration: SearchConfiguration,
+    configuration: SearchQuerySource,
     prompt_release: PromptRelease,
     relevance_policy: RelevanceExecutionPolicy,
     *,
@@ -276,6 +299,7 @@ def admit_scheduled_execution(
     *,
     idempotency_key: str,
     requested_at: datetime,
+    artifact_path: Path | None = None,
 ) -> ExecutionAdmission:
     with connection.transaction():
         return _admit_execution(
@@ -283,6 +307,7 @@ def admit_scheduled_execution(
             idempotency_key=idempotency_key,
             requested_at=requested_at,
             allowed_stages=_SCHEDULABLE_ONBOARDING_STAGES,
+            artifact_path=artifact_path,
         )
 
 
@@ -291,14 +316,17 @@ def admit_onboarding_test_execution(
     *,
     idempotency_key: str,
     requested_at: datetime,
-) -> ExecutionAdmission:
+) -> ExecutionAdmitted | ExecutionBlocked:
     with connection.transaction():
-        return _admit_execution(
+        result = _admit_execution(
             connection,
             idempotency_key=idempotency_key,
             requested_at=requested_at,
             allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
         )
+        if isinstance(result, SplitExecutionAdmitted):
+            raise RuntimeError("Onboarding test search cannot replay split authority yet")
+        return result
 
 
 def _admit_execution(
@@ -307,6 +335,7 @@ def _admit_execution(
     idempotency_key: str,
     requested_at: datetime,
     allowed_stages: frozenset[OnboardingStage],
+    artifact_path: Path | None = None,
 ) -> ExecutionAdmission:
     period_start = date(requested_at.year, requested_at.month, 1)
     owner_row = connection.execute(
@@ -319,7 +348,8 @@ def _admit_execution(
         SELECT max_jobs, status, authority_kind, policy_version, reserved_usd,
                configuration_revision_id, prompt_release_id, relevance_release_id,
                release_generation, search_queries, logical_model_calls_per_job,
-               maximum_provider_attempts
+               maximum_provider_attempts, acquisition_policy_revision_id,
+               qualification_target_id, acquisition_generation, qualification_generation
         FROM execution_budget_reservations
         WHERE idempotency_key = %s
         FOR UPDATE
@@ -341,14 +371,16 @@ def _admit_execution(
     ).fetchone()
     if policy_row is None:
         return ExecutionBlocked(reason="budget_not_configured")
-    (
-        configuration_revision_id,
-        configuration,
-        target,
-        release_generation,
-        prompt_release,
-        relevance_release,
-    ) = _load_active_execution(connection)
+    active_legacy = None
+    active_split = None
+    if artifact_path is None:
+        active_legacy = _load_active_execution(connection)
+        _, configuration, _, _, prompt_release, relevance_release = active_legacy
+    else:
+        active_split = _load_active_split_execution(connection, artifact_path)
+        if active_split is None:
+            return ExecutionBlocked(reason="qualification_target_not_active")
+        _, configuration, _, _, _, prompt_release, relevance_release = active_split
     estimate = estimate_execution(
         configuration,
         prompt_release,
@@ -374,6 +406,57 @@ def _admit_execution(
     reservation = Decimal(str(policy_row[2]))
     if consumed + reservation > monthly_limit:
         return ExecutionBlocked(reason="monthly_budget_exhausted")
+    if active_split is not None:
+        (
+            acquisition_policy_revision_id,
+            _,
+            acquisition_generation,
+            qualification_target_id,
+            qualification_generation,
+            _,
+            _,
+        ) = active_split
+        _ = connection.execute(
+            """
+            INSERT INTO execution_budget_reservations (
+              idempotency_key, policy_version, period_start, reserved_usd,
+              status, max_jobs, authority_kind, acquisition_policy_revision_id,
+              qualification_target_id, acquisition_generation, qualification_generation,
+              search_queries, logical_model_calls_per_job,
+              maximum_provider_attempts, created_at
+            ) VALUES (
+              %s, %s, %s, %s, 'reserved', %s, 'split', %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """,
+            (
+                idempotency_key,
+                policy_row[0],
+                period_start,
+                reservation,
+                policy_row[3],
+                acquisition_policy_revision_id,
+                qualification_target_id,
+                acquisition_generation,
+                qualification_generation,
+                estimate.search_queries,
+                estimate.logical_model_calls_per_job,
+                estimate.maximum_provider_attempts,
+                requested_at,
+            ),
+        )
+        return SplitExecutionAdmitted(
+            max_jobs=cast(int, policy_row[3]),
+            acquisition_policy_revision_id=acquisition_policy_revision_id,
+            qualification_target_id=qualification_target_id,
+            acquisition_generation=acquisition_generation,
+            qualification_generation=qualification_generation,
+            budget_policy_version=cast(int, policy_row[0]),
+            run_allowance_usd=reservation,
+            estimate=estimate,
+        )
+    if active_legacy is None:
+        raise RuntimeError("Legacy execution authority was not loaded")
+    configuration_revision_id, _, target, release_generation, _, _ = active_legacy
     _ = connection.execute(
         """
         INSERT INTO execution_budget_reservations (
@@ -463,11 +546,55 @@ def _load_active_execution(
     )
 
 
+def _load_active_split_execution(
+    connection: Connection, artifact_path: Path
+) -> (
+    tuple[
+        AcquisitionPolicyRevisionId,
+        SearchQuerySource,
+        int,
+        QualificationTargetId,
+        int,
+        PromptRelease,
+        RelevanceRelease,
+    ]
+    | None
+):
+    row = connection.execute(
+        """
+        SELECT acquisition.revision_id, acquisition.generation,
+               qualification.target_id, qualification.generation
+        FROM active_acquisition_policy acquisition
+        CROSS JOIN active_qualification_target qualification
+        WHERE acquisition.singleton_id = 1 AND qualification.singleton_id = 1
+        FOR SHARE OF acquisition, qualification
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Active split execution authority is missing")
+    if row[2] is None:
+        return None
+    acquisition_id = AcquisitionPolicyRevisionId(str(row[0]))
+    target_id = QualificationTargetId(str(row[2]))
+    policy = load_acquisition_policy_revision(connection, acquisition_id).policy
+    compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
+    relevance = compiled.target.relevance
+    return (
+        acquisition_id,
+        policy,
+        cast(int, row[1]),
+        target_id,
+        cast(int, row[3]),
+        compiled.prompt_release,
+        load_relevance_release(connection, relevance.relevance_release_id),
+    )
+
+
 def _admitted_from_row(
     connection: Connection,
     idempotency_key: str,
     row: tuple[object, ...],
-) -> ExecutionAdmitted:
+) -> ExecutionAdmitted | SplitExecutionAdmitted:
     max_jobs = cast(int, row[0])
     if str(row[2]) == "legacy":
         return _legacy_admission(
@@ -476,6 +603,24 @@ def _admitted_from_row(
             max_jobs=max_jobs,
             budget_policy_version=cast(int, row[3]),
             run_allowance_usd=Decimal(str(row[4])),
+        )
+    if str(row[2]) == "split":
+        if any(row[index] is None for index in (9, 10, 11, 12, 13, 14, 15)):
+            raise RuntimeError("Split execution reservation has incomplete authority")
+        return SplitExecutionAdmitted(
+            max_jobs=max_jobs,
+            acquisition_policy_revision_id=AcquisitionPolicyRevisionId(str(row[12])),
+            qualification_target_id=QualificationTargetId(str(row[13])),
+            acquisition_generation=cast(int, row[14]),
+            qualification_generation=cast(int, row[15]),
+            budget_policy_version=cast(int, row[3]),
+            run_allowance_usd=Decimal(str(row[4])),
+            estimate=ExecutionEstimate(
+                search_queries=cast(int, row[9]),
+                jobs_per_run=max_jobs,
+                logical_model_calls_per_job=cast(int, row[10]),
+                maximum_provider_attempts=cast(int, row[11]),
+            ),
         )
     if str(row[2]) not in {"adopted", "pinned"}:
         raise RuntimeError("Execution reservation has an unknown authority kind")

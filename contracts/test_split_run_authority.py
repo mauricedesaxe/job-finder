@@ -24,6 +24,11 @@ from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import JinaUnavailable, SearchSucceeded
+from job_finder.execution_budget import (
+    ExecutionBlocked,
+    SplitExecutionAdmitted,
+    admit_scheduled_execution,
+)
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
 from job_finder.evaluation.qualification_components import (
     QualificationTargetId,
@@ -133,6 +138,73 @@ def _assert_split_discovery(
     )
     assert discovery.query_count == 1
     assert len(searches) == 1 and searches[0][0] == "split policy"
+
+
+def test_scheduled_split_admission_blocks_until_target_is_active() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _ = connection.execute("TRUNCATE owner_onboarding")
+        _ = connection.execute(
+            "INSERT INTO owner_onboarding (singleton_id, stage) VALUES (1, 'legacy_owner_import')"
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO execution_budget_policy (
+                singleton_id, version, monthly_limit_usd, run_allowance_usd,
+                max_jobs_per_run, max_search_queries_per_run,
+                max_provider_attempts_per_run, updated_at, updated_by
+                ) VALUES (1, 1, 500, 50, 5, 10000, 1000000, %s, 'owner')
+            ON CONFLICT (singleton_id) DO UPDATE SET
+                max_jobs_per_run = 5, max_search_queries_per_run = 10000,
+                max_provider_attempts_per_run = 1000000
+            """,
+            (now,),
+        )
+        root = Path(__file__).resolve().parents[1]
+        with NamedTemporaryFile(dir=root, suffix=".json") as temporary:
+            artifact_path = Path(temporary.name)
+            _ = write_implementation_artifact(root, artifact_path)
+            blocked = admit_scheduled_execution(
+                connection,
+                idempotency_key="scheduled-split",
+                requested_at=now,
+                artifact_path=artifact_path,
+            )
+            assert blocked == ExecutionBlocked(reason="qualification_target_not_active")
+            _, _, target = _store_default_qualification_target(connection, now)
+            target_id = qualification_target_id(target)
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            _ = connection.execute(
+                """
+                UPDATE active_qualification_target
+                SET target_id = %s, generation = 1, activated_at = %s, activated_by = 'owner'
+                WHERE singleton_id = 1
+                """,
+                (target_id, now),
+            )
+            admitted = admit_scheduled_execution(
+                connection,
+                idempotency_key="scheduled-split",
+                requested_at=now,
+                artifact_path=artifact_path,
+            )
+            assert isinstance(admitted, SplitExecutionAdmitted)
+            assert admitted.qualification_target_id == target_id
+            replayed = admit_scheduled_execution(
+                connection, idempotency_key="scheduled-split", requested_at=now
+            )
+            assert replayed == admitted
+            row = connection.execute(
+                """
+                SELECT authority_kind, configuration_revision_id, qualification_target_id,
+                       qualification_generation
+                FROM execution_budget_reservations WHERE idempotency_key = 'scheduled-split'
+                """
+            ).fetchone()
+            assert row == ("split", None, target_id, 1)
 
 
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:
