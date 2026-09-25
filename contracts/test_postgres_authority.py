@@ -54,6 +54,7 @@ from job_finder.benchmarks.promotions import record_prompt_promotion_decision
 from job_finder.benchmarks.qualification_promotions import (
     PromotionEvidenceSelection,
     preview_qualification_promotion,
+    record_qualification_promotion_decision,
 )
 from job_finder.benchmarks.qualification_evidence import (
     FixtureCase,
@@ -343,6 +344,7 @@ EXPECTED_MIGRATIONS = (
     "0042_qualification_prompt_compilations.sql",
     "0043_qualification_provider_attempts.sql",
     "0044_qualification_promotion_authority.sql",
+    "0045_unique_qualification_promotion_pair.sql",
 )
 
 
@@ -803,6 +805,60 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                 connection, baseline_id, candidate_id, selected, artifact_path
             )
             assert preview.eligible and preview.failures == ()
+            approved = record_qualification_promotion_decision(
+                connection,
+                baseline_target_id=baseline_id,
+                candidate_target_id=candidate_id,
+                evidence=selected,
+                artifact_path=artifact_path,
+                decision="approved",
+                reason="Frozen evidence passed",
+                actor="owner",
+                created_at=now,
+                idempotency_key="approved-composite-preview",
+            )
+            assert approved.decision == "approved"
+            assert (
+                record_qualification_promotion_decision(
+                    connection,
+                    baseline_target_id=baseline_id,
+                    candidate_target_id=candidate_id,
+                    evidence=selected,
+                    artifact_path=artifact_path,
+                    decision="approved",
+                    reason="Frozen evidence passed",
+                    actor="owner",
+                    created_at=now,
+                    idempotency_key="approved-composite-preview",
+                )
+                == approved
+            )
+            with pytest.raises(ValueError, match="different promotion decision"):
+                _ = record_qualification_promotion_decision(
+                    connection,
+                    baseline_target_id=baseline_id,
+                    candidate_target_id=candidate_id,
+                    evidence=selected,
+                    artifact_path=artifact_path,
+                    decision="rejected",
+                    reason="Frozen evidence passed",
+                    actor="owner",
+                    created_at=now,
+                    idempotency_key="approved-composite-preview",
+                )
+            with pytest.raises(ValueError, match="already has a promotion decision"):
+                _ = record_qualification_promotion_decision(
+                    connection,
+                    baseline_target_id=baseline_id,
+                    candidate_target_id=candidate_id,
+                    evidence=selected,
+                    artifact_path=artifact_path,
+                    decision="approved",
+                    reason="Frozen evidence passed",
+                    actor="owner",
+                    created_at=now,
+                    idempotency_key="duplicate-composite-preview",
+                )
             missing = preview_qualification_promotion(
                 connection,
                 baseline_id,
@@ -886,6 +942,32 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
             )
             assert not incomparable.eligible
             assert "Changed relevance requires a frozen comparison" in incomparable.failures
+            with pytest.raises(ValueError, match="Ineligible qualification target"):
+                _ = record_qualification_promotion_decision(
+                    connection,
+                    baseline_target_id=baseline_id,
+                    candidate_target_id=relevance_candidate_id,
+                    evidence=selected,
+                    artifact_path=artifact_path,
+                    decision="approved",
+                    reason="Cannot pass",
+                    actor="owner",
+                    created_at=now,
+                    idempotency_key="ineligible-composite-preview",
+                )
+            rejected = record_qualification_promotion_decision(
+                connection,
+                baseline_target_id=baseline_id,
+                candidate_target_id=relevance_candidate_id,
+                evidence=selected,
+                artifact_path=artifact_path,
+                decision="rejected",
+                reason="Missing frozen comparison",
+                actor="owner",
+                created_at=now,
+                idempotency_key="rejected-composite-preview",
+            )
+            assert rejected.decision == "rejected"
 
 
 def _store_default_qualification_target(
