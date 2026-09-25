@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from decimal import Decimal
 from typing import ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 import job_finder.benchmarks.manifests as _benchmark_manifests
+from job_finder.benchmarks.identity import canonical_digest
 from job_finder.evaluation.models import (
     EvaluationOutcome,
     EvaluationResult,
@@ -60,7 +59,7 @@ def score_trial(
 ) -> EvaluationTrialResult:
     actual = evaluation_outcome(result)
     failure = _failure_kind(case.expected_outcome, actual)
-    result_id = _digest(
+    result_id = canonical_digest(
         {"run_id": run_id, "case_position": case.position, "trial_index": trial_index}
     )
     return EvaluationTrialResult(
@@ -132,8 +131,3 @@ def _rate(count: int, denominator: int) -> Decimal:
     if denominator == 0:
         return Decimal(0)
     return (Decimal(count) / Decimal(denominator)).quantize(Decimal("0.0000001"))
-
-
-def _digest(value: object) -> _Digest:
-    content = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(content.encode()).hexdigest()

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer
 import job_finder.benchmarks.manifests as _benchmark_manifests
 import job_finder.benchmarks.scoring as _scoring
 import job_finder.projections.outbox as _projection_outbox
+from job_finder.benchmarks.identity import canonical_digest
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import (
     EvaluationResult,
@@ -246,7 +247,9 @@ def _run_manifest_exclusive(
         observations: list[ProviderRequestObservation] = []
         try:
             evaluator = create_evaluator(exchange_rates, observations.append)
-            run_id = _digest({"kind": "evaluation_run", "idempotency_key": command.idempotency_key})
+            run_id = canonical_digest(
+                {"kind": "evaluation_run", "idempotency_key": command.idempotency_key}
+            )
             results = tuple(
                 _scoring.score_trial(
                     run_id,
@@ -641,11 +644,6 @@ def load_run(connection: _Connection, run_id: _Digest) -> EvaluationRun:
         ),
         completed_at=datetime.fromisoformat(str(row[12])),
     )
-
-
-def _digest(value: object) -> _Digest:
-    content = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def _require_autocommit(connection: _Connection) -> None:

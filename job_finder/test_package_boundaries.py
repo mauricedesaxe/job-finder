@@ -54,6 +54,7 @@ _WEB_PUBLIC_SYMBOLS = {
     ),
 }
 _BENCHMARK_PUBLIC_SYMBOLS = {
+    "identity.py": frozenset({"canonical_digest"}),
     "manifests.py": frozenset(
         {
             "CuratedReviewEvent",
