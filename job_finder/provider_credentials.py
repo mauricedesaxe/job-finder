@@ -417,10 +417,16 @@ def resolve_execution_provider_credentials(
     )
 
 
-def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]:
+def production_provider_validators(
+    *,
+    jina_search_url: str = "https://s.jina.ai/",
+    jina_reader_url: str = "https://r.jina.ai/",
+    openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions",
+    typesafe_url: str = "https://api.typesafe.ai/v1/systemone",
+) -> Mapping[ProviderKind, ProviderValidator]:
     def jina(secret: SecretStr) -> ProviderValidation:
         search, failure = _provider_json_request(
-            "https://s.jina.ai/",
+            jina_search_url,
             secret,
             body={"q": "site:boards.greenhouse.io software engineer"},
         )
@@ -433,7 +439,7 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
         if search_envelope.code != 200:
             return ProviderValidation()
         reader, failure = _provider_json_request(
-            "https://r.jina.ai/",
+            jina_reader_url,
             secret,
             body={"url": "https://example.com"},
         )
@@ -449,7 +455,7 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
 
     def openrouter(secret: SecretStr) -> ProviderValidation:
         response, failure = _provider_json_request(
-            "https://openrouter.ai/api/v1/chat/completions",
+            openrouter_url,
             secret,
             body={
                 "model": "google/gemini-2.5-flash-lite",
@@ -493,7 +499,7 @@ def production_provider_validators() -> Mapping[ProviderKind, ProviderValidator]
 
     def typesafe(secret: SecretStr) -> ProviderValidation:
         response, failure = _provider_json_request(
-            "https://api.typesafe.ai/v1/systemone",
+            typesafe_url,
             secret,
             body={
                 "state": "Provider capability validation.",
