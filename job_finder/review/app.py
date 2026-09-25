@@ -783,7 +783,7 @@ def create_review_app(
                     csrf_token,
                     _work_item_page(detail, csrf_token, notice=notice),
                 ),
-                title="Job work",
+                title="Job",
             )
         )
 
@@ -1646,8 +1646,8 @@ def _activity_content(
             Small("Owner operations", cls="eyebrow"),
             H1("Recent activity"),
             P(
-                "Pipeline runs and job work, newest first. A 0-second orchestration tick "
-                + "is an idle tick — nothing was due.",
+                "A run is one pipeline pass; a job is one listing being worked on. "
+                + "Newest activity appears first.",
                 cls="operations-intro",
             ),
             cls="operations-header",
@@ -1667,10 +1667,25 @@ _ACTIVITY_STATUS_OPTIONS: tuple[tuple[str, str], ...] = (
     ("completed", "Completed"),
     ("failed", "Failed"),
     ("retrying", "Retrying"),
-    ("terminal", "Terminal"),
+    ("terminal", "Needs attention"),
     ("dismissed", "Dismissed"),
 )
-_ACTIVITY_KIND_OPTIONS = ("work", "discovery", "processing", "reconcile", "evaluation")
+_ACTIVITY_KIND_OPTIONS = {
+    "work": "Job",
+    "orchestration": "Scheduler tick",
+    "discovery": "Discovery run",
+    "processing": "Processing run",
+    "reconcile": "Reconciliation run",
+    "evaluation": "Evaluation run",
+}
+
+
+def _run_kind_label(kind: str) -> str:
+    return _ACTIVITY_KIND_OPTIONS.get(kind, f"{kind.replace('_', ' ').title()} run")
+
+
+def _activity_status_label(status: str) -> str:
+    return dict(_ACTIVITY_STATUS_OPTIONS).get(status, status.replace("_", " ").title())
 
 
 def _activity_filter_form(params: QueryParams) -> object:
@@ -1710,11 +1725,11 @@ def _activity_filter_form(params: QueryParams) -> object:
                     Option("Any kind", value="", selected=True if not kind else None),
                     *(
                         Option(
-                            option.title(),
-                            value=option,
-                            selected=True if option == kind else None,
+                            label,
+                            value=value,
+                            selected=True if value == kind else None,
                         )
-                        for option in _ACTIVITY_KIND_OPTIONS
+                        for value, label in _ACTIVITY_KIND_OPTIONS.items()
                     ),
                     name="kind",
                 ),
@@ -1754,7 +1769,7 @@ def _activity_run_row(entry: ActivityEntry, *, now: datetime) -> object:
         elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
         timing = (timestamp(run.started_at, now=now), f" · {_format_duration(elapsed)}")
     headline = (
-        "Idle tick — nothing was due."
+        "Nothing was due."
         if run.idle_tick
         else " · ".join(
             (
@@ -1768,8 +1783,8 @@ def _activity_run_row(entry: ActivityEntry, *, now: datetime) -> object:
         A(
             Div(
                 Div(
-                    Strong(run.kind.replace("_", " ").title()),
-                    Span(entry.status, cls="run-status"),
+                    Strong(_run_kind_label(run.kind)),
+                    Span(_activity_status_label(entry.status), cls="run-status"),
                     cls="row-head",
                 ),
                 Small(*timing),
@@ -1795,13 +1810,13 @@ def _activity_work_row(entry: ActivityEntry, *, now: datetime) -> object:
         A(
             Div(
                 Div(
-                    Strong("Job work"),
-                    Span(entry.status, cls="run-status"),
+                    Strong("Job"),
+                    Span(_activity_status_label(entry.status), cls="run-status"),
                     cls="row-head",
                 ),
                 Small(*timing),
                 P(work.failure_summary, cls="operations-muted") if work.failure_summary else None,
-                Div(Strong("Open work →"), cls="run-link-hint"),
+                Div(Strong("Open job →"), cls="run-link-hint"),
                 cls="run-row",
             ),
             href=f"/operations/work/{work.job_id}",
@@ -1868,15 +1883,15 @@ def _run_detail_page(detail: RunDetail, *, now: datetime) -> object:
     return Div(
         Div(
             Small("Pipeline run", cls="eyebrow"),
-            H1(item.kind.replace("_", " ").title()),
+            H1(_run_kind_label(item.kind)),
             P(
-                Span(item.status, cls="run-status"),
+                Span(_activity_status_label(item.status), cls="run-status"),
                 " · ",
                 *timing,
                 cls="operations-intro",
             ),
             P(
-                "Idle tick — nothing was due, so this run completed instantly."
+                "Nothing was due, so this run completed instantly."
                 if item.idle_tick
                 else " · ".join(
                     (
@@ -2262,7 +2277,7 @@ _WORK_STATE_LABELS = {
     "leased": "Running",
     "failed": "Retrying",
     "completed": "Completed",
-    "terminal_error": "Terminal",
+    "terminal_error": "Needs attention",
 }
 
 
@@ -2278,7 +2293,7 @@ def _work_item_page(
         P(notice, cls="operations-notice", role="status") if notice else None,
         Div(
             Small("Owner operations", cls="eyebrow"),
-            H1("Job work"),
+            H1("Job"),
             P(
                 "Everything recorded for this work item, and the actions you can take on it.",
                 cls="operations-intro",
