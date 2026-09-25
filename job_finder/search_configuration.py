@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, ClassVar, Literal, NewType
 
@@ -10,6 +9,12 @@ import psycopg
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from job_finder.acquisition_policy import (
+    SearchQuery as SearchQuery,
+    build_search_queries as build_search_queries,
+    validate_enabled_sources,
+    validate_search_keywords,
+)
 from job_finder.discovery.catalog import (
     SEARCH_KEYWORDS,
     SEARCH_SOURCE_DOMAINS as SEARCH_SOURCE_DOMAINS,
@@ -17,40 +22,15 @@ from job_finder.discovery.catalog import (
 )
 from job_finder.evaluation.models import PromptReleaseId
 from job_finder.evaluation.prompts import EVALUATION_PROMPTS
+from job_finder.qualification_definition import (
+    PersonalCriterion as PersonalCriterion,
+    TargetProfile as TargetProfile,
+    validate_personal_criteria,
+    validate_target_profiles,
+)
 
 Connection = psycopg.Connection[tuple[object, ...]]
 SearchConfigurationRevisionId = NewType("SearchConfigurationRevisionId", str)
-_BOUNDARY_WHITESPACE = " \t\n\r\f\v"
-_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
-_ASCII_LOWER_TRANSLATION = str.maketrans(_ASCII_UPPER, _ASCII_LOWER)
-ConfigurationKey = Annotated[
-    str,
-    Field(min_length=1, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"),
-]
-
-
-@dataclass(frozen=True, slots=True)
-class SearchQuery:
-    keyword: str
-    domain: str
-
-    @property
-    def text(self) -> str:
-        return f"site:{self.domain} {self.keyword}"
-
-
-def build_search_queries(configuration: SearchConfiguration) -> tuple[SearchQuery, ...]:
-    return tuple(
-        SearchQuery(keyword=keyword, domain=SEARCH_SOURCE_DOMAINS[source])
-        for keyword in configuration.search_keywords
-        for source in configuration.enabled_sources
-    )
-
-
-def _require_database_safe_text(value: str) -> None:
-    if "\x00" in value or any("\ud800" <= character <= "\udfff" for character in value):
-        raise ValueError("Configuration text contains a character PostgreSQL cannot store")
 
 
 class SearchConfigurationError(RuntimeError):
@@ -69,34 +49,6 @@ class SearchConfigurationModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
 
-class PersonalCriterion(SearchConfigurationModel):
-    key: ConfigurationKey
-    name: str = Field(min_length=1, max_length=100)
-    instructions: str = Field(min_length=1, max_length=20_000)
-
-    @field_validator("name", "instructions")
-    @classmethod
-    def text_is_trimmed(cls, value: str) -> str:
-        _require_database_safe_text(value)
-        if value != value.strip(_BOUNDARY_WHITESPACE):
-            raise ValueError("Configuration text cannot start or end with whitespace")
-        return value
-
-
-class TargetProfile(SearchConfigurationModel):
-    key: ConfigurationKey
-    name: str = Field(min_length=1, max_length=100)
-    instructions: str = Field(min_length=1, max_length=20_000)
-
-    @field_validator("name", "instructions")
-    @classmethod
-    def text_is_trimmed(cls, value: str) -> str:
-        _require_database_safe_text(value)
-        if value != value.strip(_BOUNDARY_WHITESPACE):
-            raise ValueError("Configuration text cannot start or end with whitespace")
-        return value
-
-
 class SearchConfiguration(SearchConfigurationModel):
     schema_version: Literal[1] = 1
     search_keywords: Annotated[tuple[str, ...], Field(min_length=1, max_length=100)]
@@ -107,45 +59,28 @@ class SearchConfiguration(SearchConfigurationModel):
     @field_validator("search_keywords")
     @classmethod
     def keywords_are_clean_and_unique(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        for value in values:
-            _require_database_safe_text(value)
-        if any(
-            not value or value != value.strip(_BOUNDARY_WHITESPACE) or len(value) > 200
-            for value in values
-        ):
-            raise ValueError(
-                "Search keywords must be non-empty, trimmed, and at most 200 characters"
-            )
-        if len({value.translate(_ASCII_LOWER_TRANSLATION) for value in values}) != len(values):
-            raise ValueError("Search keywords must be unique")
-        return values
+        return validate_search_keywords(values)
 
     @field_validator("enabled_sources")
     @classmethod
     def sources_are_unique(
         cls, values: tuple[SupportedSearchSource, ...]
     ) -> tuple[SupportedSearchSource, ...]:
-        if len(set(values)) != len(values):
-            raise ValueError("Enabled sources must be unique")
-        return values
+        return validate_enabled_sources(values)
 
     @field_validator("personal_criteria")
     @classmethod
     def criterion_keys_are_unique(
         cls, values: tuple[PersonalCriterion, ...]
     ) -> tuple[PersonalCriterion, ...]:
-        if len({criterion.key for criterion in values}) != len(values):
-            raise ValueError("Personal criterion keys must be unique")
-        return values
+        return validate_personal_criteria(values)
 
     @field_validator("target_profiles")
     @classmethod
     def profile_keys_are_unique(
         cls, values: tuple[TargetProfile, ...]
     ) -> tuple[TargetProfile, ...]:
-        if len({profile.key for profile in values}) != len(values):
-            raise ValueError("Target profile keys must be unique")
-        return values
+        return validate_target_profiles(values)
 
 
 class SearchConfigurationRevision(SearchConfigurationModel):
