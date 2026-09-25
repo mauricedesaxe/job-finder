@@ -182,6 +182,78 @@ def test_owner_can_create_and_inspect_a_qualification_candidate(authority_schema
         assert candidate_id in client.get("/configuration/qualification-targets").text
 
 
+def test_owner_promotion_page_previews_evidence_and_rejects_invalid_activation(
+    authority_schema: str,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(dir=root, prefix=".promotion-ui-", suffix=".json") as artifact_file:
+        artifact_path = Path(artifact_file.name)
+        _ = write_implementation_artifact(root, artifact_path)
+        client, connect = _client_for_schema(authority_schema, artifact_path=artifact_path)
+        with connect() as connection:
+            _ = apply_migrations(connection)
+        candidate_page = client.get("/configuration/qualification-targets")
+        token_match = re.search(r'name="csrf_token" value="([^"]+)"', candidate_page.text)
+        assert token_match is not None
+        token = token_match.group(1)
+        created = client.post(
+            "/configuration/qualification-targets/candidate",
+            data={"csrf_token": token},
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        with connect() as connection:
+            row = connection.execute("SELECT id FROM qualification_targets").fetchone()
+        assert row is not None
+        candidate_id = str(row[0])
+        page = client.get("/configuration/qualification-promotion")
+        assert page.status_code == 200
+        assert candidate_id in page.text
+        assert "No canonical evidence recorded yet" in page.text
+        assert (
+            client.post(
+                "/configuration/qualification-promotion/preview",
+                data={"csrf_token": "invalid"},
+            ).status_code
+            == 403
+        )
+        preview = client.post(
+            "/configuration/qualification-promotion/preview",
+            data={
+                "csrf_token": token,
+                "baseline_target_id": candidate_id,
+                "candidate_target_id": candidate_id,
+            },
+        )
+        assert preview.status_code == 200
+        assert "Evidence is incomplete" in preview.text
+        assert "Candidate is the baseline target" in preview.text
+        decision = client.post(
+            "/configuration/qualification-promotion/decide",
+            data={
+                "csrf_token": token,
+                "baseline_target_id": candidate_id,
+                "candidate_target_id": candidate_id,
+                "decision": "approved",
+                "reason": "Browser contract",
+                "idempotency_key": "same-target-decision",
+            },
+        )
+        assert decision.status_code == 422
+        assert "Candidate is the baseline target" in decision.text
+        activation = client.post(
+            "/configuration/qualification-promotion/activate",
+            data={
+                "csrf_token": token,
+                "idempotency_key": "invalid-activation",
+                "promotion_decision_id": "0" * 64,
+                "expected_generation": "0",
+            },
+        )
+        assert activation.status_code == 422
+        assert "Approved qualification promotion does not exist" in activation.text
+
+
 def test_owner_setup_writes_independent_search_drafts(authority_schema: str) -> None:
     client, connect = _client_for_schema(authority_schema)
     with connect() as connection:

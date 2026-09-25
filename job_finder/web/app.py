@@ -27,6 +27,7 @@ from job_finder.review.configuration import register_configuration_routes
 from job_finder.database import ConnectionFactory
 from job_finder.review.split_configuration import register_split_configuration_routes
 from job_finder.review.qualification_targets import register_qualification_target_routes
+from job_finder.review.qualification_promotions_web import register_qualification_promotion_routes
 from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.review.feedback import ReviewFeedbackService
 from job_finder.review.onboarding import OnboardingProgressService, OnboardingSearchService
@@ -165,6 +166,13 @@ def create_review_app(
             app, connect=split_configuration_connect, actor=actor, now=now
         )
         register_qualification_target_routes(
+            app,
+            connect=split_configuration_connect,
+            artifact_path=settings.split_execution_artifact_path,
+            actor=actor,
+            now=now,
+        )
+        register_qualification_promotion_routes(
             app,
             connect=split_configuration_connect,
             artifact_path=settings.split_execution_artifact_path,
