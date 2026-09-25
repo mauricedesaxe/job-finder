@@ -90,6 +90,15 @@ from job_finder.review.control_plane import (
 )
 from job_finder.review.feedback import ReviewFeedbackService
 from job_finder.review.queue import ReviewQueueService
+from job_finder.pipeline.work_dismissals import (
+    DismissalAction,
+    WorkDismissalActiveLease,
+    WorkDismissalApplied,
+    WorkDismissalCommand,
+    WorkDismissalKeyConflict,
+    WorkDismissalNotFound,
+    WorkDismissalStaleState,
+)
 from job_finder.review.operations import (
     ACTIVITY_STATUSES,
     ActivityEntry,
@@ -98,7 +107,6 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
-    DismissalAction,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
     JobReevaluationCommand,
@@ -112,12 +120,6 @@ from job_finder.review.operations import (
     RunDetail,
     RunNotFound,
     RunsService,
-    WorkDismissalApplied,
-    WorkDismissalActiveLease,
-    WorkDismissalCommand,
-    WorkDismissalKeyConflict,
-    WorkDismissalNotFound,
-    WorkDismissalStaleState,
     WorkRecoveryActiveLease,
     WorkRecoveryApplied,
     WorkRecoveryCommand,

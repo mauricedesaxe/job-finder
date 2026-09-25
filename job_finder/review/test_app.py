@@ -74,6 +74,11 @@ from job_finder.review.queue import (
     ReviewQueue,
     ReviewQueueService,
 )
+from job_finder.pipeline.work_dismissals import (
+    WorkDismissalApplied,
+    WorkDismissalCommand,
+    WorkDismissalReceipt,
+)
 from job_finder.review.operations import (
     ActivityEntry,
     ActivityPage,
@@ -94,9 +99,6 @@ from job_finder.review.operations import (
     RunAttemptSummary,
     RecoveryOutcome,
     SpendSummary,
-    WorkDismissalApplied,
-    WorkDismissalCommand,
-    WorkDismissalReceipt,
     RunDetail,
     RunListItem,
     RunsService,
