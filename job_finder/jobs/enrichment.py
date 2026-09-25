@@ -11,6 +11,7 @@ from job_finder.evaluation.models import (
 )
 from job_finder.evaluation.openrouter import (
     ChatCompletionSender,
+    GenerationSender,
     ModelCallPersistence,
     RetryPolicy,
     invoke_prompt,
@@ -35,6 +36,7 @@ def enrich_job(
     *,
     api_key: str,
     sender: ChatCompletionSender | None = None,
+    generation_sender: GenerationSender | None = None,
     retry_policy: RetryPolicy | None = None,
 ) -> PromptAccepted[EnrichedJob] | OperationalFailure:
     values = enrichment_values(job)
@@ -46,6 +48,7 @@ def enrich_job(
         EnrichedJob,
         api_key=api_key,
         sender=sender,
+        generation_sender=generation_sender,
         retry_policy=retry_policy,
     )
 

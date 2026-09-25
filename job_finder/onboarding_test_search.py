@@ -27,6 +27,7 @@ Connection = psycopg.Connection[tuple[object, ...]]
 RESERVATION_KEY_PREFIX = "onboarding-test-search:"
 URLS_PER_JOB = 4
 ONBOARDING_TEST_SEARCH_NAMESPACE = uuid5(NAMESPACE_URL, "job-finder:onboarding-test-search")
+_DEFAULT_PROVIDER_RETRYABLE_STATUSES = frozenset({429})
 
 
 class OnboardingTestSearchModel(BaseModel):
@@ -455,6 +456,7 @@ def prepare_onboarding_provider_dispatch(
     provider: Literal["openrouter", "typesafe"],
     body_digest: str,
     attempted_at: datetime,
+    retryable_statuses: frozenset[int] = _DEFAULT_PROVIDER_RETRYABLE_STATUSES,
 ) -> OnboardingProviderDispatch:
     _require_autocommit(connection)
     with connection.transaction():
@@ -475,7 +477,7 @@ def prepare_onboarding_provider_dispatch(
                 raise OnboardingProviderOutcomeUnknown(
                     "A previous provider request has no recorded response"
                 )
-            if cast(int, prior[2]) != 429:
+            if cast(int, prior[2]) not in retryable_statuses:
                 return OnboardingProviderDispatch(
                     attempt_number=cast(int, prior[0]),
                     cached_status_code=cast(int, prior[2]),
