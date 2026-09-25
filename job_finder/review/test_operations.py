@@ -276,11 +276,26 @@ def test_activity_entries_map_to_one_unified_status(
     assert entry.status == expected
 
 
-def test_activity_query_rejects_unknown_statuses_and_limits() -> None:
+def test_activity_query_rejects_unknown_statuses_limits_and_cursors() -> None:
     with pytest.raises(ValueError):
         ActivityQuery(statuses=frozenset({"exploded"}))
     with pytest.raises(ValueError):
         ActivityQuery(limit=0)
+    with pytest.raises(ValueError):
+        ActivityQuery(cursor="broken-cursor")
+
+
+def test_activity_query_accepts_a_round_tripped_cursor() -> None:
+    entry = ActivityEntry(
+        occurred_at=NOW,
+        ref=str(UUID(int=7)),
+        item=_activity_run("completed"),
+    )
+
+    query = ActivityQuery(limit=3, cursor=encode_activity_cursor(entry))
+
+    assert query.cursor is not None
+    assert decode_activity_cursor(query.cursor) == (NOW, "run", str(UUID(int=7)))
 
 
 def test_activity_cursor_round_trips_through_encoding() -> None:
