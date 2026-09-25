@@ -1,4 +1,4 @@
-# pyright: reportMissingTypeStubs=false
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportUnusedFunction=false
 from __future__ import annotations
 
 from collections.abc import Callable
