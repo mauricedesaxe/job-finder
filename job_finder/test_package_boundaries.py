@@ -9,6 +9,7 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/dagster.py", "dagster"),
     ("job_finder/mcp_server.py", "fastmcp"),
     ("job_finder/mcp_tools/acquisition.py", "fastmcp"),
+    ("job_finder/mcp_tools/qualification.py", "fastmcp"),
     ("job_finder/mcp_tools/benchmarks.py", "fastmcp"),
     ("job_finder/mcp_tools/common.py", "mcp"),
     ("job_finder/mcp_tools/configuration.py", "fastmcp"),
