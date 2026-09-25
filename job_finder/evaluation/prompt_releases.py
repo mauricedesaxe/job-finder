@@ -30,6 +30,7 @@ from job_finder.evaluation.prompts import (
 )
 
 if TYPE_CHECKING:
+    from job_finder.qualification_definition import QualificationDefinition
     from job_finder.search_configuration import SearchConfiguration
 
 RELEASE_NAME = "release-2026-09-14-1"
@@ -141,7 +142,9 @@ class PromptRelease(PromptModel):
         raise PromptReleaseError(f"Prompt release {self.name} does not contain {name}")
 
 
-def build_prompt_release(configuration: SearchConfiguration | None = None) -> PromptRelease:
+def build_prompt_release(
+    configuration: SearchConfiguration | QualificationDefinition | None = None,
+) -> PromptRelease:
     prompts = PROMPTS if configuration is None else _configured_prompts(configuration)
     versions = tuple(build_prompt_version(prompt) for prompt in prompts)
     digest = _digest([[version.definition.name, version.id] for version in versions])
@@ -176,7 +179,9 @@ def build_work_culture_candidate_release(baseline: PromptRelease) -> PromptRelea
     )
 
 
-def _configured_prompts(configuration: SearchConfiguration) -> tuple[PromptDefinition, ...]:
+def _configured_prompts(
+    configuration: SearchConfiguration | QualificationDefinition,
+) -> tuple[PromptDefinition, ...]:
     filters = tuple(
         _configured_prompt("filter", criterion.key, criterion.instructions)
         for criterion in configuration.personal_criteria
