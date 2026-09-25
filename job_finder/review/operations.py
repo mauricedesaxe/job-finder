@@ -714,6 +714,8 @@ class ActivityQuery:
             raise ValueError(f"Unknown activity statuses: {sorted(unknown)}")
         if self.limit < 1:
             raise ValueError("Activity page limit must be positive")
+        if self.cursor is not None:
+            decode_activity_cursor(self.cursor)
 
 
 @dataclass(frozen=True)
