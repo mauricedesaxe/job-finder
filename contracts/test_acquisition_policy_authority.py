@@ -9,6 +9,11 @@ import pytest
 from psycopg import sql
 
 from job_finder.acquisition_policy import acquisition_policy_revision_id
+from job_finder.acquisition_policy_activation import (
+    ActivateAcquisitionPolicyCommand,
+    AcquisitionActivationError,
+    activate_acquisition_policy,
+)
 from job_finder.acquisition_policy_service import (
     AcquisitionDraftChanged,
     AcquisitionDraftSaved,
@@ -120,3 +125,74 @@ def test_acquisition_draft_edits_are_independent_and_optimistic(authority_schema
             ).fetchone()
             == before_legacy
         )
+
+
+def test_acquisition_activation_requires_publication_and_replays_cas(
+    authority_schema: str,
+) -> None:
+    settings = PostgresContractSettings.from_environment()
+    with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+        _ = connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(authority_schema))
+        )
+        _ = apply_migrations(connection)
+        active = get_active_acquisition_policy(connection)
+        draft = get_acquisition_policy_draft(connection)
+        updated = draft.policy.model_copy(
+            update={"search_keywords": (*draft.policy.search_keywords, "site reliability engineer")}
+        )
+        saved = replace_acquisition_policy_draft(
+            connection,
+            ReplaceAcquisitionPolicyDraftCommand(
+                expected_base_revision_id=draft.base_revision_id,
+                expected_version=draft.version,
+                policy=updated,
+                actor="owner",
+                timestamp=datetime(2026, 9, 25, tzinfo=UTC),
+            ),
+        )
+        assert isinstance(saved, AcquisitionDraftSaved)
+        candidate_id = acquisition_policy_revision_id(updated)
+        _ = publish_acquisition_policy(
+            connection,
+            PublishAcquisitionPolicyCommand(
+                idempotency_key="publish-before-activation",
+                expected_draft_version=saved.draft.version,
+                expected_revision_id=candidate_id,
+                actor="owner",
+                timestamp=datetime(2026, 9, 25, tzinfo=UTC),
+            ),
+        )
+        activate = ActivateAcquisitionPolicyCommand(
+            idempotency_key="activate-acquisition-policy",
+            candidate_revision_id=candidate_id,
+            expected_revision_id=active.revision.id,
+            expected_generation=active.generation,
+            actor="owner",
+            timestamp=datetime(2026, 9, 25, tzinfo=UTC),
+        )
+        receipt = activate_acquisition_policy(connection, activate)
+        assert receipt.outcome == "activated"
+        assert receipt.observed_revision_id == active.revision.id
+        assert receipt.resulting_generation == active.generation + 1
+        assert get_active_acquisition_policy(connection).revision.id == candidate_id
+        assert activate_acquisition_policy(connection, activate).replayed
+        with pytest.raises(AcquisitionActivationError, match="another acquisition activation"):
+            _ = activate_acquisition_policy(
+                connection, activate.model_copy(update={"actor": "different"})
+            )
+        stale_activate = activate.model_copy(update={"idempotency_key": "stale-acquisition"})
+        stale_receipt = activate_acquisition_policy(connection, stale_activate)
+        assert stale_receipt.outcome == "active_changed"
+        assert stale_receipt.resulting_generation == active.generation + 1
+        assert activate_acquisition_policy(connection, stale_activate).replayed
+        with pytest.raises(AcquisitionActivationError, match="not published"):
+            _ = activate_acquisition_policy(
+                connection,
+                activate.model_copy(
+                    update={
+                        "idempotency_key": "unpublished-acquisition",
+                        "candidate_revision_id": "e" * 64,
+                    }
+                ),
+            )
