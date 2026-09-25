@@ -19,7 +19,8 @@ from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
 from job_finder.configuration_service import load_published_active_search_configuration
-from job_finder.pipeline.state import claim_next_job, prepare_orchestration_run
+from job_finder.pipeline.state import claim_next_job
+from job_finder.pipeline.runs import prepare_orchestration_run
 from job_finder.review.analytics import load_spend_analytics
 from job_finder.review.operations import (
     ActivityPage,
