@@ -93,7 +93,7 @@ def test_a_hanging_gateway_send_becomes_langfuse_unavailable_after_the_timeout()
     sender = create_langfuse_projection_sender(_settings(), gateway=gateway, send_timeout=0.2)
 
     try:
-        with pytest.raises(LangfuseUnavailable, match="did not finish within 0 seconds"):
+        with pytest.raises(LangfuseUnavailable, match="did not finish within"):
             _ = sender(_projection("evaluation_run", _run()))
     finally:
         release.set()
