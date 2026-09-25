@@ -7,6 +7,7 @@ import base64
 import json
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -17,6 +18,12 @@ REPO = "mauricedesaxe/job-finder"
 ROLES = ("dagster-webserver", "dagster-daemon", "review")
 DATABASE_URL = "${{Postgres.DATABASE_URL}}"
 DAGSTER_URL = "http://${{dagster-webserver.RAILWAY_PRIVATE_DOMAIN}}:3000/graphql"
+
+
+def output(message: str, *, flush: bool = False) -> None:
+    _ = sys.stdout.write(f"{message}\n")
+    if flush:
+        sys.stdout.flush()
 
 
 def railway(*args: str, cwd: Path, stdin: str | None = None) -> str:
@@ -199,6 +206,61 @@ def wait_for_deployment(project_id: str, environment_id: str, service: str, cwd:
     raise TimeoutError(f"{service} did not become healthy within 15 minutes")
 
 
+def configure_variables(
+    project_id: str, environment_id: str, ids: dict[str, str], cwd: Path
+) -> str:
+    bootstrap_token = secrets.token_urlsafe(32)
+    session_secret = secrets.token_urlsafe(48)
+    encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+    for role in ROLES:
+        set_variable(project_id, environment_id, role, "JOB_FINDER_POSTGRES_DSN", DATABASE_URL, cwd)
+        set_variable(
+            project_id, environment_id, role, "JOB_FINDER_ENABLE_SPLIT_EXECUTION", "true", cwd
+        )
+        if role != "review":
+            set_variable(
+                project_id,
+                environment_id,
+                role,
+                "JOB_FINDER_DAGSTER_POSTGRES_DSN",
+                f"{DATABASE_URL}?options=-csearch_path%3Ddagster",
+                cwd,
+            )
+        set_variable(
+            project_id,
+            environment_id,
+            role,
+            "JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY",
+            encryption_key,
+            cwd,
+        )
+        configure_role(project_id, environment_id, ids[role], role, cwd)
+    set_variable(
+        project_id, environment_id, "review", "JOB_FINDER_DAGSTER_GRAPHQL_URL", DAGSTER_URL, cwd
+    )
+    set_variable(project_id, environment_id, "dagster-webserver", "PORT", "3000", cwd)
+    set_variable(
+        project_id,
+        environment_id,
+        "review",
+        "JOB_FINDER_REVIEW_SESSION_SECRET",
+        session_secret,
+        cwd,
+    )
+    set_variable(
+        project_id,
+        environment_id,
+        "review",
+        "JOB_FINDER_BOOTSTRAP_TOKEN",
+        bootstrap_token,
+        cwd,
+    )
+    set_variable(
+        project_id, environment_id, "review", "JOB_FINDER_REVIEW_COOKIE_SECURE", "true", cwd
+    )
+    return bootstrap_token
+
+
 def deploy(name: str, workspace: str, repo: str, branch: str, existing_project: str | None) -> None:
     if not 1 <= len(name) <= 32:
         raise ValueError("Railway project names must be between 1 and 32 characters")
@@ -216,7 +278,7 @@ def deploy(name: str, workspace: str, repo: str, branch: str, existing_project: 
         environment_id = string_field(linked, "environmentId")
         if string_field(linked, "projectName") != name:
             raise ValueError("The selected Railway project has a different name")
-        print(f"Railway project: https://railway.com/project/{project_id}", flush=True)
+        output(f"Railway project: https://railway.com/project/{project_id}", flush=True)
 
         if service_ids(project_id, environment_id, cwd):
             raise RuntimeError("Project already has services; refusing to replace existing secrets")
@@ -226,53 +288,9 @@ def deploy(name: str, workspace: str, repo: str, branch: str, existing_project: 
             _ = railway_json("add", "--service", role, cwd=cwd)
         ids = service_ids(project_id, environment_id, cwd)
 
-        bootstrap_token = secrets.token_urlsafe(32)
-        session_secret = secrets.token_urlsafe(48)
-        encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
-        for role in ROLES:
-            set_variable(
-                project_id, environment_id, role, "JOB_FINDER_POSTGRES_DSN", DATABASE_URL, cwd
-            )
-            if role != "review":
-                set_variable(
-                    project_id,
-                    environment_id,
-                    role,
-                    "JOB_FINDER_DAGSTER_POSTGRES_DSN",
-                    f"{DATABASE_URL}?options=-csearch_path%3Ddagster",
-                    cwd,
-                )
-            configure_role(project_id, environment_id, ids[role], role, cwd)
+        bootstrap_token = configure_variables(project_id, environment_id, ids, cwd)
 
-        set_variable(
-            project_id, environment_id, "review", "JOB_FINDER_DAGSTER_GRAPHQL_URL", DAGSTER_URL, cwd
-        )
-        set_variable(project_id, environment_id, "dagster-webserver", "PORT", "3000", cwd)
-        set_variable(
-            project_id,
-            environment_id,
-            "review",
-            "JOB_FINDER_REVIEW_SESSION_SECRET",
-            session_secret,
-            cwd,
-        )
-        set_variable(
-            project_id, environment_id, "review", "JOB_FINDER_BOOTSTRAP_TOKEN", bootstrap_token, cwd
-        )
-        for role in ROLES:
-            set_variable(
-                project_id,
-                environment_id,
-                role,
-                "JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY",
-                encryption_key,
-                cwd,
-            )
-        set_variable(
-            project_id, environment_id, "review", "JOB_FINDER_REVIEW_COOKIE_SECURE", "true", cwd
-        )
-
-        print("Provisioned private services. Connecting the application source…", flush=True)
+        output("Provisioned private services. Connecting the application source…", flush=True)
         for role in ROLES:
             _ = railway(
                 "service",
@@ -304,16 +322,16 @@ def deploy(name: str, workspace: str, repo: str, branch: str, existing_project: 
             cwd=cwd,
         )
         for role in ROLES:
-            print(f"Waiting for {role}…", flush=True)
+            output(f"Waiting for {role}…", flush=True)
             wait_for_deployment(project_id, environment_id, role, cwd)
 
         review_domain = string_field(domain, "domain")
         review_url = (
             review_domain if review_domain.startswith("https://") else f"https://{review_domain}"
         )
-        print(f"Review app: {review_url}")
-        print(f"Owner bootstrap token: {bootstrap_token}")
-        print("Open the review app with the owner and finish setup in the browser.")
+        output(f"Review app: {review_url}")
+        output(f"Owner bootstrap token: {bootstrap_token}")
+        output("Open the review app with the owner and finish setup in the browser.")
 
 
 def main() -> None:
