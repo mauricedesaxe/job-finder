@@ -108,6 +108,7 @@ from job_finder.evaluation.qualification_components import (
     RelevanceContent,
     QualificationTargetContent,
     build_qualification_target,
+    load_qualification_target,
     qualification_target_id,
     store_component_release,
     store_qualification_target,
@@ -649,6 +650,15 @@ def test_qualification_target_requires_four_components_from_one_artifact(
         artifact, components, target = _store_default_qualification_target(connection, now)
         input_preparation, relevance, enrichment, deduplication = components
         target_id = qualification_target_id(target)
+        resolved = load_qualification_target(connection, target_id)
+        assert resolved.content == target
+        assert resolved.artifact == artifact
+        assert (
+            resolved.input_preparation,
+            resolved.relevance,
+            resolved.enrichment,
+            resolved.deduplication,
+        ) == components
         assert connection.execute(
             "SELECT count(*) FROM qualification_targets WHERE id = %s", (target_id,)
         ).fetchone() == (1,)

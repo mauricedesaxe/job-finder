@@ -9,6 +9,7 @@ from job_finder.evaluation.implementation_artifacts import (
     ImplementationArtifact,
     build_implementation_artifact,
     load_implementation_artifact,
+    verify_implementation_artifact,
     write_implementation_artifact,
 )
 
@@ -25,9 +26,12 @@ def test_build_artifact_identifies_source_and_dependency_closure(tmp_path: Path)
 
     first = write_implementation_artifact(tmp_path, tmp_path / "artifact.json")
     assert load_implementation_artifact(tmp_path / "artifact.json") == first
+    assert verify_implementation_artifact(tmp_path / "artifact.json") == first
     assert build_implementation_artifact(tmp_path).id == first.id
 
     source.write_text("result = 2\n")
+    with pytest.raises(ValueError, match="Executing implementation differs"):
+        _ = verify_implementation_artifact(tmp_path / "artifact.json")
     second = build_implementation_artifact(tmp_path)
     assert second.id != first.id
 
