@@ -22,7 +22,7 @@ import pytest
 from fastmcp import Client
 from psycopg import sql
 from psycopg.types.json import Jsonb
-from pydantic import JsonValue, SecretStr
+from pydantic import JsonValue, SecretStr, TypeAdapter
 
 import job_finder.configuration_service as configuration_service_module
 import job_finder.evaluation.manifest_execution as manifest_execution_module
@@ -63,6 +63,10 @@ from job_finder.benchmarks.qualification_evidence import (
 )
 from job_finder.benchmarks.input_preparation_execution import (
     execute_input_preparation_fixture_set,
+)
+from job_finder.benchmarks.provider_attempts import (
+    provider_attempt_evidence,
+    store_provider_attempts,
 )
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
@@ -325,6 +329,7 @@ EXPECTED_MIGRATIONS = (
     "0040_qualification_components.sql",
     "0041_qualification_evidence.sql",
     "0042_qualification_prompt_compilations.sql",
+    "0043_qualification_provider_attempts.sql",
 )
 
 
@@ -895,6 +900,120 @@ def test_input_preparation_fixtures_execute_shared_production_path(
             assert evidence.outcome == "passed"
             assert evidence.result["case_count"] == 2
             assert evidence.result["passed_count"] == 2
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_qualification_provider_attempts_retain_raw_model_provenance(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        fixture_id = store_fixture_set(
+            connection,
+            PhaseFixtureSet(
+                phase="enrichment",
+                cases=(FixtureCase(input={}, expected={}, input_path="direct"),),
+            ),
+            created_at=now,
+            created_by="owner",
+        )
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            release_id = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
+            prompt = next(
+                version
+                for version in compiled.prompt_release.versions
+                if version.definition.phase == "enrichment"
+            )
+            attempt = ModelCallAttempt(
+                id=uuid4(),
+                context=ModelCallContext(
+                    processing_attempt_id=uuid4(),
+                    pipeline_run_id=uuid4(),
+                    prompt_release_id=release_id,
+                    operation_key="benchmark:enrichment",
+                    input_digest=InputDigest("a" * 64),
+                ),
+                request_id=ModelRequestId("b" * 64),
+                attempt_number=0,
+                prompt_name=prompt.definition.name,
+                prompt_version_id=prompt.id,
+                requested_model="fixture-model",
+                response_model="observed-model",
+                provider_response_id="response-1",
+                status="accepted",
+                parsed_output={"company": "Acme"},
+                raw_response={"choices": [{"message": {"content": "Acme"}}]},
+                input_tokens=12,
+                output_tokens=4,
+                cost_usd=Decimal("0.000001"),
+                latency_ms=27,
+                error=None,
+                observed_at=now,
+                request_messages=({"role": "user", "content": "source listing"},),
+            )
+            evidence = QualificationEvidence(
+                target_id=target_id,
+                phase="enrichment",
+                component_release_id=target.enrichment_release_id,
+                fixture_set_id=fixture_id,
+                executor_artifact_id=artifact.id,
+                origin="canonical",
+                outcome="passed",
+                result={"case_count": 1},
+                attempts=(provider_attempt_evidence(attempt),),
+                completed_at=now,
+            )
+            evidence_id = store_qualification_evidence(
+                connection, evidence, created_at=now, created_by="owner"
+            )
+            store_provider_attempts(
+                connection,
+                evidence,
+                (attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_provider_attempts WHERE evidence_id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            content = TypeAdapter(dict[str, JsonValue]).validate_python(row[0])
+            assert content["request_messages"] == [{"role": "user", "content": "source listing"}]
+            assert content["raw_response"] == attempt.raw_response
+            assert content["input_tokens"] == 12
+            synthetic_evidence = evidence.model_copy(update={"origin": "synthetic"})
+            _ = store_qualification_evidence(
+                connection, synthetic_evidence, created_at=now, created_by="owner"
+            )
+            synthetic_attempt = replace(attempt, id=uuid4(), request_id=ModelRequestId("c" * 64))
+            store_provider_attempts(
+                connection,
+                synthetic_evidence,
+                (synthetic_attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            with pytest.raises(ValueError, match="summaries differ"):
+                store_provider_attempts(
+                    connection,
+                    evidence.model_copy(update={"attempts": ()}),
+                    (attempt,),
+                    provider="openrouter",
+                    created_at=now,
+                    created_by="owner",
+                )
         finally:
             artifact_path.unlink(missing_ok=True)
 
