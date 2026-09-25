@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import re
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 import psycopg
@@ -20,6 +21,7 @@ from job_finder.config import PostgresContractSettings, ReviewAppSettings
 from job_finder.database import apply_migrations
 from job_finder.database import ConnectionFactory
 from job_finder.discovery.catalog import SupportedSearchSource
+from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.feedback import postgres_review_feedback_service
 from job_finder.review.owner_access import (
@@ -48,7 +50,9 @@ def authority_schema() -> Iterator[str]:
             )
 
 
-def _client_for_schema(authority_schema: str) -> tuple[TestClient, ConnectionFactory]:
+def _client_for_schema(
+    authority_schema: str, *, artifact_path: Path | None = None
+) -> tuple[TestClient, ConnectionFactory]:
     settings = PostgresContractSettings.from_environment()
 
     def connect() -> psycopg.Connection[tuple[object, ...]]:
@@ -70,7 +74,7 @@ def _client_for_schema(authority_schema: str) -> tuple[TestClient, ConnectionFac
         ReviewAppSettings(
             session_secret="s" * 32,
             cookie_secure=False,
-            split_execution_artifact_path=Path("/unused/artifact.json"),
+            split_execution_artifact_path=artifact_path or Path("/unused/artifact.json"),
         ),
         feedback_service=postgres_review_feedback_service(connect),
         owner_access_service=owner,
@@ -142,6 +146,40 @@ def _publish_and_continue(
         assert connection.execute(
             "SELECT stage FROM owner_onboarding WHERE singleton_id = 1"
         ).fetchone() == ("budget",)
+
+
+def test_owner_can_create_and_inspect_a_qualification_candidate(authority_schema: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(dir=root, prefix=".target-ui-", suffix=".json") as artifact_file:
+        artifact_path = Path(artifact_file.name)
+        _ = write_implementation_artifact(root, artifact_path)
+        client, connect = _client_for_schema(authority_schema, artifact_path=artifact_path)
+        with connect() as connection:
+            _ = apply_migrations(connection)
+        page = client.get("/configuration/qualification-targets")
+        assert page.status_code == 200
+        assert "No candidates yet" in page.text
+        token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert token_match is not None
+        token = token_match.group(1)
+        assert (
+            client.post(
+                "/configuration/qualification-targets/candidate",
+                data={"csrf_token": "invalid"},
+            ).status_code
+            == 403
+        )
+        created = client.post(
+            "/configuration/qualification-targets/candidate",
+            data={"csrf_token": token},
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        with connect() as connection:
+            row = connection.execute("SELECT id FROM qualification_targets").fetchone()
+        assert row is not None
+        candidate_id = str(row[0])
+        assert candidate_id in client.get("/configuration/qualification-targets").text
 
 
 def test_owner_setup_writes_independent_search_drafts(authority_schema: str) -> None:
