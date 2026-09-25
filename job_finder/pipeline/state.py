@@ -60,6 +60,7 @@ class OrchestrationRun(PipelineStateModel):
 class DiscoveryRegistration(PipelineStateModel):
     discovered_count: int = Field(ge=0)
     new_work_count: int = Field(ge=0)
+    processed_url_count: int = Field(default=0, ge=0)
 
 
 class JobWorkClaim(PipelineStateModel):
@@ -68,6 +69,7 @@ class JobWorkClaim(PipelineStateModel):
     keyword: str
     owner_token: UUID
     attempt_count: int = Field(gt=0)
+    attempt_limit: int = Field(default=JOB_WORK_ATTEMPT_LIMIT, gt=0)
     lease_expires_at: datetime
     reevaluation_request_key: str | None = None
     source_snapshot_id: str | None = None
@@ -262,12 +264,19 @@ def register_discoveries(
     raw_urls: tuple[str, ...],
     discovered_at: datetime,
     onboarding_request_key: str | None = None,
+    max_new_work: int | None = None,
 ) -> DiscoveryRegistration:
     _require_autocommit(connection)
+    if max_new_work is not None and max_new_work < 0:
+        raise ValueError("Maximum new work must be nonnegative")
     discovered_count = 0
     new_work_count = 0
+    processed_url_count = 0
     with connection.transaction():
         for raw_url in raw_urls:
+            if max_new_work is not None and new_work_count >= max_new_work:
+                break
+            processed_url_count += 1
             job_id = job_id_for_url(raw_url)
             inserted_job = connection.execute(
                 """
@@ -318,6 +327,7 @@ def register_discoveries(
     return DiscoveryRegistration(
         discovered_count=discovered_count,
         new_work_count=new_work_count,
+        processed_url_count=processed_url_count,
     )
 
 
@@ -328,10 +338,13 @@ def claim_next_job(
     claimed_at: datetime,
     lease_for: timedelta,
     onboarding_request_key: str | None = None,
+    attempt_limit: int = JOB_WORK_ATTEMPT_LIMIT,
 ) -> JobWorkClaim | None:
     _require_autocommit(connection)
     if lease_for <= timedelta(0):
         raise ValueError("Job claim lease must be positive")
+    if attempt_limit < 1:
+        raise ValueError("Job attempt limit must be positive")
     with connection.transaction():
         exhausted_rows = connection.execute(
             """
@@ -361,7 +374,7 @@ def claim_next_job(
                         "retryability": "retryable",
                     }
                 ),
-                JOB_WORK_ATTEMPT_LIMIT,
+                attempt_limit,
                 onboarding_request_key,
                 claimed_at,
                 claimed_at,
@@ -402,7 +415,7 @@ def claim_next_job(
                       item.lease_expires_at, item.active_reevaluation_key
             """,
             (
-                JOB_WORK_ATTEMPT_LIMIT,
+                attempt_limit,
                 onboarding_request_key,
                 claimed_at,
                 claimed_at,
@@ -431,6 +444,7 @@ def claim_next_job(
             "keyword": row[2],
             "owner_token": owner_token,
             "attempt_count": row[3],
+            "attempt_limit": attempt_limit,
             "lease_expires_at": row[4],
             "reevaluation_request_key": row[5],
             "source_snapshot_id": None if reevaluation is None else reevaluation[0],
@@ -484,7 +498,7 @@ def fail_job_claim(
     _require_autocommit(connection)
     if retry_after < timedelta(0):
         raise ValueError("Job retry delay cannot be negative")
-    exhausted = claim.attempt_count >= JOB_WORK_ATTEMPT_LIMIT
+    exhausted = claim.attempt_count >= claim.attempt_limit
     with connection.transaction():
         changed = connection.execute(
             """

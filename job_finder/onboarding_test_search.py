@@ -16,10 +16,16 @@ from job_finder.execution_budget import (
     ExecutionBudgetPolicy,
     admit_onboarding_test_execution,
     estimate_execution,
+    settle_execution_budget,
 )
 from job_finder.pipeline.state import JOB_WORK_ATTEMPT_LIMIT
 from job_finder.review.owner_access import OnboardingStage
-from job_finder.search_configuration import SearchConfiguration, SearchConfigurationRevisionId
+from job_finder.search_configuration import (
+    SearchConfiguration,
+    SearchConfigurationRevisionId,
+    SearchQuery,
+)
+from job_finder.pipeline.state import DiscoveryRegistration, register_discoveries
 
 Connection = psycopg.Connection[tuple[object, ...]]
 RESERVATION_KEY_PREFIX = "onboarding-test-search:"
@@ -74,6 +80,7 @@ class OnboardingTestSearchRequest(OnboardingTestSearchModel):
     budget_reservation_key: str = Field(min_length=1)
     limits: OnboardingTestSearchLimits
     attempt_count: int = Field(ge=0)
+    provider_attempt_count: int = Field(ge=0)
     owner_token: UUID | None
     lease_expires_at: datetime | None
     error_code: str | None
@@ -90,6 +97,22 @@ class OnboardingTestSearchAccepted(OnboardingTestSearchModel):
 
 
 CreateOnboardingTestSearchResult: TypeAlias = OnboardingTestSearchAccepted | ExecutionBlocked
+
+
+class OnboardingProviderAttemptLimit(RuntimeError):
+    pass
+
+
+class OnboardingProviderOutcomeUnknown(RuntimeError):
+    pass
+
+
+class OnboardingProviderDispatch(OnboardingTestSearchModel):
+    attempt_number: int = Field(ge=1)
+    cached_status_code: int | None = None
+    cached_body: str | None = None
+    cached_provider_response_id: str | None = None
+    cached_retry_after_seconds: float | None = None
 
 
 def onboarding_test_search_run_id(idempotency_key: str) -> UUID:
@@ -216,7 +239,7 @@ def claim_next_onboarding_test_search(
     if lease_for <= timedelta(0):
         raise ValueError("Onboarding test search lease must be positive")
     with connection.transaction():
-        _ = connection.execute(
+        exhausted = connection.execute(
             """
             UPDATE onboarding_test_search_requests
             SET state = 'failed',
@@ -231,9 +254,26 @@ def claim_next_onboarding_test_search(
                 state = 'pending'
                 OR (state = 'leased' AND lease_expires_at <= %s)
               )
+            RETURNING idempotency_key, run_id, budget_reservation_key,
+                      provider_attempt_count
             """,
             (claimed_at, claimed_at, claimed_at),
-        )
+        ).fetchall()
+        for exhausted_row in exhausted:
+            queried = connection.execute(
+                "SELECT 1 FROM onboarding_search_queries WHERE request_key = %s LIMIT 1",
+                (exhausted_row[0],),
+            ).fetchone()
+            run_row = connection.execute(
+                "SELECT id FROM pipeline_runs WHERE id = %s", (exhausted_row[1],)
+            ).fetchone()
+            settle_execution_budget(
+                connection,
+                idempotency_key=str(exhausted_row[2]),
+                pipeline_run_id=None if run_row is None else cast(UUID, run_row[0]),
+                settled_at=claimed_at,
+                consume_allowance=queried is not None or cast(int, exhausted_row[3]) > 0,
+            )
         row = connection.execute(
             """
             WITH candidate AS (
@@ -312,6 +352,270 @@ def load_onboarding_test_search(
     return _load_request(connection, idempotency_key)
 
 
+def renew_onboarding_test_search_lease(
+    connection: Connection,
+    *,
+    request_key: str,
+    owner_token: UUID,
+    renewed_at: datetime,
+    lease_for: timedelta,
+) -> bool:
+    _require_autocommit(connection)
+    if lease_for <= timedelta(0):
+        raise ValueError("Onboarding test search lease must be positive")
+    with connection.transaction():
+        changed = connection.execute(
+            """
+            UPDATE onboarding_test_search_requests
+            SET lease_expires_at = %s, updated_at = %s
+            WHERE idempotency_key = %s AND state = 'leased' AND owner_token = %s
+              AND lease_expires_at > %s
+            """,
+            (renewed_at + lease_for, renewed_at, request_key, owner_token, renewed_at),
+        ).rowcount
+    return changed == 1
+
+
+def reserve_onboarding_search_query(
+    connection: Connection,
+    *,
+    request: OnboardingTestSearchRequest,
+    owner_token: UUID,
+    ordinal: int,
+    query: SearchQuery,
+    reserved_at: datetime,
+) -> bool:
+    _require_autocommit(connection)
+    with connection.transaction():
+        _require_live_lease(connection, request.idempotency_key, owner_token, reserved_at)
+        existing = connection.execute(
+            """
+            SELECT keyword, domain, state FROM onboarding_search_queries
+            WHERE request_key = %s AND ordinal = %s
+            """,
+            (request.idempotency_key, ordinal),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[0]) != query.keyword or str(existing[1]) != query.domain:
+                raise ValueError("Pinned onboarding query differs from its receipt")
+            if str(existing[2]) == "reserved":
+                _ = connection.execute(
+                    """
+                    UPDATE onboarding_search_queries SET state = 'unavailable'
+                    WHERE request_key = %s AND ordinal = %s AND state = 'reserved'
+                    """,
+                    (request.idempotency_key, ordinal),
+                )
+            return False
+        count = connection.execute(
+            "SELECT count(*) FROM onboarding_search_queries WHERE request_key = %s",
+            (request.idempotency_key,),
+        ).fetchone()
+        if count is None or cast(int, count[0]) >= request.limits.max_queries:
+            raise RuntimeError("Onboarding search query limit reached")
+        _ = connection.execute(
+            """
+            INSERT INTO onboarding_search_queries (
+              request_key, ordinal, keyword, domain, state
+            ) VALUES (%s, %s, %s, %s, 'reserved')
+            """,
+            (request.idempotency_key, ordinal, query.keyword, query.domain),
+        )
+    return True
+
+
+def finish_onboarding_search_query(
+    connection: Connection,
+    *,
+    request: OnboardingTestSearchRequest,
+    owner_token: UUID,
+    ordinal: int,
+    query: SearchQuery,
+    raw_urls: tuple[str, ...] | None,
+    finished_at: datetime,
+) -> DiscoveryRegistration:
+    _require_autocommit(connection)
+    with connection.transaction():
+        _require_live_lease(connection, request.idempotency_key, owner_token, finished_at)
+        receipt = connection.execute(
+            """
+            SELECT state FROM onboarding_search_queries
+            WHERE request_key = %s AND ordinal = %s AND keyword = %s AND domain = %s
+            FOR UPDATE
+            """,
+            (request.idempotency_key, ordinal, query.keyword, query.domain),
+        ).fetchone()
+        if receipt is None or str(receipt[0]) != "reserved":
+            raise RuntimeError("Onboarding query reservation is no longer active")
+        if raw_urls is None:
+            _ = connection.execute(
+                """
+                UPDATE onboarding_search_queries SET state = 'unavailable'
+                WHERE request_key = %s AND ordinal = %s
+                """,
+                (request.idempotency_key, ordinal),
+            )
+            return DiscoveryRegistration(discovered_count=0, new_work_count=0)
+        totals = connection.execute(
+            """
+            SELECT COALESCE(sum(url_count), 0), COALESCE(sum(new_work_count), 0)
+            FROM onboarding_search_queries WHERE request_key = %s
+            """,
+            (request.idempotency_key,),
+        ).fetchone()
+        if totals is None:
+            raise RuntimeError("Onboarding search counters are missing")
+        remaining_urls = request.limits.max_urls - cast(int, totals[0])
+        remaining_jobs = request.limits.max_jobs - cast(int, totals[1])
+        accepted_urls = tuple(dict.fromkeys(raw_urls))[: max(0, remaining_urls)]
+        registration = register_discoveries(
+            connection,
+            run_id=request.run_id,
+            keyword=query.keyword,
+            domain=query.domain,
+            raw_urls=accepted_urls,
+            discovered_at=finished_at,
+            onboarding_request_key=request.idempotency_key,
+            max_new_work=max(0, remaining_jobs),
+        )
+        _ = connection.execute(
+            """
+            UPDATE onboarding_search_queries
+            SET state = 'completed', url_count = %s,
+                discovered_count = %s, new_work_count = %s
+            WHERE request_key = %s AND ordinal = %s
+            """,
+            (
+                registration.processed_url_count,
+                registration.discovered_count,
+                registration.new_work_count,
+                request.idempotency_key,
+                ordinal,
+            ),
+        )
+    return registration
+
+
+def prepare_onboarding_provider_dispatch(
+    connection: Connection,
+    *,
+    request_key: str,
+    owner_token: UUID,
+    job_id: UUID,
+    operation_key: str,
+    provider: Literal["openrouter", "typesafe"],
+    body_digest: str,
+    attempted_at: datetime,
+) -> OnboardingProviderDispatch:
+    _require_autocommit(connection)
+    with connection.transaction():
+        _require_live_lease(connection, request_key, owner_token, attempted_at)
+        prior = connection.execute(
+            """
+            SELECT attempt_number, state, status_code, response_body,
+                   provider_response_id, retry_after_seconds
+            FROM onboarding_provider_dispatches
+            WHERE request_key = %s AND job_id = %s AND operation_key = %s
+              AND provider = %s AND body_digest = %s
+            ORDER BY attempt_number DESC LIMIT 1
+            """,
+            (request_key, job_id, operation_key, provider, body_digest),
+        ).fetchone()
+        if prior is not None:
+            if str(prior[1]) == "reserved":
+                raise OnboardingProviderOutcomeUnknown(
+                    "A previous provider request has no recorded response"
+                )
+            if cast(int, prior[2]) != 429:
+                return OnboardingProviderDispatch(
+                    attempt_number=cast(int, prior[0]),
+                    cached_status_code=cast(int, prior[2]),
+                    cached_body=str(prior[3]),
+                    cached_provider_response_id=(None if prior[4] is None else str(prior[4])),
+                    cached_retry_after_seconds=cast(float | None, prior[5]),
+                )
+        attempt_number = 1 if prior is None else cast(int, prior[0]) + 1
+        changed = connection.execute(
+            """
+            UPDATE onboarding_test_search_requests
+            SET provider_attempt_count = provider_attempt_count + 1, updated_at = %s
+            WHERE idempotency_key = %s AND state = 'leased' AND owner_token = %s
+              AND lease_expires_at > %s
+              AND provider_attempt_count < max_provider_attempts
+            """,
+            (attempted_at, request_key, owner_token, attempted_at),
+        ).rowcount
+        if changed != 1:
+            raise OnboardingProviderAttemptLimit("Onboarding provider attempt limit reached")
+        _ = connection.execute(
+            """
+            INSERT INTO onboarding_provider_dispatches (
+              request_key, job_id, operation_key, provider, body_digest,
+              attempt_number, state
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'reserved')
+            """,
+            (request_key, job_id, operation_key, provider, body_digest, attempt_number),
+        )
+    return OnboardingProviderDispatch(attempt_number=attempt_number)
+
+
+def finish_onboarding_provider_dispatch(
+    connection: Connection,
+    *,
+    request_key: str,
+    job_id: UUID,
+    operation_key: str,
+    provider: Literal["openrouter", "typesafe"],
+    body_digest: str,
+    attempt_number: int,
+    status_code: int,
+    response_body: str,
+    provider_response_id: str | None = None,
+    retry_after_seconds: float | None = None,
+) -> None:
+    _require_autocommit(connection)
+    with connection.transaction():
+        changed = connection.execute(
+            """
+            UPDATE onboarding_provider_dispatches
+            SET state = 'responded', status_code = %s, response_body = %s,
+                provider_response_id = %s, retry_after_seconds = %s
+            WHERE request_key = %s AND job_id = %s AND operation_key = %s AND provider = %s
+              AND body_digest = %s AND attempt_number = %s AND state = 'reserved'
+            """,
+            (
+                status_code,
+                response_body,
+                provider_response_id,
+                retry_after_seconds,
+                request_key,
+                job_id,
+                operation_key,
+                provider,
+                body_digest,
+                attempt_number,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise RuntimeError("Provider dispatch reservation was lost")
+
+
+def _require_live_lease(
+    connection: Connection, request_key: str, owner_token: UUID, now: datetime
+) -> None:
+    row = connection.execute(
+        """
+        SELECT 1 FROM onboarding_test_search_requests
+        WHERE idempotency_key = %s AND state = 'leased' AND owner_token = %s
+          AND lease_expires_at > %s
+        FOR UPDATE
+        """,
+        (request_key, owner_token, now),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Onboarding test search lease was lost")
+
+
 def _finish_onboarding_test_search(
     connection: Connection,
     *,
@@ -367,7 +671,7 @@ def _load_request(
                budget_policy_version, budget_reservation_key, max_queries, max_urls,
                max_jobs, max_work_attempts, max_provider_attempts, run_allowance_usd,
                attempt_count, owner_token, lease_expires_at, error_code, error_reason,
-               created_at, updated_at, completed_at
+               created_at, updated_at, completed_at, provider_attempt_count
         FROM onboarding_test_search_requests
         WHERE idempotency_key = %s
         """,
@@ -394,6 +698,7 @@ def _load_request(
             run_allowance_usd=Decimal(str(row[14])),
         ),
         attempt_count=cast(int, row[15]),
+        provider_attempt_count=cast(int, row[23]),
         owner_token=cast(UUID | None, row[16]),
         lease_expires_at=cast(datetime | None, row[17]),
         error_code=None if row[18] is None else str(row[18]),

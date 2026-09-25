@@ -44,6 +44,12 @@ CONTROL_DEFINITIONS = (
         "Every 15 minutes",
     ),
     ControlDefinition(
+        "onboarding_test_search",
+        "onboarding_test_search_schedule",
+        "Setup test search",
+        "Every minute while setup is active",
+    ),
+    ControlDefinition(
         "review_sample",
         "review_sample_schedule",
         "Review sample",

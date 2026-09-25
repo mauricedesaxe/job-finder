@@ -1352,6 +1352,10 @@ _CONTROL_DESCRIPTIONS = {
         + "and evaluation, so a job found this morning is decided today. The queue only "
         + "holds what discovery and retries put there, so quiet ticks finish in seconds."
     ),
+    "onboarding_test_search": (
+        "Processes only the bounded test search requested during setup. It never claims "
+        + "jobs from the normal work queue."
+    ),
     "review_sample": (
         "Enqueues a sample of yesterday's rejected jobs so you can audit them in the "
         + "review queue."
@@ -1363,12 +1367,13 @@ _PIPELINE_STEPS = (
     (
         "Search",
         "The Full pipeline run searches Jina with every configured query and registers "
-        + "each job URL it finds as a work item in the Postgres work queue.",
+        + "each job URL it finds as a work item in the Postgres work queue. Setup test "
+        + "searches use their pinned configuration and stop at their query and URL limits.",
     ),
     (
         "Claim",
         "A worker claims one work item at a time under a short lease, so two runs can "
-        + "never work on the same job.",
+        + "never work on the same job. Setup test search work has its own request scope.",
     ),
     (
         "Scrape",

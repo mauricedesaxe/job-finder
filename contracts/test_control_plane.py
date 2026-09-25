@@ -199,6 +199,7 @@ def test_run_now_launches_a_real_dagster_run_with_owner_provenance(
     assert {view.definition.schedule_name for view in snapshot.schedules} == {
         "job_finder_schedule",
         "job_work_queue_schedule",
+        "onboarding_test_search_schedule",
         "review_sample_schedule",
         "langfuse_projection_schedule",
     }

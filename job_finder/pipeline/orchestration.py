@@ -73,6 +73,7 @@ from job_finder.jobs.title_deduplication import (
 )
 from job_finder.pipeline.state import (
     Connection,
+    JOB_WORK_ATTEMPT_LIMIT,
     JobWorkClaim,
     OrchestrationRun,
     claim_next_job,
@@ -112,6 +113,7 @@ class PipelineBoundaries:
     model_retry_policy: RetryPolicy | None = None
     jev_sender: JevSender | None = None
     jev_retry_policy: JevRetryPolicy | None = None
+    model_call_started: Callable[[str], None] | None = None
 
 
 class PipelineServiceModel(BaseModel):
@@ -220,6 +222,8 @@ def process_claimed_jobs(
     retry_after: timedelta,
     enable_ats_enrichment: bool,
     onboarding_request_key: str | None = None,
+    attempt_limit: int = JOB_WORK_ATTEMPT_LIMIT,
+    on_claim: Callable[[JobWorkClaim], None] | None = None,
     now: Now = lambda: datetime.now(UTC),
 ) -> ProcessingSummary:
     if run.status != "running":
@@ -241,10 +245,13 @@ def process_claimed_jobs(
             claimed_at=now(),
             lease_for=lease_for,
             onboarding_request_key=onboarding_request_key,
+            attempt_limit=attempt_limit,
         )
         if claim is None:
             break
         claimed_count += 1
+        if on_claim is not None:
+            on_claim(claim)
         try:
             execution_run = run
             execution_release = release
@@ -476,6 +483,8 @@ def _evaluate_criterion(
     api_key: str,
     now: Now,
 ) -> CriterionResult:
+    if boundaries.model_call_started is not None:
+        boundaries.model_call_started(f"evaluation:{prompt.definition.name}")
     context = ensure_model_call_context(
         connection,
         run_id=run.id,
@@ -528,6 +537,8 @@ def _enrich(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[EnrichedJob] | OperationalFailure:
+    if boundaries.model_call_started is not None:
+        boundaries.model_call_started("enrichment")
     values = enrichment_values(job)
     context = ensure_model_call_context(
         connection,
@@ -565,6 +576,8 @@ def _deduplicate(
     api_key: str,
     now: Now,
 ) -> PromptAccepted[TitleDuplicate] | OperationalFailure:
+    if boundaries.model_call_started is not None:
+        boundaries.model_call_started("deduplication")
     values = title_deduplication_values(new_title, existing_titles)
     context = ensure_model_call_context(
         connection,

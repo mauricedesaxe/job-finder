@@ -389,6 +389,7 @@ def test_the_operations_home_requires_the_existing_owner_session() -> None:
 _CONTROL_DESCRIPTION_MATCHES = {
     "job_finder": "registers what it finds in the work queue",
     "job_work_queue": "claims due jobs",
+    "onboarding_test_search": "bounded test search requested during setup",
     "review_sample": "a sample of yesterday's rejected jobs",
     "langfuse_projection": "Ships telemetry to Langfuse",
 }
@@ -411,8 +412,8 @@ def test_the_control_plane_page_renders_all_live_schedule_controls() -> None:
     assert "a job found this morning is not decided tomorrow" in response.text
     assert "in 11 days" in response.text
     assert 'title="2026-09-21 13:00 UTC"' in response.text
-    assert response.text.count('action="/operations/run"') == 4
-    assert response.text.count('action="/operations/schedule"') == 4
+    assert response.text.count('action="/operations/run"') == 5
+    assert response.text.count('action="/operations/schedule"') == 5
 
 
 def test_the_control_plane_page_names_a_missing_configuration() -> None:
@@ -423,8 +424,8 @@ def test_the_control_plane_page_names_a_missing_configuration() -> None:
     assert response.status_code == 200
     assert "Dagster is not configured for this app" in response.text
     assert "JOB_FINDER_DAGSTER_GRAPHQL_URL" in response.text
-    assert response.text.count("schedule-state unavailable") == 4
-    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 8
+    assert response.text.count("schedule-state unavailable") == 5
+    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 10
 
 
 def _unexpected_control_call(*_args: object) -> Never:
