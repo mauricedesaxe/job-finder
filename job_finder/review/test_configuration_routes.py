@@ -31,7 +31,7 @@ from job_finder.configuration_service import (
     validate_search_configuration,
 )
 from job_finder.evaluation.prompt_releases import build_prompt_release
-from job_finder.review.app import create_review_app
+from job_finder.web.app import create_review_app
 from job_finder.review.configuration_editor import (
     ConfigurationEditorService,
     ConfigurationEditorState,

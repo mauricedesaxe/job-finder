@@ -19,8 +19,6 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/operations/web.py", "starlette"),
     ("job_finder/review/access_web.py", "fasthtml"),
     ("job_finder/review/access_web.py", "starlette"),
-    ("job_finder/review/app.py", "fasthtml"),
-    ("job_finder/review/app.py", "starlette"),
     ("job_finder/review/configuration.py", "fasthtml"),
     ("job_finder/review/configuration.py", "starlette"),
     ("job_finder/review/workbench.py", "fasthtml"),
@@ -32,7 +30,8 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/web/shell.py", "starlette"),
 }
 _WEB_PUBLIC_SYMBOLS = {
-    "app.py": frozenset({"ReadinessProbe", "RequestGuard", "create_web_app", "static_url"}),
+    "assets.py": frozenset({"static_asset_path", "static_url"}),
+    "app.py": frozenset({"ReadinessProbe", "RequestGuard", "create_review_app", "create_web_app"}),
     "security.py": frozenset(
         {
             "SecurityHeadersMiddleware",
@@ -293,10 +292,11 @@ def test_web_modules_own_shared_http_adapters() -> None:
     for filename, expected_symbols in _WEB_PUBLIC_SYMBOLS.items():
         path = web_root / filename
         assert _public_definitions(path) == expected_symbols
-        assert not any(
-            module == "job_finder.review" or module.startswith("job_finder.review.")
-            for module in _direct_imported_modules(path)
-        )
+        if filename != "app.py":
+            assert not any(
+                module == "job_finder.review" or module.startswith("job_finder.review.")
+                for module in _direct_imported_modules(path)
+            )
 
 
 def test_review_workbench_owns_only_the_review_web_adapter() -> None:

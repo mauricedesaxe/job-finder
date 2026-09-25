@@ -12,7 +12,7 @@ from job_finder.provider_credentials import (
     postgres_provider_setup_service,
     production_provider_validators,
 )
-from job_finder.review.app import create_review_app
+from job_finder.web.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.operations.control_plane import dagster_control_plane_service
 from job_finder.review.feedback import postgres_review_feedback_service

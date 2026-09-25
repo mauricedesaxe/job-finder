@@ -106,7 +106,7 @@ from job_finder.pipeline.work_recoveries import (
     WorkRecoveryNotFound,
     WorkRecoveryStaleState,
 )
-from job_finder.web.app import static_url
+from job_finder.web.assets import static_url
 from job_finder.web.security import (
     verified_control_csrf_token,
 )
