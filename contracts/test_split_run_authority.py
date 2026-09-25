@@ -377,6 +377,33 @@ def test_split_onboarding_run_retries_with_pinned_authority_and_rates() -> None:
                 )
 
 
+def _assert_candidate_key_conflict(
+    connection: psycopg.Connection[tuple[object, ...]], artifact_path: Path, now: datetime
+) -> None:
+    with pytest.raises(ValueError, match="another candidate"):
+        _ = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="split-worker",
+                actor="owner",
+                timestamp=now,
+                candidate_target_id=QualificationTargetId("a" * 64),
+            ),
+            artifact_path=artifact_path,
+        )
+
+
+def _assert_missing_candidate_blocks(
+    connection: psycopg.Connection[tuple[object, ...]], artifact_path: Path, now: datetime
+) -> None:
+    missing = create_onboarding_test_search(
+        connection,
+        CreateOnboardingTestSearch(idempotency_key="split-worker", actor="owner", timestamp=now),
+        artifact_path=artifact_path,
+    )
+    assert missing == ExecutionBlocked(reason="qualification_candidate_required")
+
+
 def test_split_onboarding_worker_uses_reserved_policy_after_active_changes() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     searched: list[str] = []
@@ -415,24 +442,22 @@ def test_split_onboarding_worker_uses_reserved_policy_after_active_changes() -> 
             _ = bind_qualification_prompt_release(
                 connection, target_id, artifact_path, created_at=now, created_by="owner"
             )
-            _ = connection.execute(
-                """
-                UPDATE active_qualification_target
-                SET target_id = %s, generation = 1, activated_at = %s, activated_by = 'owner'
-                WHERE singleton_id = 1
-                """,
-                (target_id, now),
-            )
+            _assert_missing_candidate_blocks(connection, artifact_path, now)
             created = create_onboarding_test_search(
                 connection,
                 CreateOnboardingTestSearch(
-                    idempotency_key="split-worker", actor="owner", timestamp=now
+                    idempotency_key="split-worker",
+                    actor="owner",
+                    timestamp=now,
+                    candidate_target_id=target_id,
                 ),
                 artifact_path=artifact_path,
             )
             assert isinstance(created, OnboardingTestSearchAccepted)
             assert isinstance(created.request, SplitOnboardingTestSearchRequest)
             assert created.request.acquisition_policy_revision_id == alternate_id
+            assert created.request.qualification_generation == 0
+            _assert_candidate_key_conflict(connection, artifact_path, now)
             _ = activate_acquisition_policy(
                 connection,
                 ActivateAcquisitionPolicyCommand(
