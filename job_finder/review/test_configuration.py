@@ -3,13 +3,13 @@ from __future__ import annotations
 import pytest
 from starlette.datastructures import FormData, UploadFile
 
-from job_finder.review.configuration_editor import (
-    MalformedConfigurationForm,
-    RawConfigurationForm,
-    RawNamedRow,
-    apply_configuration_edit,
-    parse_configuration_form,
-    transform_rows,
+from job_finder.review.configuration import (
+    _apply_configuration_edit,
+    _MalformedConfigurationForm,
+    _parse_configuration_form,
+    _RawConfigurationForm,
+    _RawNamedRow,
+    _transform_rows,
 )
 
 
@@ -32,11 +32,11 @@ def test_form_parser_preserves_order_whitespace_blanks_and_duplicates() -> None:
     ]
     form = FormData(values)
 
-    raw = parse_configuration_form(form)
+    raw = _parse_configuration_form(form)
 
     assert raw.search_keywords == (" first ", "", " first ")
     assert raw.enabled_sources == ("lever", "unknown")
-    assert raw.personal_criteria == (RawNamedRow(" key ", " name ", " instructions\n"),)
+    assert raw.personal_criteria == (_RawNamedRow(" key ", " name ", " instructions\n"),)
     assert raw.expected_draft_version == "7"
 
 
@@ -53,7 +53,7 @@ def test_corrected_invalid_source_is_not_dropped_when_its_checkbox_was_absent() 
         ]
     )
 
-    assert parse_configuration_form(form).enabled_sources == ("ashby",)
+    assert _parse_configuration_form(form).enabled_sources == ("ashby",)
 
 
 def test_source_removal_uses_submitted_position_before_filtering_unchecked_sources() -> None:
@@ -72,28 +72,28 @@ def test_source_removal_uses_submitted_position_before_filtering_unchecked_sourc
         ]
     )
 
-    raw = apply_configuration_edit(form, "source.remove.2")
+    raw = _apply_configuration_edit(form, "source.remove.2")
 
     assert raw.enabled_sources == ("lever",)
 
 
 def test_named_and_source_row_actions_preserve_exact_values() -> None:
-    raw = RawConfigurationForm(
+    raw = _RawConfigurationForm(
         search_keywords=(" one ", "two"),
         enabled_sources=("ashby",),
         personal_criteria=(
-            RawNamedRow("a", "A", "first"),
-            RawNamedRow("b", "B", "second"),
+            _RawNamedRow("a", "A", "first"),
+            _RawNamedRow("b", "B", "second"),
         ),
-        target_profiles=(RawNamedRow("p", "P", "profile"),),
+        target_profiles=(_RawNamedRow("p", "P", "profile"),),
         expected_draft_version="4",
     )
 
-    assert [row.key for row in transform_rows(raw, "criterion.up.1").personal_criteria] == [
+    assert [row.key for row in _transform_rows(raw, "criterion.up.1").personal_criteria] == [
         "b",
         "a",
     ]
-    assert transform_rows(raw, "profile.add").target_profiles[-1] == RawNamedRow("", "", "")
+    assert _transform_rows(raw, "profile.add").target_profiles[-1] == _RawNamedRow("", "", "")
 
 
 @pytest.mark.parametrize(
@@ -117,5 +117,5 @@ def test_named_and_source_row_actions_preserve_exact_values() -> None:
     ],
 )
 def test_form_parser_rejects_malformed_transport(form: FormData) -> None:
-    with pytest.raises(MalformedConfigurationForm):
-        parse_configuration_form(form)
+    with pytest.raises(_MalformedConfigurationForm):
+        _parse_configuration_form(form)

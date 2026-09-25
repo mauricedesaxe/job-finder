@@ -13,8 +13,8 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/projections/smoke.py", "langfuse"),
     ("job_finder/review/app.py", "fasthtml"),
     ("job_finder/review/app.py", "starlette"),
-    ("job_finder/review/configuration_editor.py", "fasthtml"),
-    ("job_finder/review/configuration_editor.py", "starlette"),
+    ("job_finder/review/configuration.py", "fasthtml"),
+    ("job_finder/review/configuration.py", "starlette"),
     ("job_finder/review/workbench.py", "fasthtml"),
     ("job_finder/review/workbench.py", "starlette"),
     ("job_finder/web/app.py", "fasthtml"),
@@ -300,6 +300,45 @@ def test_review_workbench_owns_only_the_review_web_adapter() -> None:
         if module == "job_finder.database"
         or module.rpartition(".")[2] in {"load_review_queue", "record_review"}
         or module.rpartition(".")[2].startswith("postgres_review_")
+    }
+
+
+def test_configuration_modules_separate_http_from_persistence() -> None:
+    review_root = _PACKAGE_ROOT / "review"
+    configuration_path = review_root / "configuration.py"
+    editor_path = review_root / "configuration_editor.py"
+
+    assert _public_definitions(configuration_path) == {"register_configuration_routes"}
+    assert _public_definitions(editor_path) == {
+        "ConfigurationEditorService",
+        "ConfigurationEditorState",
+        "postgres_configuration_editor_service",
+    }
+
+    editor_imports = _imported_modules(editor_path)
+    assert not any(
+        module == "fasthtml"
+        or module.startswith("fasthtml.")
+        or module == "starlette"
+        or module.startswith("starlette.")
+        or module == "job_finder.web"
+        or module.startswith("job_finder.web.")
+        for module in editor_imports
+    )
+
+    configuration_imports = _imported_modules(configuration_path)
+    forbidden_symbols = {
+        "activate_search_configuration",
+        "get_active_search_configuration",
+        "get_search_configuration_draft",
+        "get_search_configuration_revision",
+        "postgres_configuration_editor_service",
+        "publish_search_configuration",
+        "save_search_configuration_draft",
+    }
+    assert "job_finder.database" not in configuration_imports
+    assert not {
+        module for module in configuration_imports if module.rpartition(".")[2] in forbidden_symbols
     }
 
 

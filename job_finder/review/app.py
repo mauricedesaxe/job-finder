@@ -7,7 +7,6 @@ import secrets
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, assert_never
@@ -40,45 +39,25 @@ from fasthtml.common import (
     Request,
     Ul,
 )
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 from starlette.datastructures import FormData, QueryParams
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from job_finder.config import ReviewAppSettings
-from job_finder.configuration_service import (
-    ActivateConfigurationCommand,
-    ActiveConfigurationChanged,
-    ConfigurationActivated,
-    ConfigurationInvalid,
-    ConfigurationPublished,
-    DraftSaved,
-    PublishConfigurationCommand,
-    PublishDraftChanged,
-    SaveDraftCommand,
-)
 from job_finder.execution_budget import (
     BudgetChanged,
     BudgetSetupService,
     BudgetSetupState,
 )
-from job_finder.review.configuration_editor import (
-    apply_configuration_edit,
-    ConfigurationEditorService,
-    MalformedConfigurationForm,
-    RawConfigurationForm,
-    configuration_page,
-    parse_configuration_form,
-    publication_retry_page,
-)
+from job_finder.review.configuration import register_configuration_routes
+from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.web.app import ReadinessProbe, create_web_app, static_url
 from job_finder.web.security import (
     authenticate_session,
-    csrf_token,
     ensure_csrf_token,
     form_text,
     valid_csrf,
     verified_control_csrf_token,
-    verified_csrf_token,
 )
 from job_finder.web.shell import (
     absolute_time,
@@ -168,18 +147,11 @@ from job_finder.provider_credentials import (
     ProviderSetupSnapshot,
     ProviderStageBlocked,
 )
-from job_finder.search_configuration import SearchConfigurationRevisionId
 
 DateTimeClock = Callable[[], datetime]
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_CLIENTS = 1024
-_CONFIGURATION_NOTICES = {
-    "draft-saved": "Draft saved. It is not published or active yet.",
-    "published": "Saved draft published. Active search configuration is unchanged.",
-    "publication-replayed": "Publication confirmed from the original request. Active search configuration is unchanged.",
-    "activated": "Published draft activated.",
-}
 _OPERATIONS_NOTICES = {
     "run-started": "Run submitted to Dagster.",
     "run-replayed": "This run request was already submitted.",
@@ -939,267 +911,14 @@ def create_review_app(
             case _:
                 assert_never(result)
 
-    @app.route("/configuration", methods=["GET"])
-    def configuration(request: Request) -> HTMLResponse:
-        token = csrf_token(request)
-        if token is None:
-            return HTMLResponse(status_code=401)
-        try:
-            state = configuration_service.inspect()
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        notice = _CONFIGURATION_NOTICES.get(request.query_params.get("notice", ""))
-        return HTMLResponse(
-            document(
-                configuration_page(
-                    state,
-                    RawConfigurationForm.from_draft(state.draft),
-                    token,
-                    publication_key=secrets.token_urlsafe(32),
-                    notice=notice,
-                ),
-                title="Search setup",
-            )
-        )
-
-    @app.route("/configuration/edit", methods=["POST"])
-    async def edit_configuration(request: Request) -> HTMLResponse:
-        form = await request.form()
-        csrf_token = verified_csrf_token(request, form)
-        if csrf_token is None:
-            return _configuration_forbidden_response()
-        try:
-            action = _required_form_text(form, "action")
-            changed = apply_configuration_edit(form, action)
-            state = configuration_service.inspect()
-        except MalformedConfigurationForm as error:
-            return _malformed_configuration_response(str(error))
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        return HTMLResponse(
-            document(
-                configuration_page(
-                    state,
-                    changed,
-                    csrf_token,
-                    publication_key=secrets.token_urlsafe(32),
-                    expanded=_affected_rows(action, changed),
-                ),
-                title="Search setup",
-            )
-        )
-
-    @app.route("/configuration/preview", methods=["POST"])
-    async def preview_configuration(request: Request) -> HTMLResponse:
-        form = await request.form()
-        csrf_token = verified_csrf_token(request, form)
-        if csrf_token is None:
-            return _configuration_forbidden_response()
-        try:
-            raw = parse_configuration_form(form)
-            validation = configuration_service.validate(raw.candidate())
-            state = configuration_service.inspect()
-        except MalformedConfigurationForm as error:
-            return _malformed_configuration_response(str(error))
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        if isinstance(validation, ConfigurationInvalid):
-            return HTMLResponse(
-                document(
-                    configuration_page(
-                        state,
-                        raw,
-                        csrf_token,
-                        publication_key=secrets.token_urlsafe(32),
-                        validation=validation,
-                    ),
-                    title="Search setup",
-                ),
-                status_code=422,
-            )
-        detailed = configuration_service.preview(validation.configuration)
-        return HTMLResponse(
-            document(
-                configuration_page(
-                    state,
-                    raw,
-                    csrf_token,
-                    publication_key=secrets.token_urlsafe(32),
-                    preview=detailed,
-                ),
-                title="Search setup preview",
-            )
-        )
-
-    @app.route("/configuration/draft", methods=["POST"])
-    async def save_configuration(request: Request) -> HTMLResponse | RedirectResponse:
-        form = await request.form()
-        csrf_token = verified_csrf_token(request, form)
-        if csrf_token is None:
-            return _configuration_forbidden_response()
-        try:
-            raw = parse_configuration_form(form)
-            expected_version = _form_integer(raw.expected_draft_version, "draft version")
-            validation = configuration_service.validate(raw.candidate())
-        except MalformedConfigurationForm as error:
-            return _malformed_configuration_response(str(error))
-        if isinstance(validation, ConfigurationInvalid):
-            try:
-                state = configuration_service.inspect()
-            except psycopg.Error:
-                return _configuration_unavailable_response()
-            return HTMLResponse(
-                document(
-                    configuration_page(
-                        state,
-                        raw,
-                        csrf_token,
-                        publication_key=secrets.token_urlsafe(32),
-                        validation=validation,
-                    ),
-                    title="Search setup",
-                ),
-                status_code=422,
-            )
-        try:
-            command = SaveDraftCommand(
-                expected_version=expected_version,
-                configuration=validation.configuration,
-                actor=actor,
-                timestamp=now(),
-            )
-        except ValidationError as error:
-            return _malformed_configuration_response(str(error))
-        try:
-            result = configuration_service.save(command)
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        if isinstance(result, DraftSaved):
-            return RedirectResponse("/configuration?notice=draft-saved", status_code=303)
-        try:
-            state = configuration_service.inspect()
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        rebound = replace(raw, expected_draft_version=str(result.current_draft.version))
-        return HTMLResponse(
-            document(
-                configuration_page(
-                    state,
-                    rebound,
-                    csrf_token,
-                    publication_key=secrets.token_urlsafe(32),
-                    alert=(
-                        "The saved draft changed while you were editing. Your values are still "
-                        f"here. Save again to explicitly overwrite draft version "
-                        f"{result.current_draft.version}."
-                    ),
-                ),
-                title="Search setup conflict",
-            ),
-            status_code=409,
-        )
-
-    @app.route("/configuration/publish", methods=["POST"])
-    async def publish_configuration(request: Request) -> HTMLResponse | RedirectResponse:
-        form = await request.form()
-        csrf_token = verified_csrf_token(request, form)
-        if csrf_token is None:
-            return _configuration_forbidden_response()
-        try:
-            idempotency_key = _required_form_text(form, "idempotency_key")
-            expected_version_text = _required_form_text(form, "expected_draft_version")
-            expected_revision_id = _required_form_text(form, "expected_configuration_revision_id")
-            command = PublishConfigurationCommand(
-                idempotency_key=idempotency_key,
-                expected_draft_version=_form_integer(expected_version_text, "draft version"),
-                expected_configuration_revision_id=SearchConfigurationRevisionId(
-                    expected_revision_id
-                ),
-                actor=actor,
-                timestamp=now(),
-            )
-        except (MalformedConfigurationForm, ValidationError) as error:
-            return _malformed_configuration_response(str(error))
-        try:
-            result = configuration_service.publish(command)
-        except psycopg.Error:
-            return HTMLResponse(
-                document(
-                    publication_retry_page(
-                        csrf_token,
-                        publication_key=idempotency_key,
-                        expected_draft_version=expected_version_text,
-                        expected_revision_id=expected_revision_id,
-                    ),
-                    title="Publication result unknown",
-                ),
-                status_code=503,
-            )
-        if isinstance(result, ConfigurationPublished):
-            notice = "publication-replayed" if result.replayed else "published"
-            return RedirectResponse(f"/configuration?notice={notice}", status_code=303)
-        message = (
-            "The saved draft changed before publication. Nothing was published. "
-            + f"Expected version {result.expected_draft_version} at revision "
-            + f"{result.expected_configuration_revision_id}; observed version "
-            + f"{result.observed_draft_version} at revision "
-            + f"{result.observed_configuration_revision_id}. Reloaded state is shown below."
-            if isinstance(result, PublishDraftChanged)
-            else "This publication key belongs to a different request. Nothing was published."
-        )
-        return _configuration_conflict_page(configuration_service, csrf_token, message)
-
-    @app.route("/configuration/activate", methods=["POST"])
-    async def activate_configuration(request: Request) -> HTMLResponse | RedirectResponse:
-        form = await request.form()
-        csrf_token = verified_csrf_token(request, form)
-        if csrf_token is None:
-            return _configuration_forbidden_response()
-        try:
-            command = ActivateConfigurationCommand(
-                target_revision_id=SearchConfigurationRevisionId(
-                    _required_form_text(form, "target_revision_id")
-                ),
-                expected_active_revision_id=SearchConfigurationRevisionId(
-                    _required_form_text(form, "expected_active_revision_id")
-                ),
-                expected_generation=_form_integer(
-                    _required_form_text(form, "expected_generation"), "active generation"
-                ),
-                actor=actor,
-                timestamp=now(),
-            )
-        except (MalformedConfigurationForm, ValidationError) as error:
-            return _malformed_configuration_response(str(error))
-        try:
-            result = (
-                configuration_service.activate(command)
-                if onboarding_progress_service is None
-                else onboarding_progress_service.activate_preferences(command)
-            )
-        except psycopg.Error:
-            return _configuration_unavailable_response()
-        if isinstance(result, ConfigurationActivated):
-            try:
-                owner_state = owner_access_service.load_state()
-            except (psycopg.Error, RuntimeError):
-                return _configuration_unavailable_response()
-            if owner_state.stage is OnboardingStage.BUDGET:
-                return RedirectResponse("/setup/budget", status_code=303)
-            return RedirectResponse("/configuration?notice=activated", status_code=303)
-        if isinstance(result, ActiveConfigurationChanged):
-            observed = result.active_configuration.active
-            message = (
-                "The active configuration changed before activation. Nothing was overwritten. "
-                + f"The rejected form expected revision {command.expected_active_revision_id} "
-                + f"at generation {command.expected_generation}; the operation observed revision "
-                + f"{observed.revision.id} at generation {observed.generation}."
-            )
-        else:
-            message = (
-                f"Revision {command.target_revision_id} is not published. Nothing was activated."
-            )
-        return _configuration_conflict_page(configuration_service, csrf_token, message)
+    register_configuration_routes(
+        app,
+        configuration_service=configuration_service,
+        owner_access_service=owner_access_service,
+        onboarding_progress_service=onboarding_progress_service,
+        actor=actor,
+        now=now,
+    )
 
     workbench.register_item_routes(app)
 
@@ -2736,57 +2455,6 @@ def _uncertain_run_response(
     )
 
 
-def _configuration_unavailable_response() -> HTMLResponse:
-    return state_response(
-        "Search setup is unavailable",
-        "The database could not complete this request. Saved configuration was not overwritten.",
-        action=A("Retry", href="/configuration", cls="retry"),
-        status_code=503,
-    )
-
-
-def _configuration_forbidden_response() -> HTMLResponse:
-    return state_response(
-        "This configuration form expired",
-        "Reload search setup and try again.",
-        action=A("Reload search setup", href="/configuration", cls="retry"),
-        status_code=403,
-    )
-
-
-def _malformed_configuration_response(detail: str) -> HTMLResponse:
-    return state_response(
-        "Malformed configuration form",
-        detail,
-        action=A("Reload search setup", href="/configuration", cls="retry"),
-        status_code=400,
-    )
-
-
-def _configuration_conflict_page(
-    service: ConfigurationEditorService,
-    csrf_token: str,
-    alert: str,
-) -> HTMLResponse:
-    try:
-        state = service.inspect()
-    except psycopg.Error:
-        return _configuration_unavailable_response()
-    return HTMLResponse(
-        document(
-            configuration_page(
-                state,
-                RawConfigurationForm.from_draft(state.draft),
-                csrf_token,
-                publication_key=secrets.token_urlsafe(32),
-                alert=alert,
-            ),
-            title="Search setup conflict",
-        ),
-        status_code=409,
-    )
-
-
 def _required_control_form_text(form: FormData, key: str) -> str:
     values = form.getlist(key)
     if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
@@ -2798,31 +2466,6 @@ def _actionable_work_state(value: str) -> Literal["failed", "terminal_error"]:
     if value == "failed" or value == "terminal_error":
         return value
     raise ValueError("Expected failed or terminal_error state")
-
-
-def _required_form_text(form: FormData, key: str) -> str:
-    values = form.getlist(key)
-    if len(values) != 1 or not isinstance(values[0], str):
-        raise MalformedConfigurationForm(f"Expected one {key} value")
-    return values[0]
-
-
-def _form_integer(value: str, label: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise MalformedConfigurationForm(f"Invalid {label}") from error
-    if parsed < 0:
-        raise MalformedConfigurationForm(f"Invalid {label}")
-    return parsed
-
-
-def _affected_rows(action: str, raw: RawConfigurationForm) -> frozenset[tuple[str, int]]:
-    if action == "criterion.add":
-        return frozenset({("personal_criteria", len(raw.personal_criteria) - 1)})
-    if action == "profile.add":
-        return frozenset({("target_profiles", len(raw.target_profiles) - 1)})
-    return frozenset()
 
 
 def _safe_next(value: str) -> str:
