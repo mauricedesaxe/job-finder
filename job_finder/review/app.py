@@ -108,6 +108,15 @@ from job_finder.pipeline.work_recoveries import (
     WorkRecoveryNotFound,
     WorkRecoveryStaleState,
 )
+from job_finder.pipeline.reevaluations import (
+    JobReevaluationAccepted,
+    JobReevaluationActiveWork,
+    JobReevaluationCommand,
+    JobReevaluationKeyConflict,
+    JobReevaluationNotFound,
+    JobReevaluationSourceChanged,
+    JobReevaluationUnsupported,
+)
 from job_finder.review.operations import (
     ACTIVITY_STATUSES,
     ActivityEntry,
@@ -116,13 +125,6 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
-    JobReevaluationAccepted,
-    JobReevaluationActiveWork,
-    JobReevaluationCommand,
-    JobReevaluationKeyConflict,
-    JobReevaluationNotFound,
-    JobReevaluationSourceChanged,
-    JobReevaluationUnsupported,
     OperationsService,
     OperationsUnavailable,
     RunDetail,

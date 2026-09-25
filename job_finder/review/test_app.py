@@ -87,6 +87,12 @@ from job_finder.pipeline.work_recoveries import (
     WorkRecoveryResult,
     WorkRecoveryStaleState,
 )
+from job_finder.pipeline.reevaluations import (
+    JobReevaluationAccepted,
+    JobReevaluationCommand,
+    JobReevaluationReceipt,
+    JobReevaluationResult,
+)
 from job_finder.review.operations import (
     ActivityEntry,
     ActivityPage,
@@ -94,10 +100,6 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
-    JobReevaluationAccepted,
-    JobReevaluationCommand,
-    JobReevaluationReceipt,
-    JobReevaluationResult,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,

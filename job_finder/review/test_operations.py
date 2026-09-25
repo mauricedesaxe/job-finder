@@ -11,13 +11,15 @@ from job_finder.pipeline.work_recoveries import (
     RecoveryAction,
     WorkRecoveryCommand,
 )
+from job_finder.pipeline.reevaluations import (
+    JobReevaluationCommand,
+)
 from job_finder.review.operations import (
     ActionableWork,
     ActivityEntry,
     ActivityQuery,
     ActivityRun,
     ActivityWork,
-    JobReevaluationCommand,
     RunListItem,
     OperationsHealth,
     OperationsSnapshot,
