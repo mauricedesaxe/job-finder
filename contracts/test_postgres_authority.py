@@ -68,6 +68,7 @@ from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
     store_provider_attempts,
 )
+from job_finder.benchmarks.relevance_execution import execute_direct_relevance_experiment
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
     ActivationTargetUnpublished,
@@ -602,7 +603,10 @@ def test_split_policy_state_seeds_without_changing_legacy_authority(
 
 
 def _store_default_qualification_target(
-    connection: psycopg.Connection[tuple[object, ...]], now: datetime
+    connection: psycopg.Connection[tuple[object, ...]],
+    now: datetime,
+    *,
+    relevance_release_id: RelevanceReleaseId | None = None,
 ) -> tuple[
     ImplementationArtifact,
     tuple[InputPreparationContent, RelevanceContent, EnrichmentContent, DeduplicationContent],
@@ -635,7 +639,7 @@ def _store_default_qualification_target(
         qualification_definition_revision_id=QualificationDefinitionRevisionId(
             str(definition_row[0])
         ),
-        relevance_release_id=RelevanceReleaseId(str(relevance_row[0])),
+        relevance_release_id=relevance_release_id or RelevanceReleaseId(str(relevance_row[0])),
         prompt_version_ids=relevance_versions,
     )
     enrichment = EnrichmentContent(
@@ -1013,6 +1017,137 @@ def test_qualification_provider_attempts_retain_raw_model_provenance(
                     provider="openrouter",
                     created_at=now,
                     created_by="owner",
+                )
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_direct_relevance_experiment_resolves_target_and_marks_injected_sender_synthetic(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    with _connection(authority_schema) as connection:
+        manifest_id, legacy_target, rates = _seed_evaluation_execution_context(connection, now)
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=legacy_target.relevance_release_id
+        )
+        target_id = qualification_target_id(target)
+        frozen = RelevanceExperimentInput(
+            manifest_id=manifest_id,
+            exchange_rates=rates,
+            provider_settings=ProviderExperimentSettings(
+                provider="openrouter", temperature=0, retry_limit=0
+            ),
+            input_path="direct",
+        )
+        input_id = store_relevance_experiment_input(
+            connection, frozen, created_at=now, created_by="owner"
+        )
+        sent = 0
+
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal sent
+            sent += 1
+            return HttpResponse(
+                status_code=200,
+                body=json.dumps(
+                    {
+                        "id": f"generation-{sent}",
+                        "model": "google/gemini-2.5-flash-001",
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "type": "function",
+                                            "function": {
+                                                "name": "evaluate_job",
+                                                "arguments": json.dumps(
+                                                    {"pass": True, "reason": "matched"}
+                                                ),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                    }
+                ),
+            )
+
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_direct_relevance_experiment(
+                connection,
+                target_id,
+                input_id,
+                artifact_path,
+                api_key="fixture-key",
+                completed_at=now,
+                created_by="owner",
+                openrouter_sender=send,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.origin == "synthetic"
+            assert evidence.outcome == "passed"
+            assert sent > 0
+            assert len(evidence.attempts) == sent
+            assert connection.execute(
+                "SELECT count(*) FROM qualification_provider_attempts WHERE evidence_id = %s",
+                (evidence_id,),
+            ).fetchone() == (sent,)
+            ats_input_id = store_relevance_experiment_input(
+                connection,
+                frozen.model_copy(update={"input_path": "ats"}),
+                created_at=now,
+                created_by="owner",
+            )
+            with pytest.raises(ValueError, match="requires direct inputs"):
+                _ = execute_direct_relevance_experiment(
+                    connection,
+                    target_id,
+                    ats_input_id,
+                    artifact_path,
+                    api_key="fixture-key",
+                    completed_at=now,
+                    created_by="owner",
+                    openrouter_sender=send,
+                )
+            wrong_settings = frozen.model_copy(
+                update={
+                    "provider_settings": frozen.provider_settings.model_copy(
+                        update={"temperature": 1.0}
+                    )
+                }
+            )
+            wrong_input_id = store_relevance_experiment_input(
+                connection, wrong_settings, created_at=now, created_by="owner"
+            )
+            with pytest.raises(ValueError, match="Frozen temperature"):
+                _ = execute_direct_relevance_experiment(
+                    connection,
+                    target_id,
+                    wrong_input_id,
+                    artifact_path,
+                    api_key="fixture-key",
+                    completed_at=now,
+                    created_by="owner",
+                    openrouter_sender=send,
                 )
         finally:
             artifact_path.unlink(missing_ok=True)
