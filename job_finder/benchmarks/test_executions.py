@@ -184,3 +184,18 @@ def test_aggregate_evaluation_telemetry_marks_incomplete_usage() -> None:
         )
     )
     assert recovered.usage_complete
+
+    partially_recovered = aggregate_evaluation_telemetry(
+        (
+            ProviderRequestObservation(latency_ms=10, usage_complete=False),
+            ProviderRequestObservation(latency_ms=10, usage_complete=False),
+            ProviderRequestObservation(
+                input_tokens=5,
+                output_tokens=2,
+                cost_usd=Decimal("0.01"),
+                resolves_prior_usage=True,
+                latency_ms=5,
+            ),
+        )
+    )
+    assert not partially_recovered.usage_complete
