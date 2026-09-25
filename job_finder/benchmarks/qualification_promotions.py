@@ -61,7 +61,9 @@ class PromotionEvidenceSelection(BaseModel):
     deduplication_evidence_id: Annotated[QualificationEvidenceId | None, Field(pattern=_DIGEST)] = (
         None
     )
-    composition_evidence_id: Annotated[QualificationEvidenceId, Field(pattern=_DIGEST)]
+    composition_evidence_id: Annotated[QualificationEvidenceId | None, Field(pattern=_DIGEST)] = (
+        None
+    )
     relevance_comparison_id: Annotated[str | None, Field(pattern=_DIGEST)] = None
 
 
@@ -360,10 +362,13 @@ def _evidence_matches_component(
 
 def _check_composition(
     connection: psycopg.Connection[tuple[object, ...]],
-    evidence_id: QualificationEvidenceId,
+    evidence_id: QualificationEvidenceId | None,
     candidate: ResolvedQualificationTarget,
     failures: list[str],
 ) -> None:
+    if evidence_id is None:
+        failures.append("Composition evidence is missing")
+        return
     item = _load_evidence(connection, evidence_id)
     if item is None:
         failures.append("Composition evidence is missing or has invalid identity")
