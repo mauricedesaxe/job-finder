@@ -27,6 +27,7 @@ from pydantic import SecretStr
 import job_finder.configuration_service as configuration_service_module
 import job_finder.evaluation.manifest_execution as manifest_execution_module
 import job_finder.evaluation.relevance_releases as relevance_releases_module
+from job_finder.acquisition_policy import AcquisitionPolicy, acquisition_policy_revision_id
 from job_finder.ats.models import CompensationObservation
 from job_finder.benchmarks.comparisons import preview_run_comparison
 from job_finder.benchmarks.executions import (
@@ -81,6 +82,11 @@ from job_finder.database import (
     INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
     MIGRATIONS_PATH,
     apply_migrations,
+)
+from job_finder.policy_projection import project_legacy_search_configuration
+from job_finder.qualification_definition import (
+    QualificationDefinition,
+    qualification_definition_revision_id,
 )
 from job_finder.projections.outbox import (
     LangfuseProjection,
@@ -273,6 +279,7 @@ EXPECTED_MIGRATIONS = (
     "0035_onboarding_work_scope.sql",
     "0036_execution_budget_authority.sql",
     "0037_run_budget_authority_guard.sql",
+    "0038_policy_revisions.sql",
 )
 
 
@@ -290,6 +297,113 @@ def test_migrations_are_repeatable(authority_schema: str) -> None:
         assert connection.execute(
             "SELECT stage, password_hash FROM owner_onboarding WHERE singleton_id = 1"
         ).fetchone() == ("owner_account", None)
+
+
+def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    original = DEFAULT_SEARCH_CONFIGURATION
+    configurations = (
+        original,
+        original.model_copy(update={"search_keywords": (*original.search_keywords, "a new role")}),
+        original.model_copy(
+            update={
+                "personal_criteria": (
+                    original.personal_criteria[0].model_copy(update={"name": "Renamed criterion"}),
+                    *original.personal_criteria[1:],
+                )
+            }
+        ),
+    )
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0037_run_budget_authority_guard.sql")
+        revisions = tuple(
+            store_search_configuration_revision(
+                connection,
+                build_search_configuration_revision(
+                    configuration, created_at=now, created_by="migration-test"
+                ),
+            )
+            for configuration in configurations
+        )
+        legacy_tables = _public_tables(connection)
+        legacy_rows = _table_contents(connection, legacy_tables)
+
+        assert apply_migrations(connection) == EXPECTED_MIGRATIONS
+        assert _table_contents(connection, legacy_tables) == legacy_rows
+        assert connection.execute(
+            "SELECT count(*) FROM legacy_search_configuration_policy_projections"
+        ).fetchone() == (3,)
+        assert connection.execute(
+            "SELECT count(*) FROM acquisition_policy_revisions"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM qualification_definition_revisions"
+        ).fetchone() == (2,)
+
+        for revision in revisions:
+            projection = project_legacy_search_configuration(revision.configuration)
+            row = connection.execute(
+                """
+                SELECT bridge.acquisition_policy_revision_id, acquisition.content,
+                       bridge.qualification_definition_revision_id, qualification.content
+                FROM legacy_search_configuration_policy_projections bridge
+                JOIN acquisition_policy_revisions acquisition
+                  ON acquisition.id = bridge.acquisition_policy_revision_id
+                JOIN qualification_definition_revisions qualification
+                  ON qualification.id = bridge.qualification_definition_revision_id
+                WHERE bridge.legacy_revision_id = %s
+                """,
+                (revision.id,),
+            ).fetchone()
+            assert row is not None
+            acquisition = AcquisitionPolicy.model_validate(row[1])
+            qualification = QualificationDefinition.model_validate(row[3])
+            assert row[0] == acquisition_policy_revision_id(projection.acquisition)
+            assert row[2] == qualification_definition_revision_id(projection.qualification)
+            assert acquisition == projection.acquisition
+            assert qualification == projection.qualification
+
+        projection_tables = (
+            "acquisition_policy_revisions",
+            "qualification_definition_revisions",
+            "legacy_search_configuration_policy_projections",
+        )
+        projected_rows = _table_contents(connection, projection_tables)
+        _ = connection.execute("SELECT backfill_legacy_search_configuration_policies()")
+        assert _table_contents(connection, projection_tables) == projected_rows
+        assert _table_contents(connection, legacy_tables) == legacy_rows
+
+        later_revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                original.model_copy(
+                    update={
+                        "enabled_sources": tuple(reversed(original.enabled_sources)),
+                        "target_profiles": (
+                            original.target_profiles[0].model_copy(
+                                update={"name": "Later profile name"}
+                            ),
+                            *original.target_profiles[1:],
+                        ),
+                    }
+                ),
+                created_at=now + timedelta(days=1),
+                created_by="migration-test",
+            ),
+        )
+        _ = connection.execute("SELECT backfill_legacy_search_configuration_policies()")
+        assert connection.execute(
+            """
+            SELECT count(*) FROM legacy_search_configuration_policy_projections
+            WHERE legacy_revision_id = %s
+            """,
+            (later_revision.id,),
+        ).fetchone() == (1,)
+        caught_up_rows = _table_contents(connection, projection_tables)
+        _ = connection.execute("SELECT backfill_legacy_search_configuration_policies()")
+        assert _table_contents(connection, projection_tables) == caught_up_rows
 
 
 def test_owner_bootstrap_is_single_winner_and_authenticates_from_postgres(
