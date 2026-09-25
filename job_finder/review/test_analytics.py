@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from job_finder.review.analytics import DayModelSpend, DaySpend, ModelSpend, SpendAnalytics
+from job_finder.operations.spend import DayModelSpend, DaySpend, ModelSpend, SpendAnalytics
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 

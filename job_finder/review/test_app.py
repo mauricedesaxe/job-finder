@@ -42,7 +42,7 @@ from job_finder.provider_credentials import (
     ProviderSetupSnapshot,
     ProviderStageAdvanced,
 )
-from job_finder.review.analytics import (
+from job_finder.operations.spend import (
     AnalyticsService,
     DayModelSpend,
     DaySpend,
@@ -51,7 +51,7 @@ from job_finder.review.analytics import (
 )
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import ConfigurationEditorService
-from job_finder.review.control_plane import (
+from job_finder.operations.control_plane import (
     CONTROL_DEFINITIONS,
     ControlConflict,
     ControlPlaneService,
@@ -92,6 +92,7 @@ from job_finder.pipeline.work_dismissals import (
 )
 from job_finder.pipeline.work_recoveries import (
     RecoveryAction,
+    RecoveryOutcome,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
     WorkRecoveryReceipt,
@@ -104,30 +105,29 @@ from job_finder.pipeline.reevaluations import (
     JobReevaluationReceipt,
     JobReevaluationResult,
 )
-from job_finder.review.operations import (
+from job_finder.operations._common import PipelineRunStatus, WorkItemState
+from job_finder.operations.activity import (
     ActivityEntry,
     ActivityPage,
     ActivityQuery,
     ActivityRun,
     ActivityService,
     ActivityWork,
-    ModelCallDetail,
+)
+from job_finder.operations.health import (
     OperationsHealth,
-    OperationsService,
     OperationsSnapshot,
-    PipelineRunStatus,
     QueueCounts,
-    RunAttemptSummary,
-    RecoveryOutcome,
     SpendSummary,
-    RunDetail,
-    RunListItem,
-    RunsService,
+)
+from job_finder.operations.run_history import RunAttemptSummary, RunDetail, RunListItem, RunsService
+from job_finder.operations.service import OperationsService
+from job_finder.operations.work_history import (
+    ModelCallDetail,
     WorkAttemptSummary,
     JobVerdict,
     WorkItemNotFound,
     WorkItemDetail,
-    WorkItemState,
 )
 from job_finder.review.owner_access import (
     OnboardingStage,

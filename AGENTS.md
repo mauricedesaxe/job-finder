@@ -54,7 +54,7 @@ background system: it names every schedule and explains the pipeline DAG. If
 you change how background jobs work — schedules, cadence, job names, or
 pipeline stages in `job_finder/dagster.py` or `job_finder/pipeline/` — update
 the control plane in the same change: `CONTROL_DEFINITIONS` in
-`job_finder/review/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
+`job_finder/operations/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
 pipeline explainer in `job_finder/review/app.py`. See "Dagster" in CLAUDE.md.
 
 ## Domain ownership
