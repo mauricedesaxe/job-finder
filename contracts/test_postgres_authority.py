@@ -270,6 +270,7 @@ EXPECTED_MIGRATIONS = (
     "0032_legacy_execution_budget.sql",
     "0033_onboarding_test_search_requests.sql",
     "0034_work_dismissals.sql",
+    "0035_onboarding_work_scope.sql",
 )
 
 
