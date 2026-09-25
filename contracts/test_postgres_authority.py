@@ -66,6 +66,7 @@ from job_finder.benchmarks.input_preparation_execution import (
     execute_input_preparation_fixture_set,
 )
 from job_finder.benchmarks.enrichment_execution import execute_enrichment_fixture_set
+from job_finder.benchmarks.deduplication_execution import execute_deduplication_fixture_set
 from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
     store_provider_attempts,
@@ -1404,6 +1405,133 @@ def test_enrichment_fixtures_use_compiled_prompt_and_record_synthetic_attempts(
                 "SELECT count(*) FROM qualification_provider_attempts WHERE evidence_id = %s",
                 (evidence_id,),
             ).fetchone() == (1,)
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_deduplication_fixtures_cover_ledger_paths_and_model_attempt(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    settings = ProviderExperimentSettings(provider="openrouter", temperature=0, retry_limit=0)
+    fixture = PhaseFixtureSet(
+        phase="deduplication",
+        cases=(
+            FixtureCase(
+                input={
+                    "new_title": "Backend Engineer",
+                    "existing_titles": [],
+                    "provider_settings": settings.model_dump(mode="json"),
+                },
+                expected={"isDuplicate": False, "matchedTitle": None},
+                input_path="direct",
+            ),
+            FixtureCase(
+                input={
+                    "new_title": "Backend Engineer",
+                    "existing_titles": ["backend engineer"],
+                    "provider_settings": settings.model_dump(mode="json"),
+                },
+                expected={"isDuplicate": True, "matchedTitle": "backend engineer"},
+                input_path="direct",
+            ),
+            FixtureCase(
+                input={
+                    "new_title": "Backend Engineer",
+                    "existing_titles": ["Software Engineer"],
+                    "provider_settings": settings.model_dump(mode="json"),
+                },
+                expected={"isDuplicate": False, "matchedTitle": None},
+                input_path="direct",
+            ),
+        ),
+    )
+    sent = 0
+
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        nonlocal sent
+        sent += 1
+        return HttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "id": f"dedup-generation-{sent}",
+                    "model": "google/gemini-2.5-flash-lite",
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "check_duplicate",
+                                            "arguments": json.dumps(
+                                                {"isDuplicate": False, "matchedTitle": None}
+                                            ),
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        fixture_id = store_fixture_set(connection, fixture, created_at=now, created_by="owner")
+        incomplete_id = store_fixture_set(
+            connection,
+            fixture.model_copy(update={"cases": fixture.cases[:2]}),
+            created_at=now,
+            created_by="owner",
+        )
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            with pytest.raises(ValueError, match="empty, exact, and ambiguous"):
+                _ = execute_deduplication_fixture_set(
+                    connection,
+                    target_id,
+                    incomplete_id,
+                    artifact_path,
+                    api_key="fixture-key",
+                    completed_at=now,
+                    created_by="owner",
+                    sender=send,
+                )
+            evidence_id = execute_deduplication_fixture_set(
+                connection,
+                target_id,
+                fixture_id,
+                artifact_path,
+                api_key="fixture-key",
+                completed_at=now,
+                created_by="owner",
+                sender=send,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.origin == "synthetic"
+            assert evidence.outcome == "passed"
+            assert evidence.result["passed_count"] == 3
+            assert sent == len(evidence.attempts) == 1
         finally:
             artifact_path.unlink(missing_ok=True)
 
