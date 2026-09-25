@@ -37,6 +37,7 @@ from job_finder.review.configuration_editor import (
     ConfigurationEditorState,
 )
 from job_finder.review.feedback import ReviewFeedbackService, ReviewSaved
+from job_finder.review.onboarding import OnboardingProgressService
 from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerAccessService,
@@ -577,6 +578,48 @@ def test_successful_activation_uses_prg_without_publishing() -> None:
     assert harness.publish_commands == []
 
 
+def test_preferences_activation_advances_onboarding_and_redirects_to_budget_setup() -> None:
+    harness = ServiceHarness()
+    publication = _publication(harness.configuration)
+    harness.state = _state(harness.configuration, publication=publication)
+    state = [OwnerAccessState(stage=OnboardingStage.PREFERENCES, has_password=True)]
+    owner_access = OwnerAccessService(
+        load_state=lambda: state[0],
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: OwnerBootstrapConflict(state[0]),
+    )
+    commands: list[ActivateConfigurationCommand] = []
+
+    def activate_preferences(command: ActivateConfigurationCommand) -> ConfigurationActivated:
+        commands.append(command)
+        state[0] = OwnerAccessState(stage=OnboardingStage.BUDGET, has_password=True)
+        return ConfigurationActivated(active_configuration=harness.state.active)
+
+    client = _client(
+        harness,
+        owner_access=owner_access,
+        onboarding_progress=OnboardingProgressService(activate_preferences=activate_preferences),
+    )
+    active = harness.state.active.active
+
+    response = client.post(
+        "/configuration/activate",
+        data={
+            "csrf_token": _csrf(client),
+            "target_revision_id": publication.revision_id,
+            "expected_active_revision_id": active.revision.id,
+            "expected_generation": str(active.generation),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup/budget"
+    assert len(commands) == 1
+    assert commands[0].target_revision_id == publication.revision_id
+    assert harness.activate_commands == []
+
+
 def test_configuration_database_failure_is_a_retryable_503() -> None:
     harness = ServiceHarness()
 
@@ -634,7 +677,13 @@ def test_malformed_transport_is_a_400_and_unknown_notice_is_not_reflected() -> N
     assert "<script>alert(1)</script>" not in unknown_notice.text
 
 
-def _client(harness: ServiceHarness, *, authenticate: bool = True) -> TestClient:
+def _client(
+    harness: ServiceHarness,
+    *,
+    authenticate: bool = True,
+    owner_access: OwnerAccessService = OWNER_ACCESS,
+    onboarding_progress: OnboardingProgressService | None = None,
+) -> TestClient:
     queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue())
     feedback_service = ReviewFeedbackService(
         submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1))
@@ -645,7 +694,8 @@ def _client(harness: ServiceHarness, *, authenticate: bool = True) -> TestClient
             harness.service(),
             SETTINGS,
             feedback_service=feedback_service,
-            owner_access_service=OWNER_ACCESS,
+            owner_access_service=owner_access,
+            onboarding_progress_service=onboarding_progress,
             now=lambda: NOW,
         )
     )
