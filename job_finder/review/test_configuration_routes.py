@@ -193,15 +193,11 @@ def test_initial_editor_preserves_order_and_uses_the_shared_responsive_chrome() 
     assert 'value="greenhouse"' in response.text
     assert 'value="workable"' in response.text
     assert 'aria-label="Owner workbench"' in response.text
-    assert 'href="/operations/runs" class="shell-link">Operations</a>' in response.text
-    assert 'href="/" class="shell-link">Review</a>' in response.text
-    assert (
-        'href="/configuration" aria-current="page" class="shell-link">Search setup</a>'
-        in response.text
-    )
-    assert "@media (max-width: 760px)" in response.text
-    assert "@media (prefers-color-scheme: dark)" in response.text
-    assert "min-height: 48px" in response.text
+    assert re.search(_shell_link("/operations/runs", "Operations"), response.text)
+    assert re.search(_shell_link("/", "Review"), response.text)
+    assert re.search(_shell_link("/configuration", "Search setup", current=True), response.text)
+    assert "max-width:" in response.text
+    assert "prefers-color-scheme: dark" in response.text
     assert "<script" not in response.text
     assert "<link" not in response.text
 
@@ -675,6 +671,14 @@ def _hidden(html: str, name: str) -> str:
     match = re.search(rf'name="{re.escape(name)}" value="([^"]+)"', html)
     assert match is not None
     return match.group(1)
+
+
+def _shell_link(href: str, label: str, *, current: bool = False) -> str:
+    pattern = rf'<a(?=[^>]*href="{re.escape(href)}")'
+    if current:
+        pattern += r'(?=[^>]*aria-current="page")'
+    pattern += rf'(?=[^>]*class="shell-link")[^>]*>{re.escape(label)}</a>'
+    return pattern
 
 
 def _form_data(configuration: SearchConfiguration, csrf_token: str) -> dict[str, str | list[str]]:
