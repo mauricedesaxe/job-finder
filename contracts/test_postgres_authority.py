@@ -328,7 +328,19 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with _connection(authority_schema) as connection:
-        _apply_migrations_through(connection, "0028_append_only_job_reevaluations.sql")
+        _apply_migrations_through(connection, "0025_release_target_promotion_decisions.sql")
+        _ = _seed_initial_configuration_publication(connection, datetime(2026, 9, 22, tzinfo=UTC))
+        _ = connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 0, %s, 'test')
+            """,
+            (
+                INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+                datetime(2026, 9, 22, tzinfo=UTC),
+            ),
+        )
 
     settings = PostgresContractSettings.from_environment()
     monkeypatch.setenv(
@@ -357,18 +369,6 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     assert service.authenticate("legacy secure owner password") is True
     assert service.authenticate("different owner password") is False
     with _connection(authority_schema) as connection:
-        _ = _seed_initial_configuration_publication(connection, datetime(2026, 9, 22, tzinfo=UTC))
-        _ = connection.execute(
-            """
-            INSERT INTO active_search_configuration (
-              singleton_id, revision_id, generation, activated_at, activated_by
-            ) VALUES (1, %s, 0, %s, 'test')
-            """,
-            (
-                INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
-                datetime(2026, 9, 22, tzinfo=UTC),
-            ),
-        )
         admission = admit_scheduled_execution(
             connection,
             idempotency_key="legacy-without-owner-budget",
@@ -551,7 +551,11 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
 
     assert sum(isinstance(result, ExecutionAdmitted) for result in admissions) == 1
     assert sum(isinstance(result, ExecutionBlocked) for result in admissions) == 1
-    admitted = next(result for result in admissions if isinstance(result, ExecutionAdmitted))
+    admitted_index, admitted = next(
+        (index, result)
+        for index, result in enumerate(admissions)
+        if isinstance(result, ExecutionAdmitted)
+    )
     with _connection(authority_schema) as connection:
         reservation_row = connection.execute(
             """
@@ -559,8 +563,9 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
                    relevance_release_id, release_generation, search_queries,
                    logical_model_calls_per_job, maximum_provider_attempts
             FROM execution_budget_reservations
-            WHERE authority_kind = 'pinned'
-            """
+            WHERE idempotency_key = %s
+            """,
+            (f"scheduled-run-{admitted_index}",),
         ).fetchone()
         assert reservation_row is not None
         reservation_key = cast(str, reservation_row[0])
