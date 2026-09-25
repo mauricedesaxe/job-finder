@@ -49,7 +49,7 @@ from job_finder.operations.spend import (
     ModelSpend,
     SpendAnalytics,
 )
-from job_finder.review.app import create_review_app
+from job_finder.web.app import create_review_app
 from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.operations.control_plane import (
     CONTROL_DEFINITIONS,
@@ -507,8 +507,9 @@ def test_operations_actions_reject_a_duplicated_csrf_field_before_service_calls(
     calls: list[object] = []
     controls = _control_service(
         run_now=lambda command: calls.append(command) or RunStarted("x", False),
-        change_schedule=lambda command: calls.append(command)
-        or ScheduleChanged(ScheduleStatus.STOPPED, False),
+        change_schedule=lambda command: (
+            calls.append(command) or ScheduleChanged(ScheduleStatus.STOPPED, False)
+        ),
     )
     operations = OperationsService(
         load=lambda: _operations_snapshot(),
@@ -545,8 +546,9 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
     calls: list[object] = []
     controls = _control_service(
         run_now=lambda command: calls.append(command) or RunStarted("x", False),
-        change_schedule=lambda command: calls.append(command)
-        or ScheduleChanged(ScheduleStatus.STOPPED, False),
+        change_schedule=lambda command: (
+            calls.append(command) or ScheduleChanged(ScheduleStatus.STOPPED, False)
+        ),
     )
     operations = OperationsService(
         load=lambda: _operations_snapshot(),
@@ -652,10 +654,12 @@ def test_run_now_integrity_conflict_is_reported_as_conflict() -> None:
 def test_schedule_change_reports_stale_state_without_redirecting() -> None:
     calls: list[ScheduleChangeCommand] = []
     controls = _control_service(
-        change_schedule=lambda command: calls.append(command)
-        or ScheduleStateConflict(
-            expected=ScheduleStatus.RUNNING,
-            observed=ScheduleStatus.STOPPED,
+        change_schedule=lambda command: (
+            calls.append(command)
+            or ScheduleStateConflict(
+                expected=ScheduleStatus.RUNNING,
+                observed=ScheduleStatus.STOPPED,
+            )
         )
     )
     client = _client(_queue(), controls=controls)
@@ -1305,8 +1309,9 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
     item = _item(TODAY, "qualified")
     client = _client(
         _queue(item),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(
@@ -1346,8 +1351,9 @@ def test_submits_a_note_longer_than_the_old_limit_unchanged() -> None:
     note = " " + "x" * 1999 + " "
     client = _client(
         _queue(item),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(
@@ -1401,8 +1407,9 @@ def test_submitting_an_item_outside_the_queue_renders_not_found() -> None:
     missing = _item(TODAY, "qualified", value=2)
     client = _client(
         _queue(queued),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(f"/review/{missing.id}", data=_form(queued, client))
@@ -1417,8 +1424,9 @@ def test_submitting_a_stale_form_renders_not_found() -> None:
     item = _item(TODAY, "qualified")
     client = _client(
         _queue(item),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(
@@ -1435,8 +1443,9 @@ def test_rejects_a_review_without_the_signed_session_csrf_token() -> None:
     item = _item(TODAY, "qualified")
     client = _client(
         _queue(item),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(
@@ -1454,8 +1463,9 @@ def test_rejects_an_invalid_review_decision_without_calling_the_service() -> Non
     item = _item(TODAY, "qualified")
     client = _client(
         _queue(item),
-        submit=lambda review: submissions.append(review)
-        or ReviewSaved(review_event_id=UUID(int=9)),
+        submit=lambda review: (
+            submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+        ),
     )
 
     response = client.post(f"/review/{item.id}", data=_form(item, client) | {"decision": "later"})

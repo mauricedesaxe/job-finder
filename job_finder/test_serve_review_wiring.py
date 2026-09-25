@@ -13,7 +13,7 @@ import ast
 import inspect
 from pathlib import Path
 
-from job_finder.review.app import create_review_app
+from job_finder.web.app import create_review_app
 
 SERVE_REVIEW = Path(__file__).parents[1] / "scripts" / "serve_review.py"
 
