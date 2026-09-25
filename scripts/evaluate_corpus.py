@@ -18,9 +18,11 @@ from job_finder.evaluation.corpus import (
     MAX_FALSE_NEGATIVE_RATE,
     MAX_FALSE_POSITIVE_RATE,
     CorpusSuite,
+    CorpusIdentity,
     EvaluationCorpusCase,
     EvaluationCorpusReport,
     EvaluationCorpusResult,
+    corpus_identity,
     evaluate_corpus_case,
     load_ats_evaluation_corpus,
     load_evaluation_corpus,
@@ -31,7 +33,6 @@ from job_finder.evaluation.jev import (
     JevCriterionObservation,
     JevRunMetrics,
     evaluate_prompt as evaluate_jev_prompt,
-    jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.models import (
@@ -49,6 +50,12 @@ from job_finder.evaluation.prompt_releases import (
     PromptVersion,
     bootstrap_prompt_release,
     build_prompt_release,
+)
+from job_finder.evaluation.relevance_releases import (
+    JevFaithfulExecutionPolicy,
+    build_gemini_policy,
+    build_jev_faithful_policy,
+    build_relevance_release,
 )
 
 Connection = psycopg.Connection[tuple[object, ...]]
@@ -82,6 +89,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.provider == "jev":
         assert isinstance(settings, JevCorpusEvaluationSettings)
         release = build_prompt_release()
+        policy = build_jev_faithful_policy(release)
+        identity = corpus_identity(
+            cases,
+            arguments.suite,
+            build_relevance_release(policy).content_digest,
+            str(release.id),
+            rates,
+        )
         trial_count = arguments.trials or 3
         passed = True
         for trial in range(1, trial_count + 1):
@@ -91,9 +106,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 settings.api_key,
                 rates,
                 settings.worker_count,
+                policy,
             )
             print(f"Jev trial {trial}/{trial_count}")
-            print(f"Jev policy: {jev_policy_digest(rates)}")
+            print(f"Corpus content: {identity.content_digest}")
+            print(f"Corpus run: {identity.run_digest}")
+            print(f"Jev policy: {identity.execution_policy_digest}")
             _print_report(report)
             _print_jev_metrics(metrics)
             passed = passed and report.passed
@@ -104,6 +122,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         _ = apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
+        identity = corpus_identity(
+            cases,
+            arguments.suite,
+            build_relevance_release(build_gemini_policy(release)).content_digest,
+            str(release.id),
+            rates,
+        )
         _start_run(
             connection,
             run_id,
@@ -112,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.suite,
             "openrouter",
             len(cases),
-            rates,
+            identity,
             observed_at,
         )
     with ThreadPoolExecutor(max_workers=settings.worker_count) as executor:
@@ -174,10 +199,12 @@ def _run_jev_trial(
     api_key: str,
     rates: str,
     worker_count: int,
+    policy: JevFaithfulExecutionPolicy,
 ) -> tuple[EvaluationCorpusReport, JevRunMetrics]:
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = tuple(
-            executor.submit(_evaluate_jev_case, case, release, api_key, rates) for case in cases
+            executor.submit(_evaluate_jev_case, case, release, api_key, rates, policy)
+            for case in cases
         )
         evaluations = tuple(future.result() for future in futures)
     report = score_evaluation_corpus(tuple(evaluation.result for evaluation in evaluations))
@@ -195,6 +222,7 @@ def _evaluate_jev_case(
     release: PromptRelease,
     api_key: str,
     rates: str,
+    policy: JevFaithfulExecutionPolicy,
 ) -> JevCaseEvaluation:
     observations: list[JevCriterionObservation] = []
     request_latencies_ms: list[int] = []
@@ -205,6 +233,7 @@ def _evaluate_jev_case(
             values,
             api_key=api_key,
             observe_request=request_latencies_ms.append,
+            execution_policy=policy,
         )
         if isinstance(result, JevCriterionObservation):
             observations.append(result)
@@ -276,7 +305,7 @@ def _evaluate_criterion(
 ) -> CriterionResult:
     attempt_id = uuid4()
     input_digest = prompt_input_digest(values)
-    operation_key = f"corpus:{case.relative_path}:{prompt.definition.name}"
+    operation_key = f"corpus:{case.name}:{prompt.definition.name}"
     started_at = datetime.now(UTC)
     _ = connection.execute(
         """
@@ -317,7 +346,7 @@ def _start_run(
     suite: CorpusSuite,
     provider: Literal["openrouter", "jev"],
     case_count: int,
-    rates: str,
+    identity: CorpusIdentity,
     started_at: datetime,
 ) -> None:
     _ = connection.execute(
@@ -332,19 +361,27 @@ def _start_run(
             f"corpus:{run_id}",
             implementation_ref,
             release.id,
-            Jsonb(
-                {
-                    "corpus": f"python-{suite}-markdown-v1",
-                    "case_count": case_count,
-                    "provider": provider,
-                    **(
-                        {"jev_policy_digest": jev_policy_digest(rates)} if provider == "jev" else {}
-                    ),
-                }
-            ),
+            Jsonb(corpus_run_parameters(suite, provider, case_count, identity)),
             started_at,
         ),
     )
+
+
+def corpus_run_parameters(
+    suite: CorpusSuite,
+    provider: Literal["openrouter", "jev"],
+    case_count: int,
+    identity: CorpusIdentity,
+) -> dict[str, str | int]:
+    return {
+        "corpus": f"python-{suite}-markdown-v1",
+        "case_count": case_count,
+        "provider": provider,
+        "corpus_content_digest": identity.content_digest,
+        "corpus_run_digest": identity.run_digest,
+        "execution_policy_digest": identity.execution_policy_digest,
+        "prompt_release_id": identity.prompt_release_id,
+    }
 
 
 def _complete_run(

@@ -10,11 +10,14 @@ import pytest
 
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import format_ats_block
+from job_finder.evaluation import corpus as corpus_module
 from job_finder.evaluation.corpus import (
     CORPUS_ROOT,
     MAX_FALSE_NEGATIVE_RATE,
     MAX_FALSE_POSITIVE_RATE,
+    CorpusIdentity,
     EvaluationCorpusResult,
+    corpus_identity,
     evaluate_corpus_case,
     load_ats_evaluation_corpus,
     load_evaluation_corpus,
@@ -23,6 +26,7 @@ from job_finder.evaluation.corpus import (
 from job_finder.evaluation.evaluate import evaluate_job
 from job_finder.evaluation.jev import (
     JEV_MODEL,
+    JEV_QUESTIONS,
     JevCriterionObservation,
     JevHttpResponse,
     JevSystemOneRequest,
@@ -43,10 +47,11 @@ from job_finder.evaluation.prompt_releases import (
 from job_finder.evaluation.relevance_releases import (
     JevAtomicExecutionPolicy,
     build_jev_atomic_policy,
+    build_jev_faithful_policy,
     build_work_culture_candidate_policy,
 )
 from job_finder.jobs.models import JobListing
-from scripts.evaluate_corpus import parse_arguments
+from scripts.evaluate_corpus import corpus_run_parameters, parse_arguments
 
 
 def test_loads_only_direct_evaluation_fixtures_by_default() -> None:
@@ -92,6 +97,98 @@ Build the product.
     duplicate_message = "Evaluation corpus repeats https://example.com/job"
     with pytest.raises(ValueError, match=duplicate_message):
         _ = load_evaluation_corpus(tmp_path)
+
+
+def test_rejects_duplicate_logical_case_ids(tmp_path: Path) -> None:
+    for outcome in ("pass", "reject"):
+        directory = tmp_path / outcome
+        directory.mkdir()
+        (directory / "same.md").write_text(
+            f"Title: Engineer\nURL Source: https://example.com/{outcome}\n"
+        )
+
+    with pytest.raises(ValueError, match="Evaluation corpus repeats case ID same"):
+        _ = load_evaluation_corpus(tmp_path)
+
+
+def test_corpus_identity_tracks_bytes_and_policy_without_tracking_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "pass"
+    directory.mkdir()
+    fixture = directory / "example.md"
+    fixture.write_text("Title: Engineer\nURL Source: https://example.com/job\n")
+    original = load_evaluation_corpus(tmp_path)
+    first = corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=1")
+
+    moved = (original[0].model_copy(update={"relative_path": "elsewhere/example.md"}),)
+    assert corpus_identity(moved, "direct", "a" * 64, "p" * 64, "EUR=1") == first
+    assert (
+        corpus_identity(original, "direct", "b" * 64, "p" * 64, "EUR=1").run_digest
+        != first.run_digest
+    )
+    assert (
+        corpus_identity(original, "direct", "a" * 64, "q" * 64, "EUR=1").run_digest
+        != first.run_digest
+    )
+    assert (
+        corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=2").run_digest
+        != first.run_digest
+    )
+    monkeypatch.setattr(corpus_module, "MAX_FALSE_POSITIVE_RATE", Decimal("0.20"))
+    assert (
+        corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=1").run_digest
+        != first.run_digest
+    )
+
+    fixture.write_text("Title: Engineer\nURL Source: https://example.com/job\nChanged.\n")
+    changed = corpus_identity(
+        load_evaluation_corpus(tmp_path), "direct", "a" * 64, "p" * 64, "EUR=1"
+    )
+    assert changed.content_digest != first.content_digest
+    assert changed.run_digest != first.run_digest
+
+
+def test_corpus_identity_tracks_expected_outcome(tmp_path: Path) -> None:
+    directory = tmp_path / "pass"
+    directory.mkdir()
+    fixture = directory / "example.md"
+    fixture.write_text("Title: Engineer\nURL Source: https://example.com/job\n")
+    original = load_evaluation_corpus(tmp_path)
+    first = corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=1")
+
+    changed = (original[0].model_copy(update={"expected_outcome": "rejected"}),)
+    assert (
+        corpus_identity(changed, "direct", "a" * 64, "p" * 64, "EUR=1").content_digest
+        != first.content_digest
+    )
+
+
+def test_records_corpus_content_and_execution_policy_with_the_run() -> None:
+    release = build_prompt_release()
+    identity = CorpusIdentity(
+        content_digest="a" * 64,
+        run_digest="b" * 64,
+        execution_policy_digest="c" * 64,
+        prompt_release_id=str(release.id),
+    )
+
+    parameters = corpus_run_parameters("direct", "openrouter", 1, identity)
+    assert parameters["corpus_content_digest"] == identity.content_digest
+    assert parameters["corpus_run_digest"] == identity.run_digest
+    assert parameters["execution_policy_digest"] == identity.execution_policy_digest
+
+
+def test_pinned_jev_faithful_policy_matches_the_current_legacy_questions() -> None:
+    policy = build_jev_faithful_policy(build_prompt_release())
+    assert {name: question.model_dump() for name, question in policy.questions.items()} == {
+        name: {
+            "instructions": question.instructions,
+            "true": question.criteria.true,
+            "false": question.criteria.false,
+        }
+        for name, question in JEV_QUESTIONS.items()
+    }
 
 
 def test_loads_country_from_the_current_ats_format(tmp_path: Path) -> None:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar, Literal
+
+from job_finder.benchmarks.identity import canonical_digest
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,6 +48,7 @@ class DirectEvaluationCorpusCase(CorpusModel):
     kind: Literal["direct"] = "direct"
     name: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_outcome: EvaluationOutcome
     job: JobListing
 
@@ -53,12 +57,72 @@ class AtsEvaluationCorpusCase(CorpusModel):
     kind: Literal["ats"] = "ats"
     name: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_outcome: EvaluationOutcome
     job: JobListing
     evidence: AtsAvailable
 
 
 EvaluationCorpusCase = DirectEvaluationCorpusCase | AtsEvaluationCorpusCase
+
+
+class CorpusIdentity(CorpusModel):
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_release_id: str = Field(min_length=1)
+
+
+def corpus_identity(
+    cases: tuple[EvaluationCorpusCase, ...],
+    suite: CorpusSuite,
+    execution_policy_digest: str,
+    prompt_release_id: str,
+    rates: str,
+) -> CorpusIdentity:
+    if not cases or any(case.kind != suite for case in cases):
+        raise ValueError("Corpus identity requires a nonempty matching suite")
+    content_digest = canonical_digest(
+        [
+            {
+                "case_id": case.name,
+                "expected_outcome": case.expected_outcome,
+                "content_digest": case.content_digest,
+            }
+            for case in sorted(cases, key=lambda case: case.name)
+        ]
+    )
+    package_root = Path(__file__).parents[1]
+    suite_policy_digest = canonical_digest(
+        {
+            "structural_filter": sha256(
+                (package_root / "jobs" / "structural_filter.py").read_bytes()
+            ).hexdigest(),
+            "ats_policy": (
+                sha256((package_root / "ats" / "policy.py").read_bytes()).hexdigest()
+                if suite == "ats"
+                else None
+            ),
+            "max_false_positive_rate": str(MAX_FALSE_POSITIVE_RATE),
+            "max_false_negative_rate": str(MAX_FALSE_NEGATIVE_RATE),
+        }
+    )
+    return CorpusIdentity(
+        content_digest=content_digest,
+        run_digest=canonical_digest(
+            {
+                "version": "corpus-v1",
+                "suite": suite,
+                "content_digest": content_digest,
+                "execution_policy_digest": execution_policy_digest,
+                "prompt_release_id": prompt_release_id,
+                "rates": rates,
+                "suite_policy_digest": suite_policy_digest,
+            }
+        ),
+        execution_policy_digest=execution_policy_digest,
+        prompt_release_id=prompt_release_id,
+    )
 
 
 class EvaluationCorpusResult(CorpusModel):
@@ -113,7 +177,11 @@ def load_ats_evaluation_corpus(root: Path = CORPUS_ROOT) -> tuple[AtsEvaluationC
 
 def _validate_unique_jobs(cases: tuple[EvaluationCorpusCase, ...]) -> None:
     paths_by_url: dict[str, str] = {}
+    paths_by_name: dict[str, str] = {}
     for case in cases:
+        prior_name_path = paths_by_name.setdefault(case.name, case.relative_path)
+        if prior_name_path != case.relative_path:
+            raise ValueError(f"Evaluation corpus repeats case ID {case.name}")
         prior_path = paths_by_url.setdefault(case.job.url, case.relative_path)
         if prior_path != case.relative_path:
             raise ValueError(
@@ -181,10 +249,12 @@ def _load_direct_case(
     root: Path,
     expected_outcome: EvaluationOutcome,
 ) -> DirectEvaluationCorpusCase:
-    content = path.read_text()
+    raw_content = path.read_bytes()
+    content = raw_content.decode("utf-8")
     return DirectEvaluationCorpusCase(
         name=path.stem,
         relative_path=str(path.relative_to(root)),
+        content_digest=sha256(raw_content).hexdigest(),
         expected_outcome=expected_outcome,
         job=_load_job(path, content),
     )
@@ -195,11 +265,13 @@ def _load_ats_case(
     root: Path,
     expected_outcome: EvaluationOutcome,
 ) -> AtsEvaluationCorpusCase:
-    content = path.read_text()
+    raw_content = path.read_bytes()
+    content = raw_content.decode("utf-8")
     evidence, description = _parse_ats_fixture(path, content)
     return AtsEvaluationCorpusCase(
         name=path.stem,
         relative_path=str(path.relative_to(root)),
+        content_digest=sha256(raw_content).hexdigest(),
         expected_outcome=expected_outcome,
         job=_load_job(path, description),
         evidence=evidence,
