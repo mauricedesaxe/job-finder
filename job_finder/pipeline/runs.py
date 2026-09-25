@@ -11,15 +11,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from job_finder.configuration_service import PublishedActiveSearchConfiguration
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
-from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.pipeline.connection import Connection, require_autocommit
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
 RateSnapshotFactory = Callable[[], ExchangeRateSnapshot]
-ActiveConfigurationLoader = Callable[[Connection], PublishedActiveSearchConfiguration]
 _RATES = TypeAdapter(dict[str, Decimal])
 
 
@@ -50,8 +47,9 @@ def prepare_orchestration_run(
     *,
     idempotency_key: str,
     implementation_ref: str,
+    configuration_revision_id: SearchConfigurationRevisionId,
+    target: ReleaseTarget,
     started_at: datetime,
-    load_active_configuration: ActiveConfigurationLoader,
     fetch_rates: RateSnapshotFactory,
 ) -> OrchestrationRun:
     require_autocommit(connection)
@@ -59,6 +57,11 @@ def prepare_orchestration_run(
     if existing is not None:
         if existing.implementation_ref != implementation_ref:
             raise ValueError("Run idempotency key belongs to another implementation")
+        if (
+            existing.configuration_revision_id != configuration_revision_id
+            or existing.target != target
+        ):
+            raise ValueError("Run idempotency key belongs to another execution authority")
         if existing.status == "failed":
             with connection.transaction():
                 _ = connection.execute(
@@ -71,8 +74,6 @@ def prepare_orchestration_run(
                 )
             return load_run_by_id(connection, existing.id)
         return existing
-    active_configuration = load_active_configuration(connection)
-    active_target = get_active_release_target(connection)
     rates = fetch_rates()
     run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
     rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
@@ -92,9 +93,9 @@ def prepare_orchestration_run(
                 run_id,
                 idempotency_key,
                 implementation_ref,
-                active_configuration.publication.revision_id,
-                active_target.target.prompt_release_id,
-                active_target.target.relevance_release_id,
+                configuration_revision_id,
+                target.prompt_release_id,
+                target.relevance_release_id,
                 started_at,
             ),
         ).fetchone()

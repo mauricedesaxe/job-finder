@@ -15,13 +15,19 @@ from psycopg import sql
 
 from job_finder.config import PostgresContractSettings
 from job_finder.ats.models import AtsAvailable
-from job_finder.configuration_service import load_published_active_search_configuration
+from job_finder.configuration_service import (
+    ActivateConfigurationCommand,
+    ConfigurationActivated,
+    activate_search_configuration,
+)
 from job_finder.database import apply_migrations
 from job_finder.dagster import defs
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.models import ReleaseTarget
 from job_finder.evaluation.openrouter import HttpResponse
+from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.execution_budget import (
     BudgetSaved,
     ExecutionBlocked,
@@ -50,9 +56,11 @@ from job_finder.pipeline.runs import prepare_onboarding_run, prepare_orchestrati
 from job_finder.pipeline.discoveries import register_discoveries
 from job_finder.review.owner_access import OwnerBootstrapped, postgres_owner_access_service
 from job_finder.search_configuration import (
+    build_search_configuration_revision,
     build_search_queries,
     load_active_search_configuration,
     load_search_configuration_revision,
+    store_search_configuration_revision,
 )
 
 
@@ -135,8 +143,12 @@ def test_onboarding_work_cannot_enter_the_production_claim_queue(authority_schem
             connection,
             idempotency_key="dagster:scope-test",
             implementation_ref="commit-1",
+            configuration_revision_id=request.configuration_revision_id,
+            target=ReleaseTarget(
+                prompt_release_id=request.prompt_release_id,
+                relevance_release_id=request.relevance_release_id,
+            ),
             started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         _ = register_discoveries(
@@ -334,8 +346,12 @@ def test_worker_processes_only_its_scoped_job(authority_schema: str) -> None:
             connection,
             idempotency_key="dagster:production-backlog",
             implementation_ref="commit-1",
+            configuration_revision_id=created.request.configuration_revision_id,
+            target=ReleaseTarget(
+                prompt_release_id=created.request.prompt_release_id,
+                relevance_release_id=created.request.relevance_release_id,
+            ),
             started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         _ = register_discoveries(
@@ -659,7 +675,7 @@ def test_replay_keeps_pinned_provenance_after_active_config_changes(
         assert original.limits.max_urls == 40
         assert original.limits.max_jobs == 10
         assert original.limits.max_work_attempts == 3
-        assert original.limits.max_provider_attempts == 640
+        assert original.limits.max_provider_attempts == 400
         assert original.limits.run_allowance_usd == Decimal("50")
         _ = connection.execute(
             """
@@ -689,6 +705,90 @@ def test_replay_keeps_pinned_provenance_after_active_config_changes(
     assert replayed.request.release_generation == original.release_generation
     assert replayed.request.budget_policy_version == original.budget_policy_version
     assert replayed.request.limits == original.limits
+
+
+def test_request_uses_acquisition_queries_and_release_target_model_bounds(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    _prepare_test_search_owner(authority_schema, now)
+    with _connection(authority_schema) as connection:
+        initial = load_active_search_configuration(connection)
+        target = get_active_release_target(connection)
+        acquisition = initial.revision.configuration.model_copy(
+            update={
+                "personal_criteria": initial.revision.configuration.personal_criteria[:1],
+                "target_profiles": initial.revision.configuration.target_profiles[:1],
+            }
+        )
+        revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                acquisition,
+                created_at=now + timedelta(minutes=1),
+                created_by="owner",
+            ),
+        )
+        publication_release = store_prompt_release(
+            connection,
+            build_prompt_release(acquisition),
+            created_at=now + timedelta(minutes=1),
+            created_by="owner",
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, 'owner')
+            """,
+            (revision.id, publication_release.id, now + timedelta(minutes=1)),
+        )
+        activated = activate_search_configuration(
+            connection,
+            ActivateConfigurationCommand(
+                target_revision_id=revision.id,
+                expected_active_revision_id=initial.revision.id,
+                expected_generation=initial.generation,
+                actor="owner",
+                timestamp=now + timedelta(minutes=2),
+            ),
+        )
+        assert isinstance(activated, ConfigurationActivated)
+
+        created = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="release-target-budget",
+                actor="owner",
+                timestamp=now + timedelta(minutes=3),
+            ),
+        )
+        assert isinstance(created, OnboardingTestSearchAccepted)
+        reservation = connection.execute(
+            """
+            SELECT configuration_revision_id, prompt_release_id, relevance_release_id,
+                   release_generation, search_queries, logical_model_calls_per_job,
+                   maximum_provider_attempts
+            FROM execution_budget_reservations
+            WHERE idempotency_key = %s
+            """,
+            (created.request.budget_reservation_key,),
+        ).fetchone()
+
+    assert created.request.configuration_revision_id == revision.id
+    assert created.request.prompt_release_id == target.target.prompt_release_id
+    assert created.request.relevance_release_id == target.target.relevance_release_id
+    assert created.request.limits.max_queries == len(build_search_queries(acquisition))
+    assert created.request.limits.max_provider_attempts == 400
+    assert reservation == (
+        revision.id,
+        target.target.prompt_release_id,
+        target.target.relevance_release_id,
+        target.generation,
+        len(build_search_queries(acquisition)),
+        8,
+        400,
+    )
 
 
 def test_leases_are_exclusive_reclaimable_and_reject_stale_owners(

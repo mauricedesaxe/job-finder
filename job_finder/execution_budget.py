@@ -4,17 +4,31 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import ClassVar, Literal, TypeAlias, cast
+from typing import Annotated, ClassVar, Literal, TypeAlias, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import Connection, ConnectionFactory
+from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
+from job_finder.evaluation.prompt_releases import PromptRelease
+from job_finder.evaluation.release_targets import get_active_release_target, load_release_target
+from job_finder.evaluation.relevance_releases import (
+    GeminiExecutionPolicy,
+    JevAtomicExecutionPolicy,
+    JevFaithfulExecutionPolicy,
+    RelevanceExecutionPolicy,
+)
 from job_finder.evaluation.jev import JevRetryPolicy
 from job_finder.evaluation.openrouter import RetryPolicy as OpenRouterRetryPolicy
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
-from job_finder.search_configuration import SearchConfiguration
+from job_finder.search_configuration import (
+    SearchConfiguration,
+    SearchConfigurationRevisionId,
+    build_search_queries,
+    load_search_configuration_revision,
+)
 
 
 class ExecutionBudgetModel(BaseModel):
@@ -59,6 +73,14 @@ BudgetSaveResult: TypeAlias = BudgetSaved | BudgetChanged
 class ExecutionAdmitted(ExecutionBudgetModel):
     kind: Literal["admitted"] = "admitted"
     max_jobs: int
+    configuration_revision_id: Annotated[
+        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    target: ReleaseTarget
+    release_generation: int = Field(ge=0)
+    budget_policy_version: int = Field(ge=1)
+    run_allowance_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=8)
+    estimate: ExecutionEstimate
 
 
 class ExecutionBlocked(ExecutionBudgetModel):
@@ -94,32 +116,34 @@ class BudgetSetupService:
     save: Callable[[int, Decimal, Decimal, int, str, datetime], BudgetSaveResult]
 
 
-def estimate_execution(configuration: SearchConfiguration, max_jobs: int) -> ExecutionEstimate:
-    search_queries = len(configuration.search_keywords) * len(configuration.enabled_sources)
-    logical_calls_per_job = (
-        len(configuration.personal_criteria) + len(configuration.target_profiles) + 2
+def estimate_execution(
+    configuration: SearchConfiguration,
+    prompt_release: PromptRelease,
+    relevance_policy: RelevanceExecutionPolicy,
+    *,
+    max_jobs: int,
+) -> ExecutionEstimate:
+    relevance_calls = sum(
+        version.definition.phase in ("filter", "profile") for version in prompt_release.versions
     )
+    openrouter_calls = len(prompt_release.versions) - relevance_calls
+    match relevance_policy:
+        case GeminiExecutionPolicy():
+            relevance_attempts = relevance_calls * OpenRouterRetryPolicy().max_attempts * 2
+        case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
+            relevance_attempts = relevance_calls * JevRetryPolicy().max_attempts
+    openrouter_attempts = openrouter_calls * OpenRouterRetryPolicy().max_attempts * 2
     return ExecutionEstimate(
-        search_queries=search_queries,
+        search_queries=len(build_search_queries(configuration)),
         jobs_per_run=max_jobs,
-        logical_model_calls_per_job=logical_calls_per_job,
-        maximum_provider_attempts=(
-            logical_calls_per_job
-            * max_jobs
-            * max(
-                OpenRouterRetryPolicy().max_attempts * 2,
-                JevRetryPolicy().max_attempts,
-            )
-        ),
+        logical_model_calls_per_job=len(prompt_release.versions),
+        maximum_provider_attempts=(relevance_attempts + openrouter_attempts) * max_jobs,
     )
 
 
 def postgres_budget_setup_service(connect: ConnectionFactory) -> BudgetSetupService:
     def inspect(max_jobs: int) -> BudgetSetupState:
         with connect() as connection:
-            configuration = load_published_active_search_configuration(
-                connection
-            ).active.revision.configuration
             row = connection.execute(
                 """
                 SELECT version, monthly_limit_usd, run_allowance_usd,
@@ -129,14 +153,11 @@ def postgres_budget_setup_service(connect: ConnectionFactory) -> BudgetSetupServ
                 WHERE singleton_id = 1
                 """
             ).fetchone()
-        policy = None if row is None else _policy_from_row(row)
-        return BudgetSetupState(
-            policy=policy,
-            estimate=estimate_execution(
-                configuration,
-                max_jobs if policy is None else policy.max_jobs_per_run,
-            ),
-        )
+            policy = None if row is None else _policy_from_row(row)
+            estimate = _estimate_active_execution(
+                connection, max_jobs if policy is None else policy.max_jobs_per_run
+            )
+        return BudgetSetupState(policy=policy, estimate=estimate)
 
     def save(
         expected_version: int,
@@ -179,10 +200,7 @@ def postgres_budget_setup_service(connect: ConnectionFactory) -> BudgetSetupServ
                 return BudgetChanged(
                     policy=None if current_row is None else _policy_from_row(current_row)
                 )
-            configuration = load_published_active_search_configuration(
-                connection
-            ).active.revision.configuration
-            estimate = estimate_execution(configuration, max_jobs)
+            estimate = _estimate_active_execution(connection, max_jobs)
             policy = ExecutionBudgetPolicy(
                 version=expected_version + 1,
                 monthly_limit_usd=monthly_limit_usd,
@@ -297,7 +315,10 @@ def _admit_execution(
         return ExecutionBlocked(reason="onboarding_incomplete")
     existing = connection.execute(
         """
-        SELECT max_jobs, status
+        SELECT max_jobs, status, policy_version, reserved_usd,
+               configuration_revision_id, prompt_release_id, relevance_release_id,
+               release_generation, search_queries, logical_model_calls_per_job,
+               maximum_provider_attempts
         FROM execution_budget_reservations
         WHERE idempotency_key = %s
         """,
@@ -306,10 +327,11 @@ def _admit_execution(
     if existing is not None:
         if str(existing[1]) == "settled":
             return ExecutionBlocked(reason="already_consumed")
-        return ExecutionAdmitted(max_jobs=cast(int, existing[0]))
+        return _admitted_from_row(existing)
     policy_row = connection.execute(
         """
-        SELECT version, monthly_limit_usd, run_allowance_usd, max_jobs_per_run
+        SELECT version, monthly_limit_usd, run_allowance_usd, max_jobs_per_run,
+               max_search_queries_per_run, max_provider_attempts_per_run
         FROM execution_budget_policy
         WHERE singleton_id = 1
         FOR UPDATE
@@ -317,22 +339,36 @@ def _admit_execution(
     ).fetchone()
     if policy_row is None:
         return ExecutionBlocked(reason="budget_not_configured")
-    configuration = load_published_active_search_configuration(
-        connection
-    ).active.revision.configuration
-    estimate = estimate_execution(configuration, cast(int, policy_row[3]))
-    limits_row = connection.execute(
+    authority_row = connection.execute(
         """
-        SELECT max_search_queries_per_run, max_provider_attempts_per_run
-        FROM execution_budget_policy
-        WHERE singleton_id = 1
+        SELECT configuration.revision_id,
+               target.prompt_release_id, target.relevance_release_id, target.generation
+        FROM active_search_configuration configuration
+        CROSS JOIN active_release_target target
+        WHERE configuration.singleton_id = 1 AND target.singleton_id = 1
+        FOR SHARE OF configuration, target
         """
     ).fetchone()
-    if limits_row is None:
-        raise RuntimeError("Execution budget limits could not be loaded")
+    if authority_row is None:
+        raise RuntimeError("Active execution authority is missing")
+    configuration_revision_id = SearchConfigurationRevisionId(str(authority_row[0]))
+    target = ReleaseTarget(
+        prompt_release_id=PromptReleaseId(str(authority_row[1])),
+        relevance_release_id=RelevanceReleaseId(str(authority_row[2])),
+    )
+    configuration = load_search_configuration_revision(
+        connection, configuration_revision_id
+    ).configuration
+    prompt_release, relevance_release = load_release_target(connection, target)
+    estimate = estimate_execution(
+        configuration,
+        prompt_release,
+        relevance_release.policy,
+        max_jobs=cast(int, policy_row[3]),
+    )
     if estimate.search_queries > cast(
-        int, limits_row[0]
-    ) or estimate.maximum_provider_attempts > cast(int, limits_row[1]):
+        int, policy_row[4]
+    ) or estimate.maximum_provider_attempts > cast(int, policy_row[5]):
         return ExecutionBlocked(reason="configuration_exceeds_policy")
     consumed_row = connection.execute(
         """
@@ -353,8 +389,12 @@ def _admit_execution(
         """
         INSERT INTO execution_budget_reservations (
           idempotency_key, policy_version, period_start, reserved_usd,
-          status, max_jobs, created_at
-        ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s)
+          status, max_jobs, configuration_revision_id, prompt_release_id,
+          relevance_release_id, release_generation, search_queries,
+          logical_model_calls_per_job, maximum_provider_attempts, created_at
+        ) VALUES (
+          %s, %s, %s, %s, 'reserved', %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
         """,
         (
             idempotency_key,
@@ -362,10 +402,63 @@ def _admit_execution(
             period_start,
             reservation,
             policy_row[3],
+            configuration_revision_id,
+            target.prompt_release_id,
+            target.relevance_release_id,
+            authority_row[3],
+            estimate.search_queries,
+            estimate.logical_model_calls_per_job,
+            estimate.maximum_provider_attempts,
             requested_at,
         ),
     )
-    return ExecutionAdmitted(max_jobs=cast(int, policy_row[3]))
+    return ExecutionAdmitted(
+        max_jobs=cast(int, policy_row[3]),
+        configuration_revision_id=configuration_revision_id,
+        target=target,
+        release_generation=cast(int, authority_row[3]),
+        budget_policy_version=cast(int, policy_row[0]),
+        run_allowance_usd=reservation,
+        estimate=estimate,
+    )
+
+
+def _estimate_active_execution(connection: Connection, max_jobs: int) -> ExecutionEstimate:
+    configuration = load_published_active_search_configuration(
+        connection
+    ).active.revision.configuration
+    active_target = get_active_release_target(connection)
+    prompt_release, relevance_release = load_release_target(connection, active_target.target)
+    return estimate_execution(
+        configuration,
+        prompt_release,
+        relevance_release.policy,
+        max_jobs=max_jobs,
+    )
+
+
+def _admitted_from_row(row: tuple[object, ...]) -> ExecutionAdmitted:
+    if any(value is None for value in row[4:]):
+        raise RuntimeError("Existing execution reservation has no pinned authority")
+    max_jobs = cast(int, row[0])
+    target = ReleaseTarget(
+        prompt_release_id=PromptReleaseId(str(row[5])),
+        relevance_release_id=RelevanceReleaseId(str(row[6])),
+    )
+    return ExecutionAdmitted(
+        max_jobs=max_jobs,
+        configuration_revision_id=SearchConfigurationRevisionId(str(row[4])),
+        target=target,
+        release_generation=cast(int, row[7]),
+        budget_policy_version=cast(int, row[2]),
+        run_allowance_usd=Decimal(str(row[3])),
+        estimate=ExecutionEstimate(
+            search_queries=cast(int, row[8]),
+            jobs_per_run=max_jobs,
+            logical_model_calls_per_job=cast(int, row[9]),
+            maximum_provider_attempts=cast(int, row[10]),
+        ),
+    )
 
 
 def settle_execution_budget(
