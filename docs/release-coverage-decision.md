@@ -1,85 +1,120 @@
 # Release coverage and promotion evidence
 
-Status: Proposed for owner approval. Bead: `job-finder-rac.6.2`.
+Status: Accepted. Bead: `job-finder-rac.6.2`.
 
-## Current contract
+## Current mismatch
 
-`ReleaseTarget` pairs a prompt release with a relevance release. A prompt release
-contains filter, profile, enrichment, and title-deduplication prompts. A
-relevance release identifies the provider, model, composition rules, and SHA-256
-bytes of selected relevance source files. `validate_release_target` checks those
-source bytes against the files in the running checkout.
+The legacy `ReleaseTarget` pairs one prompt release with one relevance release.
+The prompt release contains filter, profile, enrichment, and title-deduplication
+prompts. The manifest benchmark executes only filter and profile relevance. It
+does not exercise input preparation, structural rejection, enrichment, title
+deduplication, or the production work-item path.
 
-The PostgreSQL manifest runner calls `evaluate_job` for each curated case. It
-uses only filter and profile prompt versions. It does not run ATS enrichment,
-structural rejection, enrichment prompts, title deduplication, or the stateful
-production work-item path. The comparison and promotion decision therefore
-measure relevance outcomes on the frozen manifest. They do not certify the
-complete production qualification path or changes to the other prompt phases.
-`implementation_ref` is stored with a run, but callers supply it as an arbitrary
-string. It is not verified against the checkout or deployment image.
+The current promotion gate can therefore approve and activate behavior it did
+not test. A candidate that changes only enrichment or deduplication can produce
+unchanged relevance results and still replace the complete active pair. A
+caller-supplied `implementation_ref` also does not prove which executor produced
+the benchmark results.
 
-## Decision
+## Qualification target
 
-Treat the existing paired target as a legacy target whose promotion gate covers
-**relevance evaluation only**. Keep its stored IDs and activation receipts
-unchanged. Do not describe a passing manifest comparison as approval of ATS,
-structural, enrichment, deduplication, or end-to-end production behavior.
+Production activates one content-addressed qualification target atomically. The
+target identifies the immutable input-preparation, relevance, enrichment, and
+deduplication component releases that execute together. One active pointer, CAS
+generation, and activation receipt select the complete target. Components do not
+have independent active pointers because enrichment output affects downstream
+deduplication and company policy.
 
-For new lifecycle work, use separate immutable, independently activated targets
-for relevance, enrichment, and title deduplication. The relevance target owns
-filter and profile prompt versions, execution policy, and the source artifacts
-that actually execute those versions. Enrichment and deduplication need their own
-evidence and promotion rules before their activations are gated. ATS and
-structural policy are separate deterministic qualification inputs, pinned on a
-production run and tested by their own fixtures. A single owner-facing setup
-screen may edit several drafts, but it does not imply one persisted release or
-one shared approval gate.
+Each component has its own identity and evidence contract:
 
-A relevance promotion compares a baseline and candidate on the same immutable
-manifest and records the exact target and verified implementation identity for
-each run. The implementation identity must be derived from the executing build
-and the relevant source/dependency closure, not a caller-supplied label.
-Historical `implementation_ref` values remain labels; do not reinterpret them
-as verified identities. Any future full-path gate needs a distinct manifest and
-result type that actually executes the full path.
+- The input-preparation release identifies ATS enablement, adapter and parser
+  behavior, formatting policy, and structural rejection policy.
+- The relevance release identifies filter and profile prompts, model and
+  composition policy, and its executor artifact.
+- The enrichment release identifies its prompt, output schema, model policy, and
+  executor artifact.
+- The deduplication release identifies normalization, exact-match and ledger
+  behavior, fallback prompt policy, and its executor artifact.
+
+The qualification target owns composition. Activation requires acceptable
+evidence for every changed component plus a composition contract that executes
+the complete candidate. Unchanged components may reuse existing evidence.
+
+## Evidence
+
+Relevance comparisons use one immutable experiment input containing the manifest,
+exchange-rate snapshot, and provider experiment settings. Baseline and candidate
+runs must share that identity. Direct and ATS-prepared cases remain distinguishable
+so the evidence states which input path it covers.
+
+Only the canonical target-resolving executor may produce promotable runs.
+Synthetic or imported evaluators remain useful for tests and analysis but are
+explicitly non-promotable. Benchmark attempts retain their input digest,
+requested and observed model, provider response identity, and immutable response
+evidence.
+
+Enrichment evidence freezes the prepared listing input and expected canonical
+fields. Deduplication evidence freezes the normalized company, candidate title,
+existing-title set, and expected match. Input-preparation evidence uses the ATS
+and structural fixture suites. The composition contract runs a complete
+qualification target through the production command path.
+
+## Implementation identity
+
+An implementation artifact is generated by the build, not supplied by a caller.
+Its content-addressed manifest identifies the runtime, dependency lock,
+entrypoints, and owned first-party source closure. Benchmark and production
+resolve the same stored target to the same artifact. Historical
+`implementation_ref` strings remain unverified labels and are never reinterpreted
+as artifact identities.
+
+## Legacy policy
+
+Legacy release targets, decisions, activation receipts, and run references stay
+immutable. New legacy targets are not created after the composite target exists.
+Until cutover, relevance-only legacy promotion is allowed only when every
+uncovered prompt and policy component is identical to the baseline. A changed
+uncovered component requires component evidence and a composite target.
+
+Historical execution availability is explicit: verified when an immutable
+artifact exists, unavailable when it does not, and unknown when stored data
+cannot prove either state. Preserving a source path without its dependency
+closure does not qualify as replay support.
 
 ## Migration order
 
-1. Inventory active and historical target IDs, release policies, source
-   entrypoints, and activation receipts. Preserve every stored digest and
-   historical run reference.
-2. Add the new target and verified implementation identities beside the legacy
-   rows. Backfill only facts that can be proven from stored data; leave unknown
-   historical implementation identities explicitly unknown.
-3. Keep the existing hashed serving files byte-for-byte intact while an active
-   or replayable legacy target references them. Put the new executor at a new
-   entrypoint, hash its actual source, and dispatch both benchmark and production
-   execution by the stored target identity. Benchmark that candidate against a
-   baseline on one frozen manifest, then activate it through a checked
-   promotion. The benchmark and production calls for a target must resolve to
-   the same implementation. The old files remain executable implementations for
-   old targets, not import-only compatibility facades.
-4. Migrate internal callers to the new subject modules without re-exports.
-   Move or delete an old hashed file only after no active or replayable target
-   requires its original path and bytes, or after an immutable versioned
-   implementation provides the exact persisted artifact. Never rewrite an old
-   digest to make a move look unchanged.
-5. Update budget estimates and run provenance from the exact pinned acquisition
-   policy and release targets. A configuration-only activation must not change
-   the estimated model calls of an unchanged relevance target.
+1. Inventory legacy target pairs, prompt members, policies, implementation
+   labels, active state, activation receipts, and historical references.
+2. Add implementation artifacts, component releases, immutable experiment
+   inputs, evidence records, and content-addressed qualification targets beside
+   the legacy tables.
+3. Represent target kind explicitly. A legacy target references the existing
+   prompt and relevance pair without rewriting either ID. A composite target
+   references every component release.
+4. Backfill only facts proven by stored data. Mark unverifiable historical
+   implementation identities and execution availability as unknown.
+5. Put the composite executor at a new entrypoint. Both benchmark and production
+   dispatch through stored target identity. Promote and activate the first
+   composite target only after every component and the full composition pass.
+6. Pin the acquisition policy and qualification target when creating a run.
+   Workers read input-preparation policy from the run instead of mutable process
+   settings.
+7. Derive search-query estimates from the acquisition policy and model-call
+   estimates from the qualification target's execution plan.
+8. Move internal callers without re-exports. Move or delete a legacy hashed file
+   only after no active target requires it and its execution-availability policy
+   is satisfied. Never rewrite a persisted digest.
 
-This order means the `evaluate.py`, `jev.py`, and `openrouter.py` byte-preservation
-rule remains in force for package-only moves. The job-model move in
-`job-finder-rac.2.1` cannot delete `job_finder.jobs.models` while `evaluate.py`
-still imports it. It must either wait for the versioned-executor migration or
-retain the old model as a real legacy implementation dependency until the
-persisted target is retired. No internal caller gets a compatibility re-export.
+The `evaluate.py`, `jev.py`, and `openrouter.py` byte-preservation rule remains in
+force until composite execution replaces those legacy artifacts. The job-model
+move in `job-finder-rac.2.1` must wait for that cutover because `evaluate.py`
+imports the legacy model. The old model remains a real legacy executor dependency,
+not a compatibility facade.
 
 ## Rejected choices
 
-Keeping the combined target indefinitely lets a relevance-only benchmark appear
-to approve changes to enrichment and deduplication. Expanding this manifest into
-a full production gate would require raw discovery inputs, ATS and structural
-outcomes, stateful work transitions, and separate expected results. Calling the
-current manifest a full-path gate would make its evidence misleading.
+Keeping the combined target indefinitely would preserve an authorization gate
+that approves untested behavior. Independently activating relevance, enrichment,
+and deduplication would permit component combinations that no evidence exercised.
+Calling the current relevance manifest a full-path gate would overstate what its
+results prove.
