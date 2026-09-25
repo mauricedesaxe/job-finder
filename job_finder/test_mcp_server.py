@@ -42,6 +42,12 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
         async with Client(server) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
             assert set(tools) == {
+                "acquisition_active_get",
+                "acquisition_draft_get",
+                "acquisition_revision_get",
+                "acquisition_draft_update",
+                "acquisition_publish",
+                "acquisition_activate",
                 "feedback_list",
                 "feedback_get",
                 "feedback_curate",
