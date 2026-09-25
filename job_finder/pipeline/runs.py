@@ -69,7 +69,7 @@ def prepare_orchestration_run(
                     """,
                     (existing.id,),
                 )
-            return _load_run_by_id(connection, existing.id)
+            return load_run_by_id(connection, existing.id)
         return existing
     active_configuration = load_active_configuration(connection)
     active_target = get_active_release_target(connection)
@@ -120,7 +120,7 @@ def load_orchestration_run(connection: Connection, idempotency_key: str) -> Orch
         "SELECT id FROM pipeline_runs WHERE idempotency_key = %s AND kind = 'orchestration'",
         (idempotency_key,),
     ).fetchone()
-    return None if row is None else _load_run_by_id(connection, UUID(str(row[0])))
+    return None if row is None else load_run_by_id(connection, UUID(str(row[0])))
 
 
 def prepare_onboarding_run(
@@ -141,7 +141,7 @@ def prepare_onboarding_run(
     if existing is not None:
         if str(existing[1]) != "onboarding" or str(existing[2]) != implementation_ref:
             raise ValueError("Onboarding run identity belongs to another execution")
-        stored = _load_run_by_id(connection, run_id)
+        stored = load_run_by_id(connection, run_id)
         if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
             raise ValueError("Onboarding run provenance differs from its pinned request")
         if stored.status == "failed":
@@ -153,7 +153,7 @@ def prepare_onboarding_run(
                     """,
                     (run_id,),
                 )
-            return _load_run_by_id(connection, run_id)
+            return load_run_by_id(connection, run_id)
         return stored
     rates = fetch_rates()
     rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
@@ -185,7 +185,7 @@ def prepare_onboarding_run(
             """,
             (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
         )
-    return _load_run_by_id(connection, run_id)
+    return load_run_by_id(connection, run_id)
 
 
 def complete_orchestration_run(
@@ -223,11 +223,7 @@ def fail_orchestration_run(
         )
 
 
-def load_processing_run(connection: Connection, run_id: UUID) -> OrchestrationRun:
-    return _load_run_by_id(connection, run_id)
-
-
-def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
+def load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
     row = connection.execute(
         """
         SELECT r.idempotency_key, r.implementation_ref, r.configuration_revision_id,

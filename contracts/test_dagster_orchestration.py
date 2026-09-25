@@ -36,7 +36,7 @@ from job_finder.pipeline.orchestration import (
     discover_jobs,
     process_claimed_jobs,
 )
-from job_finder.pipeline.state import (
+from job_finder.pipeline.work_items import (
     JobWorkClaim,
     claim_next_job,
     complete_job_claim,

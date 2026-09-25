@@ -31,7 +31,7 @@ from job_finder.onboarding_test_search import (
 )
 from job_finder.pipeline.orchestration import PipelineBoundaries, process_claimed_jobs
 from job_finder.pipeline.connection import Connection
-from job_finder.pipeline.state import JobWorkClaim
+from job_finder.pipeline.work_items import JobWorkClaim
 from job_finder.pipeline.runs import (
     complete_orchestration_run,
     fail_orchestration_run,

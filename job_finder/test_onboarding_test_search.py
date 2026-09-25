@@ -9,7 +9,7 @@ from job_finder.onboarding_test_search import (
     onboarding_test_search_reservation_key,
     onboarding_test_search_run_id,
 )
-from job_finder.pipeline.state import JOB_WORK_ATTEMPT_LIMIT
+from job_finder.pipeline.work_items import JOB_WORK_ATTEMPT_LIMIT
 from job_finder.search_configuration import DEFAULT_SEARCH_CONFIGURATION
 
 
