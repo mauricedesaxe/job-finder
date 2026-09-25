@@ -280,6 +280,7 @@ EXPECTED_MIGRATIONS = (
     "0036_execution_budget_authority.sql",
     "0037_run_budget_authority_guard.sql",
     "0038_policy_revisions.sql",
+    "0039_policy_lifecycle_state.sql",
 )
 
 
@@ -404,6 +405,151 @@ def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
         caught_up_rows = _table_contents(connection, projection_tables)
         _ = connection.execute("SELECT backfill_legacy_search_configuration_policies()")
         assert _table_contents(connection, projection_tables) == caught_up_rows
+
+
+def test_split_policy_state_seeds_without_changing_legacy_authority(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    first = DEFAULT_SEARCH_CONFIGURATION
+    second = first.model_copy(update={"search_keywords": (*first.search_keywords, "another role")})
+    with _connection(authority_schema) as connection:
+        _apply_migrations_through(connection, "0038_policy_revisions.sql")
+        first_revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(first, created_at=now, created_by="owner"),
+        )
+        second_revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                second, created_at=now + timedelta(seconds=1), created_by="owner"
+            ),
+        )
+        prompt = build_prompt_release(first)
+        _ = store_prompt_release(connection, prompt, created_at=now, created_by="owner")
+        alternate_prompt = build_prompt_release(
+            first.model_copy(
+                update={
+                    "target_profiles": (
+                        first.target_profiles[0].model_copy(
+                            update={"instructions": "Revised profile instructions."}
+                        ),
+                        *first.target_profiles[1:],
+                    )
+                }
+            )
+        )
+        _ = store_prompt_release(connection, alternate_prompt, created_at=now, created_by="owner")
+        assert alternate_prompt.id != prompt.id
+        for revision, release in ((first_revision, prompt), (second_revision, alternate_prompt)):
+            _ = connection.execute(
+                """
+                INSERT INTO search_configuration_publications (
+                  revision_id, prompt_release_id, published_at, published_by
+                ) VALUES (%s, %s, %s, 'owner')
+                """,
+                (revision.id, release.id, now),
+            )
+        _ = connection.execute(
+            """
+            INSERT INTO search_configuration_drafts (
+              singleton_id, base_revision_id, version, content, updated_at, updated_by
+            ) VALUES (1, %s, 7, %s, %s, 'owner')
+            """,
+            (second_revision.id, Jsonb(second.model_dump(mode="json")), now),
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO active_search_configuration (
+              singleton_id, revision_id, generation, activated_at, activated_by
+            ) VALUES (1, %s, 4, %s, 'owner')
+            """,
+            (second_revision.id, now),
+        )
+        legacy_tables = tuple(
+            table
+            for table in _public_tables(connection)
+            if table
+            not in {
+                "acquisition_policy_revisions",
+                "qualification_definition_revisions",
+                "legacy_search_configuration_policy_projections",
+            }
+        )
+        legacy_rows = _table_contents(connection, legacy_tables)
+
+        assert apply_migrations(connection) == EXPECTED_MIGRATIONS
+        assert _table_contents(connection, legacy_tables) == legacy_rows
+        projection = project_legacy_search_configuration(second)
+        acquisition_id = acquisition_policy_revision_id(projection.acquisition)
+        qualification_id = qualification_definition_revision_id(projection.qualification)
+        assert connection.execute(
+            "SELECT revision_id, generation FROM active_acquisition_policy"
+        ).fetchone() == (acquisition_id, 0)
+        assert connection.execute(
+            "SELECT base_revision_id, version, content FROM acquisition_policy_drafts"
+        ).fetchone() == (acquisition_id, 0, projection.acquisition.model_dump(mode="json"))
+        assert connection.execute(
+            "SELECT base_revision_id, version, content FROM qualification_definition_drafts"
+        ).fetchone() == (qualification_id, 0, projection.qualification.model_dump(mode="json"))
+        assert connection.execute(
+            "SELECT count(*) FROM legacy_search_configuration_publication_projections"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM acquisition_policy_publications"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM qualification_definition_publications"
+        ).fetchone() == (1,)
+
+        split_tables = (
+            "acquisition_policy_publications",
+            "qualification_definition_publications",
+            "legacy_search_configuration_publication_projections",
+            "acquisition_policy_drafts",
+            "qualification_definition_drafts",
+            "active_acquisition_policy",
+        )
+        seeded_rows = _table_contents(connection, split_tables)
+        _ = connection.execute("SELECT backfill_legacy_search_configuration_publications()")
+        assert _table_contents(connection, split_tables) == seeded_rows
+        assert _table_contents(connection, legacy_tables) == legacy_rows
+
+        later = second.model_copy(
+            update={"search_keywords": (*second.search_keywords, "later role")}
+        )
+        later_revision = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                later, created_at=now + timedelta(days=1), created_by="owner"
+            ),
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO search_configuration_publications (
+              revision_id, prompt_release_id, published_at, published_by
+            ) VALUES (%s, %s, %s, 'owner')
+            """,
+            (later_revision.id, prompt.id, now + timedelta(days=1)),
+        )
+        _ = connection.execute("SELECT backfill_legacy_search_configuration_publications()")
+        assert connection.execute(
+            """
+            SELECT count(*) FROM legacy_search_configuration_publication_projections
+            WHERE legacy_revision_id = %s
+            """,
+            (later_revision.id,),
+        ).fetchone() == (1,)
+        assert _table_contents(connection, split_tables[3:]) == {
+            table: seeded_rows[table] for table in split_tables[3:]
+        }
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute("UPDATE acquisition_policy_drafts SET version = version + 2")
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                "UPDATE active_acquisition_policy SET generation = generation + 1"
+            )
 
 
 def test_owner_bootstrap_is_single_winner_and_authenticates_from_postgres(
