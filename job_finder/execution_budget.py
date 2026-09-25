@@ -316,17 +316,16 @@ def admit_onboarding_test_execution(
     *,
     idempotency_key: str,
     requested_at: datetime,
-) -> ExecutionAdmitted | ExecutionBlocked:
+    artifact_path: Path | None = None,
+) -> ExecutionAdmission:
     with connection.transaction():
-        result = _admit_execution(
+        return _admit_execution(
             connection,
             idempotency_key=idempotency_key,
             requested_at=requested_at,
             allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
+            artifact_path=artifact_path,
         )
-        if isinstance(result, SplitExecutionAdmitted):
-            raise RuntimeError("Onboarding test search cannot replay split authority yet")
-        return result
 
 
 def _admit_execution(

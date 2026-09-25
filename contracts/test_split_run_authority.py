@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -19,6 +19,10 @@ from job_finder.acquisition_policy import (
     acquisition_policy_revision_id,
 )
 from job_finder.acquisition_policy_service import load_acquisition_policy_revision
+from job_finder.acquisition_policy_activation import (
+    ActivateAcquisitionPolicyCommand,
+    activate_acquisition_policy,
+)
 from job_finder.ats.models import AtsNotApplicable
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
@@ -38,6 +42,14 @@ from job_finder.evaluation.qualification_prompt_compilations import (
     bind_qualification_prompt_release,
 )
 from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
+from job_finder.onboarding_test_search import (
+    CreateOnboardingTestSearch,
+    OnboardingTestSearchAccepted,
+    SplitOnboardingTestSearchRequest,
+    create_onboarding_test_search,
+    load_onboarding_test_search,
+)
+from job_finder.onboarding_test_search_worker import execute_next_onboarding_test_search
 from job_finder.pipeline.runs import (
     SplitOrchestrationRun,
     fail_orchestration_run,
@@ -68,6 +80,28 @@ def _schema():
         finally:
             _ = connection.execute("SET search_path TO public")
             _ = connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
+
+
+def _seed_test_search_owner(
+    connection: psycopg.Connection[tuple[object, ...]], now: datetime
+) -> None:
+    _ = connection.execute("TRUNCATE owner_onboarding")
+    _ = connection.execute(
+        """
+        INSERT INTO owner_onboarding (singleton_id, stage, password_hash)
+        VALUES (1, 'test_search', 'scrypt$v=1$fixture')
+        """
+    )
+    _ = connection.execute(
+        """
+        INSERT INTO execution_budget_policy (
+          singleton_id, version, monthly_limit_usd, run_allowance_usd,
+          max_jobs_per_run, max_search_queries_per_run,
+          max_provider_attempts_per_run, updated_at, updated_by
+        ) VALUES (1, 1, 500, 50, 5, 10000, 1000000, %s, 'owner')
+        """,
+        (now,),
+    )
 
 
 def _compiled_release(
@@ -341,6 +375,104 @@ def test_split_onboarding_run_retries_with_pinned_authority_and_rates() -> None:
                     started_at=now,
                     fetch_rates=lambda: pytest.fail("rates were refetched"),
                 )
+
+
+def test_split_onboarding_worker_uses_reserved_policy_after_active_changes() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    searched: list[str] = []
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _seed_test_search_owner(connection, now)
+        _, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        alternate_id = _store_alternate_acquisition_policy(connection, now)
+        original = connection.execute(
+            "SELECT revision_id FROM active_acquisition_policy WHERE singleton_id = 1"
+        ).fetchone()
+        assert original is not None
+        _ = connection.execute(
+            """
+            INSERT INTO acquisition_policy_publications (revision_id, published_at, published_by)
+            VALUES (%s, %s, 'owner')
+            """,
+            (alternate_id, now),
+        )
+        _ = activate_acquisition_policy(
+            connection,
+            ActivateAcquisitionPolicyCommand(
+                idempotency_key="activate-split-worker",
+                candidate_revision_id=alternate_id,
+                expected_revision_id=AcquisitionPolicyRevisionId(cast(str, original[0])),
+                expected_generation=0,
+                actor="owner",
+                timestamp=now,
+            ),
+        )
+        root = Path(__file__).resolve().parents[1]
+        with NamedTemporaryFile(dir=root, suffix=".json") as temporary:
+            artifact_path = Path(temporary.name)
+            _ = write_implementation_artifact(root, artifact_path)
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            _ = connection.execute(
+                """
+                UPDATE active_qualification_target
+                SET target_id = %s, generation = 1, activated_at = %s, activated_by = 'owner'
+                WHERE singleton_id = 1
+                """,
+                (target_id, now),
+            )
+            created = create_onboarding_test_search(
+                connection,
+                CreateOnboardingTestSearch(
+                    idempotency_key="split-worker", actor="owner", timestamp=now
+                ),
+                artifact_path=artifact_path,
+            )
+            assert isinstance(created, OnboardingTestSearchAccepted)
+            assert isinstance(created.request, SplitOnboardingTestSearchRequest)
+            assert created.request.acquisition_policy_revision_id == alternate_id
+            _ = activate_acquisition_policy(
+                connection,
+                ActivateAcquisitionPolicyCommand(
+                    idempotency_key="restore-split-worker",
+                    candidate_revision_id=AcquisitionPolicyRevisionId(cast(str, original[0])),
+                    expected_revision_id=alternate_id,
+                    expected_generation=1,
+                    actor="owner",
+                    timestamp=now,
+                ),
+            )
+            result = execute_next_onboarding_test_search(
+                connection,
+                PipelineBoundaries(
+                    search=lambda keyword, _domain: (
+                        searched.append(keyword) or SearchSucceeded(urls=())
+                    ),
+                    scrape=lambda _url: JinaUnavailable(
+                        operation="scrape", error_code="unused", reason="unused"
+                    ),
+                    fetch_ats=lambda _url, _title: AtsNotApplicable(),
+                ),
+                implementation_ref="build",
+                openrouter_api_key="unused",
+                typesafe_api_key=None,
+                owner_token=uuid4(),
+                lease_for=timedelta(minutes=5),
+                retry_after=timedelta(minutes=1),
+                enable_ats_enrichment=False,
+                fetch_rates=lambda: ExchangeRateSnapshot(
+                    rates={"EUR": Decimal("1.1")}, source="fallback", observed_at=now
+                ),
+                artifact_path=artifact_path,
+                now=lambda: now,
+            )
+            stored = load_onboarding_test_search(connection, "split-worker")
+            assert result.state == "completed"
+            assert searched == ["split policy"]
+            assert isinstance(stored, SplitOnboardingTestSearchRequest)
+            assert stored.acquisition_policy_revision_id == alternate_id
 
 
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:

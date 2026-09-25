@@ -84,7 +84,9 @@ def create_app() -> FastHTML:
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
         onboarding_progress_service=postgres_onboarding_progress_service(connect),
-        test_search_service=postgres_test_search_service(connect),
+        test_search_service=postgres_test_search_service(
+            connect, artifact_path=settings.split_execution_artifact_path
+        ),
         budget_setup_service=postgres_budget_setup_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
