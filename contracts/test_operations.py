@@ -22,11 +22,20 @@ from job_finder.configuration_service import load_published_active_search_config
 from job_finder.pipeline.work_items import claim_next_job
 from job_finder.pipeline.runs import prepare_orchestration_run
 from job_finder.review.analytics import load_spend_analytics
+from job_finder.pipeline.work_dismissals import (
+    DismissalAction,
+    WorkDismissalApplied,
+    WorkDismissalCommand,
+    WorkDismissalKeyConflict,
+    WorkDismissalNotFound,
+    WorkDismissalResult,
+    WorkDismissalStaleState,
+    dismiss_work,
+)
 from job_finder.review.operations import (
     ActivityPage,
     ActivityQuery,
     ActivityRun,
-    DismissalAction,
     WorkItemNotFound,
     JobReevaluationAccepted,
     JobReevaluationActiveWork,
@@ -34,13 +43,7 @@ from job_finder.review.operations import (
     JobReevaluationKeyConflict,
     OperationsHealth,
     RecoveryAction,
-    WorkDismissalApplied,
-    WorkDismissalCommand,
-    WorkDismissalKeyConflict,
-    WorkDismissalNotFound,
-    WorkDismissalResult,
     RunNotFound,
-    WorkDismissalStaleState,
     WorkRecoveryActiveLease,
     WorkRecoveryApplied,
     WorkRecoveryCommand,
@@ -52,7 +55,6 @@ from job_finder.review.operations import (
     load_work_item_detail,
     load_pipeline_runs,
     load_run_detail,
-    dismiss_work,
     recover_work,
     request_job_reevaluation,
 )
