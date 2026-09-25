@@ -24,6 +24,8 @@ from job_finder.operations.web import register_operations_routes
 from job_finder.provider_credentials import ProviderSetupService
 from job_finder.review.access_web import register_access_routes, require_owner as access_guard
 from job_finder.review.configuration import register_configuration_routes
+from job_finder.database import ConnectionFactory
+from job_finder.review.split_configuration import register_split_configuration_routes
 from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.review.feedback import ReviewFeedbackService
 from job_finder.review.onboarding import OnboardingProgressService, OnboardingSearchService
@@ -111,6 +113,7 @@ def create_review_app(
     control_service: ControlPlaneService | None = None,
     actor: str = "owner",
     now: _DateTimeClock = lambda: datetime.now(UTC),
+    split_configuration_connect: ConnectionFactory | None = None,
 ) -> FastHTML:
     operations = operations_service or unknown_operations_service()
     runs = runs_service or RunsService()
@@ -154,14 +157,21 @@ def create_review_app(
         now=now,
     )
 
-    register_configuration_routes(
-        app,
-        configuration_service=configuration_service,
-        owner_access_service=owner_access_service,
-        onboarding_progress_service=onboarding_progress_service,
-        actor=actor,
-        now=now,
-    )
+    if settings.split_execution_artifact_path is not None:
+        if split_configuration_connect is None:
+            raise ValueError("Split search setup requires a database connection")
+        register_split_configuration_routes(
+            app, connect=split_configuration_connect, actor=actor, now=now
+        )
+    else:
+        register_configuration_routes(
+            app,
+            configuration_service=configuration_service,
+            owner_access_service=owner_access_service,
+            onboarding_progress_service=onboarding_progress_service,
+            actor=actor,
+            now=now,
+        )
 
     workbench.register_item_routes(app)
 

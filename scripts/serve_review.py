@@ -87,6 +87,7 @@ def create_app() -> FastHTML:
         test_search_service=postgres_test_search_service(
             connect, artifact_path=settings.split_execution_artifact_path
         ),
+        split_configuration_connect=connect,
         budget_setup_service=postgres_budget_setup_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),

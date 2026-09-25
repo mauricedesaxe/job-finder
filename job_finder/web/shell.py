@@ -470,6 +470,17 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .configuration-state small, .preview-counts small { margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 900; }
 .mono { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.76rem; }
 .configuration-form { display: grid; gap: 1.5rem; }
+.split-setup { display: grid; gap: 1.5rem; }
+.split-config-panel { display: grid; gap: 1rem; }
+.split-config-panel h2, .split-config-panel p { margin: 0; }
+.split-config-form { display: grid; gap: 1rem; min-width: 0; }
+.split-config-form .keyword-list-field textarea { box-sizing: border-box; max-width: 100%; }
+.split-config-form .button { justify-self: start; }
+.split-config-action { display: inline-block; margin-right: 0.5rem; }
+.split-definition-editor { min-width: 0; border: 2px solid var(--line); background: var(--surface-raised); }
+.split-definition-editor summary { padding: 0.85rem; cursor: pointer; font-weight: 800; }
+.split-definition-editor label { display: grid; gap: 0.5rem; padding: 1rem; border-top: 2px solid var(--line); font-weight: 800; }
+.split-definition-editor textarea { box-sizing: border-box; width: 100%; max-width: 100%; padding: 0.75rem; border: 2px solid var(--line); background: var(--panel); color: var(--ink); font: 0.9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; resize: vertical; }
 .editor-section { min-width: 0; margin: 0; padding: clamp(1rem, 3vw, 1.6rem); border: 2px solid var(--line); background: var(--panel); box-shadow: 6px 6px 0 var(--shadow); }
 .editor-section legend { padding: 0 0.45rem; font: 700 1.55rem Georgia, 'Times New Roman', serif; }
 .field-help { margin-top: 0; color: var(--muted); }
