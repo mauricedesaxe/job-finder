@@ -7,6 +7,10 @@ from uuid import UUID
 
 import pytest
 
+from job_finder.pipeline.work_recoveries import (
+    RecoveryAction,
+    WorkRecoveryCommand,
+)
 from job_finder.review.operations import (
     ActionableWork,
     ActivityEntry,
@@ -21,10 +25,8 @@ from job_finder.review.operations import (
     PipelineRunStatus,
     PipelineRunSummary,
     QueueCounts,
-    RecoveryAction,
     SpendSummary,
     WorkItemState,
-    WorkRecoveryCommand,
     decode_activity_cursor,
     encode_activity_cursor,
     operations_health,

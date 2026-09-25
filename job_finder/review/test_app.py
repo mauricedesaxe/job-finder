@@ -79,6 +79,14 @@ from job_finder.pipeline.work_dismissals import (
     WorkDismissalCommand,
     WorkDismissalReceipt,
 )
+from job_finder.pipeline.work_recoveries import (
+    RecoveryAction,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryReceipt,
+    WorkRecoveryResult,
+    WorkRecoveryStaleState,
+)
 from job_finder.review.operations import (
     ActivityEntry,
     ActivityPage,
@@ -95,18 +103,12 @@ from job_finder.review.operations import (
     OperationsSnapshot,
     PipelineRunStatus,
     QueueCounts,
-    RecoveryAction,
     RunAttemptSummary,
     RecoveryOutcome,
     SpendSummary,
     RunDetail,
     RunListItem,
     RunsService,
-    WorkRecoveryApplied,
-    WorkRecoveryCommand,
-    WorkRecoveryReceipt,
-    WorkRecoveryResult,
-    WorkRecoveryStaleState,
     WorkAttemptSummary,
     WorkItemNotFound,
     WorkItemDetail,
