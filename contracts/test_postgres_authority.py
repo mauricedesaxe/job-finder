@@ -83,9 +83,25 @@ from job_finder.database import (
     MIGRATIONS_PATH,
     apply_migrations,
 )
+from job_finder.evaluation.implementation_artifacts import (
+    ImplementationArtifact,
+    build_implementation_artifact,
+    implementation_artifact_id,
+    store_implementation_artifact,
+)
+from job_finder.evaluation.qualification_components import (
+    DeduplicationContent,
+    EnrichmentContent,
+    InputPreparationContent,
+    RelevanceContent,
+    build_qualification_target,
+    store_component_release,
+    store_qualification_target,
+)
 from job_finder.policy_projection import project_legacy_search_configuration
 from job_finder.qualification_definition import (
     QualificationDefinition,
+    QualificationDefinitionRevisionId,
     qualification_definition_revision_id,
 )
 from job_finder.projections.outbox import (
@@ -133,9 +149,11 @@ from job_finder.evaluation.models import (
     PromptAccepted,
     ProviderRequestObservation,
     PromptReleaseId,
+    PromptVersionId,
     Qualified,
     Rejected,
     ReleaseTarget,
+    RelevanceReleaseId,
 )
 from job_finder.evaluation.manifest_execution import run_stored_manifest
 from job_finder.jobs.decision_pipeline import (
@@ -281,6 +299,7 @@ EXPECTED_MIGRATIONS = (
     "0037_run_budget_authority_guard.sql",
     "0038_policy_revisions.sql",
     "0039_policy_lifecycle_state.sql",
+    "0040_qualification_components.sql",
 )
 
 
@@ -549,6 +568,103 @@ def test_split_policy_state_seeds_without_changing_legacy_authority(
         with pytest.raises(psycopg.errors.CheckViolation):
             _ = connection.execute(
                 "UPDATE active_acquisition_policy SET generation = generation + 1"
+            )
+
+
+def test_qualification_target_requires_four_components_from_one_artifact(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact = build_implementation_artifact(Path(__file__).resolve().parents[1])
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        _ = store_implementation_artifact(connection, artifact, created_at=now, created_by="build")
+        definition_row = connection.execute(
+            "SELECT revision_id FROM qualification_definition_publications LIMIT 1"
+        ).fetchone()
+        relevance_row = connection.execute("SELECT id FROM relevance_releases LIMIT 1").fetchone()
+        assert definition_row is not None and relevance_row is not None
+        versions = connection.execute(
+            "SELECT id, phase, output_schema FROM prompt_versions ORDER BY phase, id"
+        ).fetchall()
+        relevance_versions = tuple(
+            PromptVersionId(str(row[0])) for row in versions if row[1] in ("filter", "profile")
+        )
+        enrichment_version = next(row for row in versions if row[1] == "enrichment")
+        deduplication_version = next(row for row in versions if row[1] == "deduplication")
+        output_schema = json.dumps(
+            enrichment_version[2], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        input_preparation = InputPreparationContent(
+            artifact_id=artifact.id,
+            ats_sources=tuple(SupportedSearchSource),
+        )
+        relevance = RelevanceContent(
+            artifact_id=artifact.id,
+            qualification_definition_revision_id=QualificationDefinitionRevisionId(
+                str(definition_row[0])
+            ),
+            relevance_release_id=RelevanceReleaseId(str(relevance_row[0])),
+            prompt_version_ids=relevance_versions,
+        )
+        enrichment = EnrichmentContent(
+            artifact_id=artifact.id,
+            prompt_version_id=PromptVersionId(str(enrichment_version[0])),
+            output_schema_digest=hashlib.sha256(output_schema.encode()).hexdigest(),
+        )
+        deduplication = DeduplicationContent(
+            artifact_id=artifact.id,
+            prompt_version_id=PromptVersionId(str(deduplication_version[0])),
+        )
+        component_ids = tuple(
+            store_component_release(connection, content, created_at=now, created_by="owner")
+            for content in (input_preparation, relevance, enrichment, deduplication)
+        )
+        target = build_qualification_target(input_preparation, relevance, enrichment, deduplication)
+        target_id = store_qualification_target(
+            connection, target, created_at=now, created_by="owner"
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM qualification_targets WHERE id = %s", (target_id,)
+        ).fetchone() == (1,)
+        assert (
+            store_qualification_target(connection, target, created_at=now, created_by="owner")
+            == target_id
+        )
+
+        wrong_kind = target.model_copy(update={"enrichment_release_id": component_ids[3]})
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = store_qualification_target(
+                connection, wrong_kind, created_at=now, created_by="owner"
+            )
+
+        alternate_manifest = artifact.manifest.model_copy(
+            update={"runtime": artifact.manifest.runtime + " alternate"}
+        )
+        alternate_artifact = ImplementationArtifact(
+            id=implementation_artifact_id(alternate_manifest), manifest=alternate_manifest
+        )
+        _ = store_implementation_artifact(
+            connection, alternate_artifact, created_at=now, created_by="build"
+        )
+        alternate_input = input_preparation.model_copy(
+            update={"artifact_id": alternate_artifact.id}
+        )
+        alternate_input_id = store_component_release(
+            connection, alternate_input, created_at=now, created_by="owner"
+        )
+        with pytest.raises(ValueError, match="one implementation artifact"):
+            _ = build_qualification_target(alternate_input, relevance, enrichment, deduplication)
+        mixed_artifacts = target.model_copy(
+            update={"input_preparation_release_id": alternate_input_id}
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = store_qualification_target(
+                connection, mixed_artifacts, created_at=now, created_by="owner"
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                "UPDATE qualification_component_releases SET created_by = 'changed'"
             )
 
 
