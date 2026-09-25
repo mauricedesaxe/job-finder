@@ -32,6 +32,11 @@ from job_finder.benchmarks.manifests import (
     include_review_event,
 )
 from job_finder.benchmarks.promotions import PromptPromotionDecision
+from job_finder.benchmarks.qualification_evidence import (
+    FixtureCase,
+    PhaseFixtureSet,
+    fixture_set_id,
+)
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
@@ -46,6 +51,7 @@ from job_finder.evaluation.release_targets import (
 from job_finder.evaluation.relevance_releases import build_jev_faithful_policy
 from job_finder.database import Connection
 from job_finder.mcp_server import McpDependencies, create_mcp_server
+from job_finder.mcp_tools.qualification_evidence import QualificationEvidencePage
 from job_finder.projections.outbox import ProjectionQueueStatus
 from job_finder.review.feedback import (
     ReviewFeedback,
@@ -69,6 +75,13 @@ _TOOL_NAMES = {
     "qualification_definition_draft_update",
     "qualification_definition_publish",
     "qualification_definition_revision_get",
+    "qualification_evidence_list",
+    "qualification_evidence_get",
+    "qualification_fixture_set_store",
+    "qualification_fixture_set_get",
+    "qualification_relevance_input_store",
+    "qualification_relevance_input_get",
+    "qualification_relevance_comparison_create",
     "qualification_promotion_preview",
     "qualification_promotion_decide",
     "qualification_activate",
@@ -165,6 +178,40 @@ def test_evaluation_run_reports_an_unconfigured_deployment_without_touching_post
                         "implementation_ref": "contract",
                     },
                 )
+
+    asyncio.run(exercise())
+
+
+def test_mcp_qualification_evidence_catalog_freezes_and_reads_fixture_sets(
+    authority_schema: str,
+) -> None:
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+    fixture = PhaseFixtureSet(
+        phase="input_preparation",
+        cases=(FixtureCase(input={}, expected={}, input_path="direct"),),
+    )
+    server = create_mcp_server(
+        McpDependencies(
+            connect=_mcp_connect(authority_schema), actor="contract-owner", now=lambda: _NOW
+        )
+    )
+
+    async def exercise() -> None:
+        async with Client(server) as client:
+            _ = await client.call_tool(
+                "qualification_fixture_set_store", {"content": fixture.model_dump(mode="json")}
+            )
+            fetched = await client.call_tool(
+                "qualification_fixture_set_get", {"fixture_id": fixture_set_id(fixture)}
+            )
+            assert PhaseFixtureSet.model_validate(fetched.structured_content) == fixture
+            listed = await client.call_tool(
+                "qualification_evidence_list", {"target_id": "0" * 64, "limit": 10}
+            )
+            assert QualificationEvidencePage.model_validate(listed.structured_content).items == ()
+            with pytest.raises(ToolError, match="Qualification evidence does not exist"):
+                _ = await client.call_tool("qualification_evidence_get", {"evidence_id": "0" * 64})
 
     asyncio.run(exercise())
 
