@@ -351,6 +351,7 @@ EXPECTED_MIGRATIONS = (
     "0043_qualification_provider_attempts.sql",
     "0044_qualification_promotion_authority.sql",
     "0045_unique_qualification_promotion_pair.sql",
+    "0046_split_run_authority.sql",
 )
 
 
@@ -3173,7 +3174,14 @@ def test_search_configuration_migration_preserves_every_legacy_row(
 
         expected = dict(before)
         expected["pipeline_runs"] = [
-            {**row, "configuration_revision_id": None, "relevance_release_id": None}
+            {
+                **row,
+                "configuration_revision_id": None,
+                "relevance_release_id": None,
+                "execution_authority_kind": "legacy",
+                "acquisition_policy_revision_id": None,
+                "qualification_target_id": None,
+            }
             for row in cast(list[dict[str, object]], before["pipeline_runs"])
         ]
         expected["evaluation_decisions"] = [
