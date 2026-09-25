@@ -8,6 +8,7 @@ from job_finder.mcp_tools.common import McpDependencies as McpDependencies
 from job_finder.mcp_tools.configuration import register_configuration_tools
 from job_finder.mcp_tools.feedback import register_feedback_tools
 from job_finder.mcp_tools.qualification import register_qualification_tools
+from job_finder.mcp_tools.qualification_definitions import register_qualification_definition_tools
 from job_finder.mcp_tools.releases import register_release_tools
 
 
@@ -27,6 +28,7 @@ def create_mcp_server(dependencies: McpDependencies) -> FastMCP:
     register_configuration_tools(mcp, dependencies)
     register_acquisition_tools(mcp, dependencies)
     register_qualification_tools(mcp, dependencies)
+    register_qualification_definition_tools(mcp, dependencies)
     register_feedback_tools(mcp, dependencies)
     register_benchmark_tools(mcp, dependencies)
     register_release_tools(mcp, dependencies)
