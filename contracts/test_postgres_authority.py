@@ -5086,8 +5086,8 @@ def test_rebuilds_langfuse_projections_idempotently(authority_schema: str) -> No
 
         def evaluator(
             case: EvaluationManifestCase,
-            case_target: ReleaseTarget,
-            trial: int,
+            _case_target: ReleaseTarget,
+            _trial: int,
         ) -> EvaluationResult:
             if case.expected_outcome == "qualified":
                 return Qualified(reason="Expected positive.", profile_name="profile")
