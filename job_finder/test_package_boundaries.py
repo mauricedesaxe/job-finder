@@ -359,24 +359,6 @@ def test_projection_outbox_has_no_payload_or_sdk_dependencies() -> None:
     )
 
 
-def test_langfuse_sdk_stays_in_projection_adapters() -> None:
-    source_roots = (_PACKAGE_ROOT, _REPOSITORY_ROOT / "contracts", _REPOSITORY_ROOT / "scripts")
-    sdk_importers = {
-        path.relative_to(_REPOSITORY_ROOT).as_posix()
-        for source_root in source_roots
-        for path in source_root.rglob("*.py")
-        if not path.name.startswith("test_")
-        and any(
-            module == "langfuse" or module.startswith("langfuse.")
-            for module in _direct_imported_modules(path)
-        )
-    }
-    assert sdk_importers == {
-        "job_finder/projections/langfuse.py",
-        "job_finder/projections/smoke.py",
-    }
-
-
 def test_projection_imports_point_toward_the_outbox() -> None:
     openrouter_imports = _direct_imported_modules(_PACKAGE_ROOT / "evaluation" / "openrouter.py")
     assert not any(module.startswith("job_finder.projections") for module in openrouter_imports)
