@@ -207,6 +207,76 @@ def test_scheduled_split_admission_blocks_until_target_is_active() -> None:
             assert row == ("split", None, target_id, 1)
 
 
+def test_split_onboarding_request_matches_immutable_reservation() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        acquisition = connection.execute(
+            "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
+        ).fetchone()
+        assert acquisition is not None
+        _ = connection.execute(
+            """
+            INSERT INTO execution_budget_reservations (
+                idempotency_key, policy_version, period_start, reserved_usd,
+                status, max_jobs, authority_kind, acquisition_policy_revision_id,
+                qualification_target_id, acquisition_generation, qualification_generation,
+                search_queries, logical_model_calls_per_job,
+                maximum_provider_attempts, created_at
+            ) VALUES ('split-onboarding', 1, %s, 1, 'reserved', 1, 'split',
+                      %s, %s, %s, 1, 1, 1, 1, %s)
+            """,
+            (now.date(), acquisition[0], target_id, acquisition[1], now),
+        )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            _ = connection.execute(
+                """
+                INSERT INTO onboarding_test_search_requests (
+                    idempotency_key, run_id, state, execution_authority_kind,
+                    acquisition_policy_revision_id, qualification_target_id,
+                    acquisition_generation, qualification_generation,
+                    budget_policy_version, budget_reservation_key, max_queries, max_urls,
+                    max_jobs, max_work_attempts, max_provider_attempts, run_allowance_usd,
+                    created_at, updated_at
+                ) VALUES ('wrong-onboarding', %s, 'pending', 'split', %s, %s, %s, 2,
+                          1, 'split-onboarding', 1, 1, 1, 1, 1, 1, %s, %s)
+                """,
+                (uuid4(), acquisition[0], target_id, acquisition[1], now, now),
+            )
+        request_id = uuid4()
+        _ = connection.execute(
+            """
+            INSERT INTO onboarding_test_search_requests (
+                idempotency_key, run_id, state, execution_authority_kind,
+                acquisition_policy_revision_id, qualification_target_id,
+                acquisition_generation, qualification_generation,
+                budget_policy_version, budget_reservation_key, max_queries, max_urls,
+                max_jobs, max_work_attempts, max_provider_attempts, run_allowance_usd,
+                created_at, updated_at
+            ) VALUES ('split-onboarding', %s, 'pending', 'split', %s, %s, %s, 1,
+                      1, 'split-onboarding', 1, 1, 1, 1, 1, 1, %s, %s)
+            """,
+            (request_id, acquisition[0], target_id, acquisition[1], now, now),
+        )
+        stored = connection.execute(
+            """
+            SELECT execution_authority_kind, configuration_revision_id,
+                   acquisition_policy_revision_id, qualification_target_id
+            FROM onboarding_test_search_requests WHERE idempotency_key = 'split-onboarding'
+            """
+        ).fetchone()
+        assert stored == ("split", None, acquisition[0], target_id)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                """
+                UPDATE onboarding_test_search_requests SET qualification_generation = 2
+                WHERE idempotency_key = 'split-onboarding'
+                """
+            )
+
+
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     with _schema() as connection:
