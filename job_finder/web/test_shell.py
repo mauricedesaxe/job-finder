@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from fasthtml.common import to_xml
 
-from job_finder.review.shell import (
+from job_finder.web.shell import (
     absolute_time,
     operations_sub_sidebar,
     relative_time,

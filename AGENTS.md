@@ -65,6 +65,8 @@ recreate a generic review persistence module or compatibility facade. Immutable
 benchmark manifests, scoring, executions, comparisons, and promotions live in
 their subject-named modules under `job_finder/benchmarks/`. Projection outbox,
 Langfuse delivery, rebuild, and smoke operations live under `job_finder/projections/`.
+Shared FastHTML infrastructure, security helpers, static assets, and the document shell live
+under `job_finder/web/`; review policy and feature routes stay under `job_finder/review/`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
