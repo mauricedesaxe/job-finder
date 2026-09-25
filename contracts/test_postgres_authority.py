@@ -65,6 +65,7 @@ from job_finder.benchmarks.qualification_evidence import (
 from job_finder.benchmarks.input_preparation_execution import (
     execute_input_preparation_fixture_set,
 )
+from job_finder.benchmarks.enrichment_execution import execute_enrichment_fixture_set
 from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
     store_provider_attempts,
@@ -1305,6 +1306,104 @@ def test_ats_relevance_rejects_snapshot_without_prepared_description(
                     completed_at=now,
                     created_by="owner",
                 )
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_enrichment_fixtures_use_compiled_prompt_and_record_synthetic_attempts(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    expected: dict[str, JsonValue] = {
+        "title": "Backend Engineer",
+        "company": "Acme",
+        "description": "## Overview\nBuild useful tools.",
+        "location": "Remote",
+        "compensation": None,
+    }
+    fixture = PhaseFixtureSet(
+        phase="enrichment",
+        cases=(
+            FixtureCase(
+                input={
+                    "job": _decision_listing().model_dump(mode="json"),
+                    "provider_settings": ProviderExperimentSettings(
+                        provider="openrouter", temperature=0, retry_limit=0
+                    ).model_dump(mode="json"),
+                },
+                expected=expected,
+                input_path="direct",
+            ),
+        ),
+    )
+
+    def send(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        return HttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "id": "enrichment-generation-1",
+                    "model": "google/gemini-2.5-flash-lite",
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "enrich_job",
+                                            "arguments": json.dumps(expected),
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        fixture_id = store_fixture_set(connection, fixture, created_at=now, created_by="owner")
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_enrichment_fixture_set(
+                connection,
+                target_id,
+                fixture_id,
+                artifact_path,
+                api_key="fixture-key",
+                completed_at=now,
+                created_by="owner",
+                sender=send,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.origin == "synthetic"
+            assert evidence.outcome == "passed"
+            assert evidence.result["passed_count"] == 1
+            assert len(evidence.attempts) == 1
+            assert connection.execute(
+                "SELECT count(*) FROM qualification_provider_attempts WHERE evidence_id = %s",
+                (evidence_id,),
+            ).fetchone() == (1,)
         finally:
             artifact_path.unlink(missing_ok=True)
 
