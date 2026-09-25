@@ -29,6 +29,11 @@ def job_work_queue() -> None:
     noop()
 
 
+@job(name="onboarding_test_search")
+def onboarding_test_search() -> None:
+    noop()
+
+
 @job(name="review_sample")
 def review_sample() -> None:
     noop()
@@ -39,7 +44,13 @@ def langfuse_projection() -> None:
     noop()
 
 
-JOBS: tuple[JobDefinition, ...] = (job_finder, job_work_queue, review_sample, langfuse_projection)
+JOBS: tuple[JobDefinition, ...] = (
+    job_finder,
+    job_work_queue,
+    onboarding_test_search,
+    review_sample,
+    langfuse_projection,
+)
 
 
 defs = Definitions(
@@ -52,7 +63,9 @@ defs = Definitions(
             default_status=DefaultScheduleStatus.RUNNING,
         )
         for job_definition, cron_schedule in zip(
-            JOBS, ("0 7 * * *", "*/15 * * * *", "15 0 * * *", "* * * * *"), strict=True
+            JOBS,
+            ("0 7 * * *", "*/15 * * * *", "* * * * *", "15 0 * * *", "* * * * *"),
+            strict=True,
         )
     ],
 )

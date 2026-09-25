@@ -27,6 +27,7 @@ from job_finder.execution_budget import (
     reserve_job_capacity,
     settle_execution_budget,
 )
+from job_finder.onboarding_test_search_worker import execute_next_onboarding_test_search
 from job_finder.projections.langfuse import create_langfuse_projection_sender
 from job_finder.projections.outbox import (
     ProjectionDelivered,
@@ -196,6 +197,48 @@ def job_work_queue_cycle(
     return metadata
 
 
+@asset(pool="job_finder_pipeline")
+def onboarding_test_search_cycle(
+    context: AssetExecutionContext, job_finder: JobFinderResource
+) -> dict[str, object]:
+    settings = OrchestrationSettings.from_environment()
+    with job_finder.connection() as connection:
+        pending = connection.execute(
+            """
+            SELECT 1 FROM onboarding_test_search_requests
+            WHERE state = 'pending' OR (state = 'leased' AND lease_expires_at <= %s)
+            LIMIT 1
+            """,
+            (datetime.now(UTC),),
+        ).fetchone()
+        if pending is None:
+            return {"state": "idle"}
+        credentials = _provider_credentials(connection, settings)
+        result = execute_next_onboarding_test_search(
+            connection,
+            production_boundaries(jina_api_key=credentials.jina.get_secret_value()),
+            implementation_ref=settings.implementation_ref,
+            openrouter_api_key=credentials.openrouter.get_secret_value(),
+            typesafe_api_key=credentials.typesafe.get_secret_value(),
+            owner_token=uuid4(),
+            lease_for=timedelta(seconds=settings.work_lease_seconds),
+            retry_after=timedelta(seconds=settings.work_retry_seconds),
+            enable_ats_enrichment=settings.enable_ats_enrichment,
+            fetch_rates=lambda: _fetch_rates(datetime.now(UTC)),
+        )
+    metadata: dict[str, object] = {
+        "state": result.state,
+        "queries": result.queries,
+        "urls": result.urls,
+        "jobs": result.jobs,
+        "provider_attempts": result.provider_attempts,
+    }
+    if result.request_key is not None:
+        metadata["request_key"] = result.request_key
+    context.add_output_metadata(metadata)
+    return metadata
+
+
 @asset(
     pool="job_finder_pipeline",
     retry_policy=RetryPolicy(max_retries=2, delay=60),
@@ -351,6 +394,9 @@ def _fetch_rates(observed_at: datetime) -> ExchangeRateSnapshot:
 
 job_finder_job = define_asset_job("job_finder", selection=[job_finder_cycle.key])
 job_work_queue_job = define_asset_job("job_work_queue", selection=[job_work_queue_cycle.key])
+onboarding_test_search_job = define_asset_job(
+    "onboarding_test_search", selection=[onboarding_test_search_cycle.key]
+)
 langfuse_projection_job = define_asset_job(
     "langfuse_projection", selection=[langfuse_projection_queue.key]
 )
@@ -373,6 +419,12 @@ job_work_queue_schedule = ScheduleDefinition(
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
 )
+onboarding_test_search_schedule = ScheduleDefinition(
+    job=onboarding_test_search_job,
+    cron_schedule="* * * * *",
+    execution_timezone="UTC",
+    default_status=DefaultScheduleStatus.RUNNING,
+)
 langfuse_projection_schedule = ScheduleDefinition(
     job=langfuse_projection_job,
     cron_schedule="* * * * *",
@@ -388,18 +440,21 @@ defs = Definitions(
     assets=[
         job_finder_cycle,
         job_work_queue_cycle,
+        onboarding_test_search_cycle,
         review_audit_sample,
         langfuse_projection_queue,
     ],
     jobs=[
         job_finder_job,
         job_work_queue_job,
+        onboarding_test_search_job,
         review_sample_job,
         langfuse_projection_job,
     ],
     schedules=[
         job_finder_schedule,
         job_work_queue_schedule,
+        onboarding_test_search_schedule,
         review_sample_schedule,
         langfuse_projection_schedule,
     ],
