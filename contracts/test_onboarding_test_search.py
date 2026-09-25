@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+import requests
 from psycopg.conninfo import make_conninfo
 from psycopg import sql
 
@@ -26,7 +27,10 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.models import ReleaseTarget
 from job_finder.evaluation.openrouter import HttpResponse
-from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.prompt_releases import (
+    build_prompt_release,
+    store_prompt_release,
+)
 from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.execution_budget import (
     BudgetSaved,
@@ -49,9 +53,12 @@ from job_finder.onboarding_test_search import (
     prepare_onboarding_provider_dispatch,
     reserve_onboarding_search_query,
 )
-from job_finder.onboarding_test_search_worker import execute_next_onboarding_test_search
+from job_finder.onboarding_test_search_worker import (
+    execute_next_onboarding_test_search,
+    guard_onboarding_provider_boundaries,
+)
 from job_finder.pipeline.orchestration import PipelineBoundaries
-from job_finder.pipeline.work_items import claim_next_job
+from job_finder.pipeline.work_items import JobWorkClaim, claim_next_job
 from job_finder.pipeline.runs import prepare_onboarding_run, prepare_orchestration_run
 from job_finder.pipeline.discoveries import register_discoveries
 from job_finder.review.owner_access import OwnerBootstrapped, postgres_owner_access_service
@@ -416,6 +423,53 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
             """,
             (job_id, raw_url, now, now),
         )
+        generation_calls = 0
+
+        def get_generation(
+            _url: str,
+            _headers: Mapping[str, str],
+            _provider_response_id: str,
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal generation_calls
+            generation_calls += 1
+            if generation_calls == 1:
+                raise requests.Timeout("temporary generation lookup failure")
+            return HttpResponse(
+                status_code=200,
+                body='{"data":{"tokens_prompt":1,"tokens_completion":1,"total_cost":0.01}}',
+            )
+
+        guarded, select_claim = guard_onboarding_provider_boundaries(
+            connection,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: pytest.fail("search was called"),
+                scrape=lambda _url: pytest.fail("scrape was called"),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
+                generation_sender=get_generation,
+            ),
+            claimed,
+            owner_token,
+            lambda: now,
+        )
+        select_claim(
+            JobWorkClaim(
+                job_id=job_id,
+                raw_url=raw_url,
+                keyword="provider receipt",
+                owner_token=owner_token,
+                attempt_count=1,
+                lease_expires_at=now + timedelta(minutes=5),
+            )
+        )
+        assert guarded.model_call_started is not None
+        assert guarded.generation_sender is not None
+        guarded.model_call_started("evaluation:criterion")
+        with pytest.raises(requests.Timeout):
+            guarded.generation_sender("https://openrouter.test", {}, "generation-1", 30)
+        generation_response = guarded.generation_sender(
+            "https://openrouter.test", {}, "generation-1", 30
+        )
         first = prepare_onboarding_provider_dispatch(
             connection,
             request_key=claimed.idempotency_key,
@@ -467,6 +521,39 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
             body_digest="b" * 64,
             attempted_at=now,
         )
+        generation_first = prepare_onboarding_provider_dispatch(
+            connection,
+            request_key=claimed.idempotency_key,
+            owner_token=owner_token,
+            job_id=job_id,
+            operation_key="evaluation:criterion",
+            provider="openrouter",
+            body_digest="d" * 64,
+            attempted_at=now,
+            retryable_statuses=frozenset({404, 429}),
+        )
+        finish_onboarding_provider_dispatch(
+            connection,
+            request_key=claimed.idempotency_key,
+            job_id=job_id,
+            operation_key="evaluation:criterion",
+            provider="openrouter",
+            body_digest="d" * 64,
+            attempt_number=generation_first.attempt_number,
+            status_code=404,
+            response_body='{"error":"generation pending"}',
+        )
+        generation_retry = prepare_onboarding_provider_dispatch(
+            connection,
+            request_key=claimed.idempotency_key,
+            owner_token=owner_token,
+            job_id=job_id,
+            operation_key="evaluation:criterion",
+            provider="openrouter",
+            body_digest="d" * 64,
+            attempted_at=now,
+            retryable_statuses=frozenset({404, 429}),
+        )
         with pytest.raises(OnboardingProviderOutcomeUnknown):
             _ = prepare_onboarding_provider_dispatch(
                 connection,
@@ -499,9 +586,13 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
             )
 
     assert first.cached_status_code is None
+    assert generation_calls == 2
+    assert generation_response.status_code == 200
     assert replay.cached_status_code == 200
     assert replay.cached_body == '{"id":"accepted"}'
     assert distinct_operation.cached_status_code is None
+    assert generation_retry.attempt_number == 2
+    assert generation_retry.cached_status_code is None
 
 
 def test_worker_recovers_without_repeating_a_reserved_search_query(

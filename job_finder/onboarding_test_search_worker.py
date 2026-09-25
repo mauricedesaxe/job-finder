@@ -14,7 +14,13 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import JinaUnavailable
 from job_finder.evaluation.jev import JevHttpResponse, send_system_one
 from job_finder.evaluation.models import ReleaseTarget
-from job_finder.evaluation.openrouter import HttpResponse, send_chat_completion
+from job_finder.evaluation.openrouter import (
+    RETRYABLE_GENERATION_HTTP_STATUSES,
+    RETRYABLE_HTTP_STATUSES,
+    HttpResponse,
+    send_chat_completion,
+    send_generation,
+)
 from job_finder.execution_budget import settle_execution_budget
 from job_finder.onboarding_test_search import (
     OnboardingTestSearchRequest,
@@ -44,6 +50,8 @@ from job_finder.search_configuration import (
 
 Now = Callable[[], datetime]
 RateSnapshotFactory = Callable[[], ExchangeRateSnapshot]
+_JEV_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, *range(500, 600)})
+_GENERATION_RETRYABLE_HTTP_STATUSES = RETRYABLE_GENERATION_HTTP_STATUSES | {200, 599}
 
 
 class OnboardingSearchLimitReached(RuntimeError):
@@ -134,7 +142,7 @@ def execute_next_onboarding_test_search(
             raise RuntimeError("Onboarding search results are missing")
         if int(str(unavailable[0])) == len(queries):
             raise OnboardingSearchLimitReached("Every onboarding search query was unavailable")
-        guarded, select_claim = _guarded_boundaries(
+        guarded, select_claim = guard_onboarding_provider_boundaries(
             connection, boundaries, request, owner_token, now
         )
         for _ in range(request.limits.max_jobs * request.limits.max_work_attempts):
@@ -262,7 +270,7 @@ def _renew(
         raise RuntimeError("Onboarding test search lease was lost")
 
 
-def _guarded_boundaries(
+def guard_onboarding_provider_boundaries(
     connection: Connection,
     boundaries: PipelineBoundaries,
     request: OnboardingTestSearchRequest,
@@ -270,6 +278,7 @@ def _guarded_boundaries(
     now: Now,
 ) -> tuple[PipelineBoundaries, Callable[[JobWorkClaim], None]]:
     openrouter_sender = boundaries.model_sender or send_chat_completion
+    generation_sender = boundaries.generation_sender or send_generation
     jev_sender = boundaries.jev_sender or send_system_one
     current_job_id: UUID | None = None
     current_operation_key: str | None = None
@@ -284,7 +293,9 @@ def _guarded_boundaries(
         current_operation_key = operation_key
 
     def dispatch(
-        body: dict[str, object], provider: Literal["openrouter", "typesafe"]
+        body: dict[str, object],
+        provider: Literal["openrouter", "typesafe"],
+        retryable_statuses: frozenset[int],
     ) -> tuple[UUID, str, str, int, int | None, str | None, str | None, float | None]:
         if current_job_id is None or current_operation_key is None:
             raise RuntimeError("Provider request has no claimed onboarding operation")
@@ -300,6 +311,7 @@ def _guarded_boundaries(
             provider=provider,
             body_digest=digest,
             attempted_at=now(),
+            retryable_statuses=retryable_statuses,
         )
         return (
             current_job_id,
@@ -316,7 +328,7 @@ def _guarded_boundaries(
         url: str, headers: Mapping[str, str], body: dict[str, object], timeout: float
     ) -> HttpResponse:
         job_id, operation_key, digest, attempt, cached_status, cached_body, _, _ = dispatch(
-            body, "openrouter"
+            body, "openrouter", RETRYABLE_HTTP_STATUSES
         )
         if cached_status is not None and cached_body is not None:
             return HttpResponse(status_code=cached_status, body=cached_body)
@@ -351,7 +363,7 @@ def _guarded_boundaries(
             cached_body,
             cached_id,
             cached_retry,
-        ) = dispatch(body, "typesafe")
+        ) = dispatch(body, "typesafe", _JEV_RETRYABLE_HTTP_STATUSES)
         if cached_status is not None and cached_body is not None:
             return JevHttpResponse(
                 status_code=cached_status,
@@ -380,10 +392,48 @@ def _guarded_boundaries(
         )
         return response
 
+    def get_openrouter_generation(
+        url: str, headers: Mapping[str, str], provider_response_id: str, timeout: float
+    ) -> HttpResponse:
+        body: dict[str, object] = {"generation_id": provider_response_id}
+        job_id, operation_key, digest, attempt, cached_status, cached_body, _, _ = dispatch(
+            body, "openrouter", _GENERATION_RETRYABLE_HTTP_STATUSES
+        )
+        if cached_status is not None and cached_body is not None:
+            return HttpResponse(status_code=cached_status, body=cached_body)
+        try:
+            response = generation_sender(url, headers, provider_response_id, timeout)
+        except requests.RequestException as error:
+            finish_onboarding_provider_dispatch(
+                connection,
+                request_key=request.idempotency_key,
+                job_id=job_id,
+                operation_key=operation_key,
+                provider="openrouter",
+                body_digest=digest,
+                attempt_number=attempt,
+                status_code=599,
+                response_body=str(error),
+            )
+            raise
+        finish_onboarding_provider_dispatch(
+            connection,
+            request_key=request.idempotency_key,
+            job_id=job_id,
+            operation_key=operation_key,
+            provider="openrouter",
+            body_digest=digest,
+            attempt_number=attempt,
+            status_code=response.status_code,
+            response_body=response.body,
+        )
+        return response
+
     return (
         replace(
             boundaries,
             model_sender=send_openrouter,
+            generation_sender=get_openrouter_generation,
             jev_sender=send_jev,
             model_call_started=select_operation,
         ),

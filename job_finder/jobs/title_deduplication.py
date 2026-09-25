@@ -10,6 +10,7 @@ from job_finder.evaluation.models import (
 )
 from job_finder.evaluation.openrouter import (
     ChatCompletionSender,
+    GenerationSender,
     ModelCallPersistence,
     RetryPolicy,
     invoke_prompt,
@@ -31,6 +32,7 @@ def deduplicate_title(
     *,
     api_key: str,
     sender: ChatCompletionSender | None = None,
+    generation_sender: GenerationSender | None = None,
     retry_policy: RetryPolicy | None = None,
 ) -> PromptAccepted[TitleDuplicate] | OperationalFailure:
     prompt_name = "job-finder-title-deduplication"
@@ -54,6 +56,7 @@ def deduplicate_title(
         TitleDuplicate,
         api_key=api_key,
         sender=sender,
+        generation_sender=generation_sender,
         retry_policy=retry_policy,
     )
 

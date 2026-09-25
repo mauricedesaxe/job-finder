@@ -37,6 +37,7 @@ from job_finder.evaluation.models import (
 )
 from job_finder.evaluation.openrouter import (
     ChatCompletionSender,
+    GenerationSender,
     RetryPolicy,
     evaluate_prompt as evaluate_persisted_openrouter_prompt,
     postgres_model_call_persistence,
@@ -112,6 +113,7 @@ class PipelineBoundaries:
     scrape: ScrapeBoundary
     fetch_ats: AtsBoundary
     model_sender: ChatCompletionSender | None = None
+    generation_sender: GenerationSender | None = None
     model_retry_policy: RetryPolicy | None = None
     jev_sender: JevSender | None = None
     jev_retry_policy: JevRetryPolicy | None = None
@@ -505,6 +507,7 @@ def _evaluate_criterion(
                 postgres_model_call_persistence(connection),
                 api_key=api_key,
                 sender=boundaries.model_sender,
+                generation_sender=boundaries.generation_sender,
                 retry_policy=boundaries.model_retry_policy,
                 now=now,
             )
@@ -558,6 +561,7 @@ def _enrich(
         postgres_model_call_persistence(connection),
         api_key=api_key,
         sender=boundaries.model_sender,
+        generation_sender=boundaries.generation_sender,
         retry_policy=boundaries.model_retry_policy,
     )
     if isinstance(result, OperationalError):
@@ -598,6 +602,7 @@ def _deduplicate(
         postgres_model_call_persistence(connection),
         api_key=api_key,
         sender=boundaries.model_sender,
+        generation_sender=boundaries.generation_sender,
         retry_policy=boundaries.model_retry_policy,
     )
     if isinstance(result, OperationalError):
