@@ -749,6 +749,22 @@ class WorkItemNotFound(LookupError):
 
 
 @dataclass(frozen=True)
+class ModelCallDetail:
+    prompt_name: str
+    prompt_version_id: str
+    requested_model: str
+    status: str
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_usd: Decimal | None
+    latency_ms: int
+    parsed_output: object | None
+    request_messages: object
+    raw_response: object | None
+    error_summary: str | None
+
+
+@dataclass(frozen=True)
 class WorkAttemptSummary:
     operation_key: str
     attempt_number: int
@@ -759,6 +775,7 @@ class WorkAttemptSummary:
     model_calls: int
     known_cost_usd: Decimal
     error_summary: str | None
+    calls: tuple[ModelCallDetail, ...] = ()
 
 
 JobVerdictOutcome = Literal[
@@ -848,34 +865,7 @@ def load_work_item_detail(connection: Connection, job_id: UUID) -> WorkItemDetai
         raise RuntimeError("Work item state is invalid")
     attempt_count = int(str(row[1]))
     dismissal_active = row[8] is not None and int(str(row[8])) == attempt_count
-    attempts = tuple(
-        WorkAttemptSummary(
-            operation_key=str(item[0]),
-            attempt_number=int(str(item[1])),
-            status=str(item[2]),
-            started_at=cast(datetime | None, item[3]),
-            completed_at=cast(datetime | None, item[4]),
-            run_id=cast(UUID | None, item[5]),
-            model_calls=int(str(item[7])),
-            known_cost_usd=Decimal(str(item[8])),
-            error_summary=None if item[6] is None else _error_summary(item[6]),
-        )
-        for item in connection.execute(
-            """
-            SELECT pa.operation_key, pa.attempt_number, pa.status, pa.started_at,
-                   pa.completed_at, pa.pipeline_run_id, pa.error,
-                   (SELECT count(*) FROM model_call_attempts m
-                      WHERE m.processing_attempt_id = pa.id),
-                   (SELECT COALESCE(sum(m.cost_usd), 0) FROM model_call_attempts m
-                      WHERE m.processing_attempt_id = pa.id)
-            FROM processing_attempts pa
-            WHERE pa.job_id = %s
-            ORDER BY pa.started_at DESC NULLS LAST, pa.operation_key, pa.attempt_number
-            LIMIT 100
-            """,
-            (job_id,),
-        ).fetchall()
-    )
+    attempts = _load_work_attempts(connection, job_id)
     return WorkItemDetail(
         job_id=job_id,
         state=cast(WorkItemState, state),
@@ -891,6 +881,72 @@ def load_work_item_detail(connection: Connection, job_id: UUID) -> WorkItemDetai
         dismissed_by=str(row[9]) if dismissal_active and row[9] is not None else None,
         attempts=attempts,
         verdict=verdict,
+    )
+
+
+def _load_work_attempts(connection: Connection, job_id: UUID) -> tuple[WorkAttemptSummary, ...]:
+    attempt_rows = connection.execute(
+        """
+        SELECT pa.id, pa.operation_key, pa.attempt_number, pa.status,
+               pa.started_at, pa.completed_at, pa.pipeline_run_id, pa.error
+        FROM processing_attempts pa
+        WHERE pa.job_id = %s
+        ORDER BY pa.started_at DESC NULLS LAST, pa.operation_key, pa.attempt_number
+        LIMIT 100
+        """,
+        (job_id,),
+    ).fetchall()
+    calls_by_attempt: dict[UUID, list[ModelCallDetail]] = {
+        cast(UUID, attempt[0]): [] for attempt in attempt_rows
+    }
+    if calls_by_attempt:
+        for call in connection.execute(
+            """
+            SELECT processing_attempt_id, prompt_name, prompt_version_id,
+                   requested_model, status, input_tokens, output_tokens,
+                   cost_usd, latency_ms, parsed_output, request_messages,
+                   raw_response, error
+            FROM model_call_attempts
+            WHERE processing_attempt_id = ANY(%s)
+            ORDER BY observed_at, attempt_number, id
+            """,
+            (list(calls_by_attempt),),
+        ).fetchall():
+            calls_by_attempt[cast(UUID, call[0])].append(_parse_model_call_detail(call))
+    return tuple(
+        WorkAttemptSummary(
+            operation_key=str(item[1]),
+            attempt_number=int(str(item[2])),
+            status=str(item[3]),
+            started_at=cast(datetime | None, item[4]),
+            completed_at=cast(datetime | None, item[5]),
+            run_id=cast(UUID | None, item[6]),
+            model_calls=len(calls_by_attempt[cast(UUID, item[0])]),
+            known_cost_usd=sum(
+                (call.cost_usd or Decimal(0) for call in calls_by_attempt[cast(UUID, item[0])]),
+                Decimal(0),
+            ),
+            error_summary=None if item[7] is None else _error_summary(item[7]),
+            calls=tuple(calls_by_attempt[cast(UUID, item[0])]),
+        )
+        for item in attempt_rows
+    )
+
+
+def _parse_model_call_detail(row: tuple[object, ...]) -> ModelCallDetail:
+    return ModelCallDetail(
+        prompt_name=str(row[1]),
+        prompt_version_id=str(row[2]),
+        requested_model=str(row[3]),
+        status=str(row[4]),
+        input_tokens=None if row[5] is None else int(str(row[5])),
+        output_tokens=None if row[6] is None else int(str(row[6])),
+        cost_usd=None if row[7] is None else Decimal(str(row[7])),
+        latency_ms=int(str(row[8])),
+        parsed_output=row[9],
+        request_messages=row[10],
+        raw_response=row[11],
+        error_summary=None if row[12] is None else _error_summary(row[12]),
     )
 
 

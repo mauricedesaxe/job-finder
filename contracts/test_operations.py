@@ -1854,10 +1854,21 @@ def test_work_item_detail_reads_state_dismissal_and_attempt_history(
     now = datetime(2026, 9, 21, 12, tzinfo=UTC)
     run_id = uuid4()
     job_id = uuid4()
+    processing_attempt_id = uuid4()
 
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
         release = bootstrap_prompt_release(connection)
+        prompt_name, prompt_version_id = connection.execute(
+            """
+            SELECT prompt_name, prompt_version_id
+            FROM prompt_release_members
+            WHERE release_id = %s
+            ORDER BY prompt_name
+            LIMIT 1
+            """,
+            (release.id,),
+        ).fetchone() or pytest.fail("bootstrap release has no members")
         connection.execute(
             """
             INSERT INTO pipeline_runs (
@@ -1905,12 +1916,67 @@ def test_work_item_detail_reads_state_dismissal_and_attempt_history(
             )
             """,
             (
-                uuid4(),
+                processing_attempt_id,
                 run_id,
                 job_id,
                 "e" * 64,
                 now - timedelta(minutes=5),
                 now - timedelta(minutes=4),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_call_attempts (
+              id, processing_attempt_id, pipeline_run_id, prompt_release_id,
+              request_id, attempt_number, operation_key, prompt_name,
+              prompt_version_id, input_digest, requested_model, provider,
+              status, parsed_output, raw_response, input_tokens, output_tokens,
+              cost_usd, latency_ms, observed_at, response_model, request_messages
+            ) VALUES (
+              %s, %s, %s, %s, %s, 0, 'evaluation', %s, %s, %s,
+              'test-model', 'typesafe', 'accepted', %s::jsonb, %s::jsonb,
+              120, 35, 0.12500000, 420, %s, 'test-model', %s::jsonb
+            )
+            """,
+            (
+                uuid4(),
+                processing_attempt_id,
+                run_id,
+                release.id,
+                "a" * 64,
+                prompt_name,
+                prompt_version_id,
+                "e" * 64,
+                '{"decision":"reject","reason":"Outside the role scope"}',
+                '{"answer":"Outside the role scope"}',
+                now - timedelta(minutes=4),
+                '[{"role":"user","content":"Evaluate this role"}]',
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO model_call_attempts (
+              id, processing_attempt_id, pipeline_run_id, prompt_release_id,
+              request_id, attempt_number, operation_key, prompt_name,
+              prompt_version_id, input_digest, requested_model, provider,
+              status, latency_ms, error, observed_at, request_messages
+            ) VALUES (
+              %s, %s, %s, %s, %s, 0, 'evaluation', %s, %s, %s,
+              'test-model', 'typesafe', 'retryable_error', 250,
+              '{"code":"provider_timeout","reason":"Provider did not respond"}'::jsonb,
+              %s, '[]'::jsonb
+            )
+            """,
+            (
+                uuid4(),
+                processing_attempt_id,
+                run_id,
+                release.id,
+                "b" * 64,
+                prompt_name,
+                prompt_version_id,
+                "e" * 64,
+                now - timedelta(minutes=3),
             ),
         )
         connection.execute(
@@ -1935,7 +2001,28 @@ def test_work_item_detail_reads_state_dismissal_and_attempt_history(
         attempt = detail.attempts[0]
         assert attempt.operation_key == "evaluation"
         assert attempt.run_id == run_id
-        assert attempt.model_calls == 0
+        assert attempt.model_calls == 2
+        assert attempt.known_cost_usd == Decimal("0.12500000")
+        assert len(attempt.calls) == 2
+        accepted, failed = attempt.calls
+        assert accepted.prompt_name == prompt_name
+        assert accepted.prompt_version_id == prompt_version_id
+        assert accepted.requested_model == "test-model"
+        assert accepted.status == "accepted"
+        assert accepted.input_tokens == 120
+        assert accepted.output_tokens == 35
+        assert accepted.cost_usd == Decimal("0.12500000")
+        assert accepted.latency_ms == 420
+        assert accepted.parsed_output == {
+            "decision": "reject",
+            "reason": "Outside the role scope",
+        }
+        assert accepted.request_messages == [{"role": "user", "content": "Evaluate this role"}]
+        assert accepted.raw_response == {"answer": "Outside the role scope"}
+        assert failed.status == "retryable_error"
+        assert failed.cost_usd is None
+        assert failed.parsed_output is None
+        assert failed.error_summary == "provider_timeout: Provider did not respond"
 
         for index, (outcome, profile, reason) in enumerate(
             (

@@ -100,6 +100,7 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
+    ModelCallDetail,
     OperationsHealth,
     OperationsService,
     OperationsSnapshot,
@@ -2402,6 +2403,7 @@ def _work_item_detail(
     dismissed_at: datetime | None = None,
     dismissed_by: str | None = None,
     verdict: JobVerdict | None = None,
+    calls: tuple[ModelCallDetail, ...] = (),
 ) -> WorkItemDetail:
     return WorkItemDetail(
         job_id=UUID(int=31),
@@ -2428,6 +2430,7 @@ def _work_item_detail(
                 model_calls=2,
                 known_cost_usd=Decimal("0.25"),
                 error_summary="provider_timeout: OpenRouter did not respond",
+                calls=calls,
             ),
         ),
     )
@@ -2459,6 +2462,41 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
     assert re.search(
         _shell_link("/operations/runs", "Recent activity", current=True), response.text
     )
+
+
+def test_the_work_item_page_shows_model_answers_and_collapsed_raw_payloads() -> None:
+    call = ModelCallDetail(
+        prompt_name="role-fit",
+        prompt_version_id="a" * 64,
+        requested_model="test-model",
+        status="accepted",
+        input_tokens=120,
+        output_tokens=35,
+        cost_usd=Decimal("0.125"),
+        latency_ms=420,
+        parsed_output={"decision": "reject", "reason": "Outside the role scope"},
+        request_messages=[{"role": "user", "content": "Evaluate this role"}],
+        raw_response={"answer": "Outside the role scope"},
+        error_summary=None,
+    )
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(calls=(call,)),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert "role-fit" in response.text
+    assert "Version aaaaaaaaaaaa" in response.text
+    assert "test-model" in response.text
+    assert "120 input tokens · 35 output tokens · $0.1250 · 420 ms" in response.text
+    assert '"decision": "reject"' in response.text
+    assert "<details>" in response.text
+    assert "Full request and response" in response.text
+    assert "Evaluate this role" in response.text
+    assert "Outside the role scope" in response.text
 
 
 def test_the_work_item_page_leads_with_the_recorded_pipeline_verdict() -> None:
