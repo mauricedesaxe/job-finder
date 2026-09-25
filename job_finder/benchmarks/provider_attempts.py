@@ -37,7 +37,8 @@ def store_provider_attempts(
     evidence: QualificationEvidence,
     attempts: Sequence[ModelCallAttempt],
     *,
-    provider: Provider,
+    provider: Provider | None = None,
+    providers: Sequence[Provider] | None = None,
     created_at: datetime,
     created_by: str,
 ) -> None:
@@ -52,9 +53,10 @@ def store_provider_attempts(
         raise ValueError("Provider evidence requires at least one observed attempt")
     if tuple(provider_attempt_evidence(attempt) for attempt in attempts) != evidence.attempts:
         raise ValueError("Provider attempt summaries differ from recorded attempts")
+    resolved_providers = _resolve_providers(attempts, provider, providers)
     evidence_id = qualification_evidence_id(evidence)
     with connection.transaction():
-        for attempt in attempts:
+        for attempt, attempt_provider in zip(attempts, resolved_providers, strict=True):
             content = _JSON_OBJECT.validate_python(_ATTEMPT.dump_python(attempt, mode="json"))
             _ = connection.execute(
                 """
@@ -72,7 +74,7 @@ def store_provider_attempts(
                     attempt.context.prompt_release_id,
                     attempt.prompt_name,
                     attempt.prompt_version_id,
-                    provider,
+                    attempt_provider,
                     Jsonb(content),
                     created_at,
                     created_by,
@@ -82,5 +84,18 @@ def store_provider_attempts(
                 "SELECT evidence_id, provider, content FROM qualification_provider_attempts WHERE id = %s",
                 (attempt.id,),
             ).fetchone()
-            if row is None or row != (evidence_id, provider, content):
+            if row is None or row != (evidence_id, attempt_provider, content):
                 raise ValueError("Stored provider attempt differs from its evidence")
+
+
+def _resolve_providers(
+    attempts: Sequence[ModelCallAttempt],
+    provider: Provider | None,
+    providers: Sequence[Provider] | None,
+) -> tuple[Provider, ...]:
+    if (provider is None) == (providers is None):
+        raise ValueError("Specify one provider or one provider per attempt")
+    resolved = (provider,) * len(attempts) if provider is not None else tuple(providers or ())
+    if len(resolved) != len(attempts):
+        raise ValueError("Each provider attempt needs its provider")
+    return resolved

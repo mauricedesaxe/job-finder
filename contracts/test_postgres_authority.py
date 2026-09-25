@@ -67,6 +67,7 @@ from job_finder.benchmarks.input_preparation_execution import (
 )
 from job_finder.benchmarks.enrichment_execution import execute_enrichment_fixture_set
 from job_finder.benchmarks.deduplication_execution import execute_deduplication_fixture_set
+from job_finder.benchmarks.composition_execution import execute_composition_fixture_set
 from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
     store_provider_attempts,
@@ -242,6 +243,7 @@ from job_finder.evaluation.openrouter import (
     postgres_model_call_persistence,
     prompt_input_digest,
 )
+from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse
 from job_finder.evaluation.prompts import ENRICHMENT, PROMPTS
 from job_finder.evaluation.prompt_releases import (
     PromptReleaseError,
@@ -253,6 +255,7 @@ from job_finder.evaluation.relevance_releases import (
     JevFaithfulExecutionPolicy,
     RelevanceReleaseError,
     build_gemini_policy,
+    build_jev_atomic_policy,
     build_jev_faithful_policy,
     build_relevance_release,
     load_relevance_release,
@@ -1532,6 +1535,240 @@ def test_deduplication_fixtures_cover_ledger_paths_and_model_attempt(
             assert evidence.outcome == "passed"
             assert evidence.result["passed_count"] == 3
             assert sent == len(evidence.attempts) == 1
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_composition_fixtures_run_production_claims_without_persisting_job_state(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now)
+    openrouter = ProviderExperimentSettings(provider="openrouter", temperature=0, retry_limit=0)
+    typesafe = ProviderExperimentSettings(provider="typesafe", temperature=0, retry_limit=0)
+
+    def fixture_case(
+        *,
+        raw_url: str,
+        markdown: str,
+        ats: AtsAvailable | AtsNotApplicable,
+        outcome: str,
+        stage: str,
+        review_enqueued: bool,
+    ) -> FixtureCase:
+        return FixtureCase(
+            input={
+                "raw_url": raw_url,
+                "keyword": "software engineer",
+                "domain": "jobs.ashbyhq.com" if "ashbyhq" in raw_url else "jobs.lever.co",
+                "scrape": {"kind": "succeeded", "markdown": markdown},
+                "ats_evidence": ats.model_dump(mode="json"),
+                "configuration_revision_id": INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+                "exchange_rates": rates.model_dump(mode="json"),
+                "openrouter_settings": openrouter.model_dump(mode="json"),
+                "relevance_settings": typesafe.model_dump(mode="json"),
+                "observed_at": now.isoformat(),
+            },
+            expected={
+                "decision_outcome": outcome,
+                "decision_stage": stage,
+                "work_state": "completed",
+                "review_enqueued": review_enqueued,
+            },
+            input_path="ats" if isinstance(ats, AtsAvailable) else "direct",
+        )
+
+    fixture = PhaseFixtureSet(
+        phase="composition",
+        cases=(
+            fixture_case(
+                raw_url="https://jobs.lever.co/acme/talent-pool",
+                markdown="# Talent Pool\nJoin our team.",
+                ats=AtsNotApplicable(),
+                outcome="rejected",
+                stage="structural",
+                review_enqueued=False,
+            ),
+            fixture_case(
+                raw_url="https://jobs.ashbyhq.com/acme/onsite-role",
+                markdown="# Senior Software Engineer\nBuild useful tools. " * 20,
+                ats=AtsAvailable(
+                    source="ashby",
+                    location="London",
+                    locations=("London",),
+                    workplace_type="OnSite",
+                    country="GB",
+                ),
+                outcome="rejected",
+                stage="ats_structural",
+                review_enqueued=False,
+            ),
+            fixture_case(
+                raw_url="https://jobs.lever.co/acme/product-engineer",
+                markdown="# Senior Product Engineer\nBuild useful tools remotely. " * 20,
+                ats=AtsNotApplicable(),
+                outcome="qualified",
+                stage="qualified",
+                review_enqueued=True,
+            ),
+            fixture_case(
+                raw_url="https://jobs.lever.co/acme/backend-engineer",
+                markdown="# Senior Backend Engineer\nBuild useful tools remotely. " * 20,
+                ats=AtsNotApplicable(),
+                outcome="qualified",
+                stage="qualified",
+                review_enqueued=True,
+            ),
+            FixtureCase(
+                input={
+                    "raw_url": "https://jobs.lever.co/acme/unavailable-role",
+                    "keyword": "software engineer",
+                    "domain": "jobs.lever.co",
+                    "scrape": {
+                        "kind": "unavailable",
+                        "operation": "scrape",
+                        "error_code": "upstream_unavailable",
+                        "reason": "Reader unavailable",
+                    },
+                    "ats_evidence": AtsNotApplicable().model_dump(mode="json"),
+                    "configuration_revision_id": INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+                    "exchange_rates": rates.model_dump(mode="json"),
+                    "openrouter_settings": openrouter.model_dump(mode="json"),
+                    "relevance_settings": typesafe.model_dump(mode="json"),
+                    "observed_at": now.isoformat(),
+                },
+                expected={
+                    "decision_outcome": None,
+                    "decision_stage": None,
+                    "work_state": "failed",
+                    "review_enqueued": False,
+                },
+                input_path="direct",
+            ),
+        ),
+    )
+    enrich_calls = 0
+
+    def model_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        nonlocal enrich_calls
+        choice = cast(dict[str, object], _body["tool_choice"])
+        function = cast(dict[str, str], choice["function"])
+        tool_name = function["name"]
+        if tool_name == "enrich_job":
+            title = "Senior Product Engineer" if enrich_calls == 0 else "Senior Backend Engineer"
+            enrich_calls += 1
+            output: Mapping[str, object] = {
+                "title": title,
+                "company": "Acme",
+                "description": "Build useful tools.",
+                "location": "Remote",
+            }
+        else:
+            assert tool_name == "check_duplicate"
+            output = {"isDuplicate": False}
+        return HttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "id": f"generation-{tool_name}",
+                    "model": "google/gemini-2.5-flash-001",
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": json.dumps(output),
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                }
+            ),
+        )
+
+    def jev_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        body: dict[str, object],
+        _timeout: float,
+    ) -> JevHttpResponse:
+        questions = cast(dict[str, object], body["questions"])
+        return JevHttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "model": JEV_MODEL,
+                    "answers": {
+                        name: {
+                            "type": "noul",
+                            "noul": (1.0 if name == "owns_product_delivery" else 0.0),
+                        }
+                        for name in questions
+                    },
+                    "usage": {"input_tokens": 12, "output_tokens": len(questions)},
+                }
+            ),
+        )
+
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        jev_release_id = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_atomic_policy()),
+            created_at=now,
+            created_by="contract",
+        )
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=jev_release_id.id
+        )
+        target_id = qualification_target_id(target)
+        fixture_id = store_fixture_set(connection, fixture, created_at=now, created_by="owner")
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_composition_fixture_set(
+                connection,
+                target_id,
+                fixture_id,
+                artifact_path,
+                openrouter_api_key="unused",
+                typesafe_api_key="unused",
+                completed_at=now,
+                created_by="owner",
+                model_sender=model_sender,
+                jev_sender=jev_sender,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.outcome == "passed", evidence.result
+            assert evidence.origin == "synthetic"
+            assert evidence.result["passed_count"] == 5
+            assert len(evidence.attempts) >= 15
+            assert connection.execute(
+                "SELECT DISTINCT provider FROM qualification_provider_attempts WHERE evidence_id = %s",
+                (evidence_id,),
+            ).fetchall() == [("openrouter",), ("typesafe",)]
+            assert connection.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+            assert connection.execute("SELECT count(*) FROM pipeline_runs").fetchone() == (0,)
+            assert connection.execute("SELECT count(*) FROM model_call_attempts").fetchone() == (0,)
         finally:
             artifact_path.unlink(missing_ok=True)
 
