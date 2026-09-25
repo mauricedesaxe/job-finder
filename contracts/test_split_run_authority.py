@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 import psycopg
@@ -12,7 +14,14 @@ from psycopg.types.json import Jsonb
 from contracts.test_postgres_authority import _store_default_qualification_target  # pyright: ignore[reportPrivateUsage]
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
-from job_finder.evaluation.qualification_components import qualification_target_id
+from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
+from job_finder.evaluation.qualification_components import (
+    QualificationTargetId,
+    qualification_target_id,
+)
+from job_finder.evaluation.qualification_prompt_compilations import (
+    bind_qualification_prompt_release,
+)
 
 
 @contextmanager
@@ -29,11 +38,32 @@ def _schema():
             _ = connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
 
 
+def _compiled_release(
+    connection: psycopg.Connection[tuple[object, ...]],
+    target_id: QualificationTargetId,
+    now: datetime,
+) -> str:
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(
+        dir=root, prefix=".qualification-artifact-", suffix=".json"
+    ) as temporary:
+        artifact_path = Path(temporary.name)
+        _ = write_implementation_artifact(root, artifact_path)
+        return str(
+            bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+        )
+
+
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     with _schema() as connection:
         _ = apply_migrations(connection)
-        _, _, target = _store_default_qualification_target(connection, now)
+        _, components, target = _store_default_qualification_target(connection, now)
+        qualification_id = qualification_target_id(target)
+        prompt_id = _compiled_release(connection, qualification_id, now)
+        relevance_id = components[1].relevance_release_id
         acquisition = connection.execute(
             "SELECT revision_id FROM active_acquisition_policy WHERE singleton_id = 1"
         ).fetchone()
@@ -45,11 +75,20 @@ def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> 
                 INSERT INTO pipeline_runs (
                     id, idempotency_key, kind, implementation_ref, parameters,
                     status, started_at, execution_authority_kind,
-                    acquisition_policy_revision_id, qualification_target_id
+                    acquisition_policy_revision_id, qualification_target_id,
+                    prompt_release_id, relevance_release_id
                 ) VALUES (%s, %s, 'onboarding', 'build', '{}'::jsonb, 'running', %s,
-                          'split', %s, %s)
+                          'split', %s, %s, %s, %s)
                 """,
-                (run_id, str(run_id), now, acquisition[0], qualification_target_id(target)),
+                (
+                    run_id,
+                    str(run_id),
+                    now,
+                    acquisition[0],
+                    qualification_id,
+                    prompt_id,
+                    relevance_id,
+                ),
             )
             _ = connection.execute(
                 """
@@ -68,7 +107,7 @@ def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> 
             """,
             (run_id,),
         ).fetchone()
-        assert row == ("split", None, None, None, acquisition[0], qualification_target_id(target))
+        assert row == ("split", None, prompt_id, relevance_id, acquisition[0], qualification_id)
         with pytest.raises(psycopg.errors.CheckViolation):
             _ = connection.execute(
                 """
@@ -84,12 +123,14 @@ def test_split_reservation_pins_matching_orchestration_run() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     with _schema() as connection:
         _ = apply_migrations(connection)
-        _, _, target = _store_default_qualification_target(connection, now)
+        _, components, target = _store_default_qualification_target(connection, now)
         acquisition = connection.execute(
             "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
         ).fetchone()
         assert acquisition is not None
         qualification_id = qualification_target_id(target)
+        prompt_id = _compiled_release(connection, qualification_id, now)
+        relevance_id = components[1].relevance_release_id
         run_id = uuid4()
         key = str(run_id)
         _ = connection.execute(
@@ -111,11 +152,12 @@ def test_split_reservation_pins_matching_orchestration_run() -> None:
                 INSERT INTO pipeline_runs (
                     id, idempotency_key, kind, implementation_ref, parameters,
                     status, started_at, execution_authority_kind,
-                    acquisition_policy_revision_id, qualification_target_id
+                    acquisition_policy_revision_id, qualification_target_id,
+                    prompt_release_id, relevance_release_id
                 ) VALUES (%s, %s, 'orchestration', 'build', '{}'::jsonb, 'running',
-                          %s, 'split', %s, %s)
+                          %s, 'split', %s, %s, %s, %s)
                 """,
-                (run_id, key, now, acquisition[0], qualification_id),
+                (run_id, key, now, acquisition[0], qualification_id, prompt_id, relevance_id),
             )
             _ = connection.execute(
                 """

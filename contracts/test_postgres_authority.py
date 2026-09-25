@@ -353,6 +353,7 @@ EXPECTED_MIGRATIONS = (
     "0045_unique_qualification_promotion_pair.sql",
     "0046_split_run_authority.sql",
     "0047_split_reservation_authority.sql",
+    "0048_split_run_execution_projections.sql",
 )
 
 
