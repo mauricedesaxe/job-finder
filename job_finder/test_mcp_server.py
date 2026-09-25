@@ -35,56 +35,56 @@ def test_mcp_server_rejects_duplicate_tool_names() -> None:
         _ = server.tool(name="feedback_list")(lambda: None)
 
 
+_EXPECTED_TOOLS = {
+    "qualification_active_get",
+    "qualification_candidate_get",
+    "qualification_candidate_create",
+    "qualification_candidate_compile",
+    "qualification_definition_draft_get",
+    "qualification_definition_draft_update",
+    "qualification_definition_publish",
+    "qualification_definition_revision_get",
+    "qualification_promotion_preview",
+    "qualification_promotion_decide",
+    "qualification_activate",
+    "acquisition_active_get",
+    "acquisition_draft_get",
+    "acquisition_revision_get",
+    "acquisition_draft_update",
+    "acquisition_publish",
+    "acquisition_activate",
+    "feedback_list",
+    "feedback_get",
+    "feedback_curate",
+    "manifest_preview",
+    "manifest_create",
+    "manifest_get",
+    "manifest_list",
+    "release_target_candidate_create",
+    "release_target_active_get",
+    "evaluation_execution_get",
+    "evaluation_run",
+    "evaluation_run_get",
+    "release_target_compare",
+    "release_target_decide",
+    "release_target_activate",
+    "langfuse_projection_status",
+    "configuration_active_get",
+    "configuration_draft_get",
+    "configuration_validate",
+    "configuration_preview",
+    "configuration_revision_list",
+    "configuration_revision_get",
+}
+
+
 def test_mcp_tools_are_bounded_and_validate_input() -> None:
     server = create_mcp_server(McpDependencies(connect=_no_database))
 
     async def exercise() -> None:
         async with Client(server) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
-            assert set(tools) == {
-                "qualification_active_get",
-                "qualification_candidate_get",
-                "qualification_candidate_create",
-                "qualification_candidate_compile",
-                "qualification_definition_draft_get",
-                "qualification_definition_draft_update",
-                "qualification_definition_publish",
-                "qualification_definition_revision_get",
-                "qualification_promotion_preview",
-                "qualification_promotion_decide",
-                "qualification_activate",
-                "acquisition_active_get",
-                "acquisition_draft_get",
-                "acquisition_revision_get",
-                "acquisition_draft_update",
-                "acquisition_publish",
-                "acquisition_activate",
-                "feedback_list",
-                "feedback_get",
-                "feedback_curate",
-                "manifest_preview",
-                "manifest_create",
-                "manifest_get",
-                "manifest_list",
-                "release_target_candidate_create",
-                "release_target_active_get",
-                "evaluation_execution_get",
-                "evaluation_run",
-                "evaluation_run_get",
-                "release_target_compare",
-                "release_target_decide",
-                "release_target_activate",
-                "langfuse_projection_status",
-                "configuration_active_get",
-                "configuration_draft_get",
-                "configuration_validate",
-                "configuration_preview",
-                "configuration_draft_update",
-                "configuration_publish",
-                "configuration_revision_list",
-                "configuration_revision_get",
-                "configuration_activate",
-            }
+            assert set(tools) == _EXPECTED_TOOLS
             feedback_list = tools["feedback_list"]
             assert feedback_list.annotations is not None
             assert feedback_list.annotations.read_only_hint is True
@@ -124,17 +124,6 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
                 assert annotations.read_only_hint is True
                 assert annotations.destructive_hint is False
                 assert annotations.open_world_hint is False
-            for name in ("configuration_draft_update", "configuration_activate"):
-                annotations = configuration_tools[name].annotations
-                assert annotations is not None
-                assert annotations.read_only_hint is False
-                assert annotations.destructive_hint is True
-                assert annotations.idempotent_hint is True
-                assert annotations.open_world_hint is False
-            publish_annotations = configuration_tools["configuration_publish"].annotations
-            assert publish_annotations is not None
-            assert publish_annotations.destructive_hint is False
-            assert publish_annotations.idempotent_hint is True
             for tool in configuration_tools.values():
                 assert "actor" not in tool.input_schema["properties"]
                 assert "timestamp" not in tool.input_schema["properties"]
@@ -218,15 +207,10 @@ def test_mcp_configuration_validation_errors_hide_rejected_values() -> None:
 
     async def exercise() -> None:
         async with Client(server) as client:
-            for tool_name, arguments in (
-                ("configuration_preview", {"configuration": invalid_configuration}),
-                (
-                    "configuration_draft_update",
-                    {"expected_version": 0, "configuration": invalid_configuration},
-                ),
-            ):
-                with pytest.raises(ToolError) as captured:
-                    _ = await client.call_tool(tool_name, arguments)
-                assert sensitive_value not in str(captured.value)
+            with pytest.raises(ToolError) as captured:
+                _ = await client.call_tool(
+                    "configuration_preview", {"configuration": invalid_configuration}
+                )
+            assert sensitive_value not in str(captured.value)
 
     asyncio.run(exercise())

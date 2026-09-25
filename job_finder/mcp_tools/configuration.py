@@ -9,9 +9,6 @@ from pydantic import Field
 
 from job_finder.configuration_service import (
     DEFAULT_RESULT_LIMIT,
-    MAX_POSTGRES_BIGINT,
-    ActivateConfigurationCommand,
-    ActivateConfigurationResult,
     ConfigurationInvalid,
     ConfigurationPreview,
     ConfigurationRevisionCursor,
@@ -20,30 +17,20 @@ from job_finder.configuration_service import (
     ConfigurationRevisionNotFound,
     ConfigurationRevisionPage,
     ConfigurationValidationResult,
-    DraftSaveResult,
-    IdempotencyKey,
-    PublishConfigurationCommand,
-    PublishConfigurationResult,
     PublishedActiveSearchConfiguration,
-    SaveDraftCommand,
-    activate_search_configuration,
     get_active_search_configuration,
     get_search_configuration_draft,
     get_search_configuration_revision,
     list_search_configuration_revisions,
     preview_search_configuration,
-    publish_search_configuration,
-    save_search_configuration_draft,
     validate_search_configuration,
 )
-from job_finder.mcp_tools.common import CAS_WRITE, PUBLISH_WRITE, READ_ONLY, McpDependencies
+from job_finder.mcp_tools.common import READ_ONLY, McpDependencies
 from job_finder.search_configuration import SearchConfiguration, SearchConfigurationDraft
 
 
 def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
     read_only = READ_ONLY
-    cas_write = CAS_WRITE
-    publish_write = PUBLISH_WRITE
 
     def parse_configuration(candidate: object) -> SearchConfiguration:
         validation = validate_search_configuration(candidate)
@@ -84,42 +71,6 @@ def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) ->
             prompt_summary_limit=prompt_summary_limit,
         )
 
-    @mcp.tool(annotations=cas_write)
-    def configuration_draft_update(
-        expected_version: Annotated[int, Field(ge=0, le=MAX_POSTGRES_BIGINT)],
-        configuration: dict[str, object],
-    ) -> DraftSaveResult:
-        """Replace the draft only if its version still matches."""
-        with dependencies.connect() as connection:
-            return save_search_configuration_draft(
-                connection,
-                SaveDraftCommand(
-                    expected_version=expected_version,
-                    configuration=parse_configuration(configuration),
-                    actor=dependencies.actor,
-                    timestamp=dependencies.now(),
-                ),
-            )
-
-    @mcp.tool(annotations=publish_write)
-    def configuration_publish(
-        idempotency_key: IdempotencyKey,
-        expected_draft_version: Annotated[int, Field(ge=0, le=MAX_POSTGRES_BIGINT)],
-        expected_configuration_revision_id: ConfigurationRevisionId,
-    ) -> PublishConfigurationResult:
-        """Idempotently publish the exact observed draft and rebase it."""
-        with dependencies.connect() as connection:
-            return publish_search_configuration(
-                connection,
-                PublishConfigurationCommand(
-                    idempotency_key=idempotency_key,
-                    expected_draft_version=expected_draft_version,
-                    expected_configuration_revision_id=expected_configuration_revision_id,
-                    actor=dependencies.actor,
-                    timestamp=dependencies.now(),
-                ),
-            )
-
     @mcp.tool(annotations=read_only)
     def configuration_revision_list(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
@@ -139,22 +90,3 @@ def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) ->
                 return get_search_configuration_revision(connection, revision_id)
         except ConfigurationRevisionNotFound as error:
             raise ToolError(str(error)) from error
-
-    @mcp.tool(annotations=cas_write)
-    def configuration_activate(
-        target_revision_id: ConfigurationRevisionId,
-        expected_active_revision_id: ConfigurationRevisionId,
-        expected_generation: Annotated[int, Field(ge=0, le=MAX_POSTGRES_BIGINT)],
-    ) -> ActivateConfigurationResult:
-        """Activate a published revision only if active state still matches."""
-        with dependencies.connect() as connection:
-            return activate_search_configuration(
-                connection,
-                ActivateConfigurationCommand(
-                    target_revision_id=target_revision_id,
-                    expected_active_revision_id=expected_active_revision_id,
-                    expected_generation=expected_generation,
-                    actor=dependencies.actor,
-                    timestamp=dependencies.now(),
-                ),
-            )

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +19,6 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from fastmcp import Client
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from pydantic import JsonValue, SecretStr, TypeAdapter
@@ -91,19 +89,14 @@ from job_finder.configuration_service import (
     ActiveConfigurationChanged,
     ActivateConfigurationCommand,
     ConfigurationActivated,
-    ConfigurationPreview,
     ConfigurationPublished,
     ConfigurationRevisionCursor,
-    ConfigurationRevisionDetails,
     ConfigurationRevisionNotFound,
-    ConfigurationRevisionPage,
-    ConfigurationValid,
     DraftChanged,
     DraftSaved,
     PublicationIdempotencyKeyConflict,
     PublishConfigurationCommand,
     PublishDraftChanged,
-    PublishedActiveSearchConfiguration,
     SaveDraftCommand,
     activate_search_configuration,
     get_active_search_configuration,
@@ -275,9 +268,6 @@ from job_finder.evaluation.relevance_releases import (
     validate_release_target,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
-from job_finder.discovery.jina import SearchSucceeded
-from job_finder.mcp_server import McpDependencies, create_mcp_server
-from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
 from job_finder.pipeline.runs import prepare_orchestration_run
 from job_finder.provider_credentials import (
     ProviderCapability,
@@ -3513,184 +3503,6 @@ def test_get_search_configuration_revision_reports_a_missing_revision(
             get_search_configuration_revision(connection, missing_revision_id)
 
 
-def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
-    authority_schema: str,
-) -> None:
-    configured_profile = DEFAULT_SEARCH_CONFIGURATION.target_profiles[0].model_copy(
-        update={"instructions": "Prefer roles with direct product ownership."}
-    )
-    configured = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={
-            "search_keywords": ("mcp-configured-search",),
-            "enabled_sources": (SupportedSearchSource.LEVER,),
-            "target_profiles": (
-                configured_profile,
-                *DEFAULT_SEARCH_CONFIGURATION.target_profiles[1:],
-            ),
-        }
-    )
-    expected_revision_id = search_configuration_revision_id(configured)
-
-    with _connection(authority_schema) as connection:
-        apply_migrations(connection)
-
-    server = create_mcp_server(
-        McpDependencies(
-            connect=lambda: _connection(authority_schema),
-            actor="mcp-contract-owner",
-            now=lambda: datetime(2030, 1, 2, tzinfo=UTC),
-        )
-    )
-
-    async def configure() -> (
-        tuple[
-            PublishedActiveSearchConfiguration,
-            ConfigurationPreview,
-            ConfigurationPublished,
-        ]
-    ):
-        async with Client(server) as client:
-            active_result = await client.call_tool("configuration_active_get", {})
-            active = PublishedActiveSearchConfiguration.model_validate(
-                active_result.structured_content
-            )
-
-            draft_result = await client.call_tool("configuration_draft_get", {})
-            draft = SearchConfigurationDraft.model_validate(draft_result.structured_content)
-            assert active.active.revision.configuration == DEFAULT_SEARCH_CONFIGURATION
-            assert draft.configuration == DEFAULT_SEARCH_CONFIGURATION
-
-            valid_result = await client.call_tool(
-                "configuration_validate",
-                {"candidate": configured.model_dump(mode="json")},
-            )
-            assert valid_result.structured_content is not None
-            valid = ConfigurationValid.model_validate(valid_result.structured_content["result"])
-            assert valid.configuration == configured
-
-            preview_result = await client.call_tool(
-                "configuration_preview",
-                {"configuration": configured.model_dump(mode="json")},
-            )
-            preview = ConfigurationPreview.model_validate(preview_result.structured_content)
-            assert preview.configuration_revision_id == expected_revision_id
-            assert preview.total_generated_search_count == 1
-            assert preview.search_samples == ("site:jobs.lever.co mcp-configured-search",)
-            expected_prompt = build_prompt_release(configured)
-            expected_profile_version = next(
-                version
-                for version in expected_prompt.versions
-                if version.definition.phase == "profile"
-                and version.definition.criterion == configured_profile.key
-            )
-            profile_summary = next(
-                summary
-                for summary in preview.prompt_summaries
-                if summary.phase == "profile" and summary.criterion == configured_profile.key
-            )
-            assert preview.total_compiled_prompt_count == len(expected_prompt.versions)
-            assert profile_summary.prompt_version_id == expected_profile_version.id
-
-            saved_result = await client.call_tool(
-                "configuration_draft_update",
-                {
-                    "expected_version": draft.version,
-                    "configuration": configured.model_dump(mode="json"),
-                },
-            )
-            assert saved_result.structured_content is not None
-            saved = DraftSaved.model_validate(saved_result.structured_content["result"])
-
-            published_result = await client.call_tool(
-                "configuration_publish",
-                {
-                    "idempotency_key": "mcp-contract-publish",
-                    "expected_draft_version": saved.draft.version,
-                    "expected_configuration_revision_id": expected_revision_id,
-                },
-            )
-            assert published_result.structured_content is not None
-            published = ConfigurationPublished.model_validate(
-                published_result.structured_content["result"]
-            )
-            assert published.publication.revision_id == expected_revision_id
-            assert published.publication.prompt_release_id == preview.prompt_release_id
-
-            listed_result = await client.call_tool("configuration_revision_list", {"limit": 100})
-            listed = ConfigurationRevisionPage.model_validate(listed_result.structured_content)
-            assert expected_revision_id in {item.revision_id for item in listed.items}
-
-            details_result = await client.call_tool(
-                "configuration_revision_get", {"revision_id": expected_revision_id}
-            )
-            details = ConfigurationRevisionDetails.model_validate(details_result.structured_content)
-            assert details.revision.configuration == configured
-
-            activated_result = await client.call_tool(
-                "configuration_activate",
-                {
-                    "target_revision_id": expected_revision_id,
-                    "expected_active_revision_id": active.active.revision.id,
-                    "expected_generation": active.active.generation,
-                },
-            )
-            assert activated_result.structured_content is not None
-            activated = ConfigurationActivated.model_validate(
-                activated_result.structured_content["result"]
-            )
-            assert activated.active_configuration.active.revision.id == expected_revision_id
-            return active, preview, published
-
-    initial_active, preview, published = asyncio.run(configure())
-
-    searches: list[tuple[str, str]] = []
-
-    def search(keyword: str, domain: str) -> SearchSucceeded:
-        searches.append((keyword, domain))
-        return SearchSucceeded(urls=())
-
-    with _connection(authority_schema) as connection:
-        active_target = get_active_release_target(connection)
-        run = prepare_orchestration_run(
-            connection,
-            idempotency_key="mcp-configured-run",
-            implementation_ref="mcp-contract",
-            configuration_revision_id=expected_revision_id,
-            target=active_target.target,
-            started_at=datetime(2030, 1, 3, tzinfo=UTC),
-            fetch_rates=lambda: ExchangeRateSnapshot(
-                rates={"EUR": Decimal("1.11")},
-                source="frankfurter",
-                observed_at=datetime(2030, 1, 3, tzinfo=UTC),
-            ),
-        )
-        discovery = discover_jobs(
-            connection,
-            run,
-            PipelineBoundaries(
-                search=search,
-                scrape=lambda _url: pytest.fail("scrape was called"),
-                fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
-            ),
-            discovered_at=datetime(2030, 1, 3, tzinfo=UTC),
-            max_workers=1,
-        )
-        stored_revision = load_search_configuration_revision(
-            connection, run.configuration_revision_id
-        )
-        published_prompt = load_prompt_release(connection, published.publication.prompt_release_id)
-
-        assert run.configuration_revision_id == expected_revision_id
-        assert run.target == active_target.target
-        assert run.prompt_release_id == initial_active.publication.prompt_release_id
-        assert run.prompt_release_id != published.publication.prompt_release_id
-        assert stored_revision.configuration == configured
-        assert published_prompt == build_prompt_release(configured)
-        assert preview.prompt_release_id == published_prompt.id
-        assert discovery.query_count == 1
-        assert searches == [("mcp-configured-search", "jobs.lever.co")]
-
-
 def test_configuration_editor_inspects_the_live_draft_active_and_saved_revisions(
     authority_schema: str,
 ) -> None:
@@ -3720,147 +3532,6 @@ def test_configuration_editor_inspects_the_live_draft_active_and_saved_revisions
         INITIAL_SEARCH_CONFIGURATION_REVISION_ID
     )
     assert state.saved_revision.publication is not None
-
-
-def test_mcp_configuration_conflicts_surface_as_structured_results(
-    authority_schema: str,
-) -> None:
-    unpublished_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={"search_keywords": ("mcp-never-published",)}
-    )
-    unpublished_revision = build_search_configuration_revision(
-        unpublished_configuration,
-        created_at=datetime(2030, 1, 2, tzinfo=UTC),
-        created_by="mcp-contract-owner",
-    )
-    first_publication_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={"search_keywords": ("mcp-conflict-first",)}
-    )
-    second_publication_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={"search_keywords": ("mcp-conflict-second",)}
-    )
-    idempotency_key = "mcp-contract-conflict-publish"
-
-    with _connection(authority_schema) as connection:
-        apply_migrations(connection)
-        _ = store_search_configuration_revision(connection, unpublished_revision)
-
-    server = create_mcp_server(
-        McpDependencies(
-            connect=lambda: _connection(authority_schema),
-            actor="mcp-contract-owner",
-            now=lambda: datetime(2030, 1, 2, tzinfo=UTC),
-        )
-    )
-
-    async def conflict_flows() -> None:
-        async with Client(server) as client:
-            draft_result = await client.call_tool("configuration_draft_get", {})
-            draft = SearchConfigurationDraft.model_validate(draft_result.structured_content)
-
-            stale_result = await client.call_tool(
-                "configuration_draft_update",
-                {
-                    "expected_version": draft.version + 1,
-                    "configuration": first_publication_configuration.model_dump(mode="json"),
-                },
-            )
-            assert stale_result.structured_content is not None
-            stale = DraftChanged.model_validate(stale_result.structured_content["result"])
-            assert stale.current_draft == draft
-
-            saved_result = await client.call_tool(
-                "configuration_draft_update",
-                {
-                    "expected_version": draft.version,
-                    "configuration": first_publication_configuration.model_dump(mode="json"),
-                },
-            )
-            assert saved_result.structured_content is not None
-            saved = DraftSaved.model_validate(saved_result.structured_content["result"])
-            assert saved.draft.version == draft.version + 1
-
-            published_result = await client.call_tool(
-                "configuration_publish",
-                {
-                    "idempotency_key": idempotency_key,
-                    "expected_draft_version": saved.draft.version,
-                    "expected_configuration_revision_id": search_configuration_revision_id(
-                        first_publication_configuration
-                    ),
-                },
-            )
-            assert published_result.structured_content is not None
-            published = ConfigurationPublished.model_validate(
-                published_result.structured_content["result"]
-            )
-            assert published.replayed is False
-            assert published.publication.revision_id == search_configuration_revision_id(
-                first_publication_configuration
-            )
-
-            rebased_result = await client.call_tool("configuration_draft_get", {})
-            rebased = SearchConfigurationDraft.model_validate(rebased_result.structured_content)
-            assert rebased.version == saved.draft.version + 1
-
-            resaved_result = await client.call_tool(
-                "configuration_draft_update",
-                {
-                    "expected_version": rebased.version,
-                    "configuration": second_publication_configuration.model_dump(mode="json"),
-                },
-            )
-            assert resaved_result.structured_content is not None
-            resaved = DraftSaved.model_validate(resaved_result.structured_content["result"])
-
-            conflict_result = await client.call_tool(
-                "configuration_publish",
-                {
-                    "idempotency_key": idempotency_key,
-                    "expected_draft_version": resaved.draft.version,
-                    "expected_configuration_revision_id": search_configuration_revision_id(
-                        second_publication_configuration
-                    ),
-                },
-            )
-            assert conflict_result.structured_content is not None
-            conflict = PublicationIdempotencyKeyConflict.model_validate(
-                conflict_result.structured_content["result"]
-            )
-            assert conflict.idempotency_key == idempotency_key
-
-            active_result = await client.call_tool("configuration_active_get", {})
-            active = PublishedActiveSearchConfiguration.model_validate(
-                active_result.structured_content
-            )
-
-            unpublished_target_result = await client.call_tool(
-                "configuration_activate",
-                {
-                    "target_revision_id": unpublished_revision.id,
-                    "expected_active_revision_id": active.active.revision.id,
-                    "expected_generation": active.active.generation,
-                },
-            )
-            assert unpublished_target_result.structured_content is not None
-            unpublished_target = ActivationTargetUnpublished.model_validate(
-                unpublished_target_result.structured_content["result"]
-            )
-            assert unpublished_target.target_revision_id == unpublished_revision.id
-
-    asyncio.run(conflict_flows())
-
-    with _connection(authority_schema) as connection:
-        assert connection.execute(
-            """
-            SELECT outcome FROM search_configuration_publication_receipts
-            WHERE idempotency_key = %s
-            """,
-            (idempotency_key,),
-        ).fetchall() == [("published",)]
-        assert connection.execute(
-            "SELECT revision_id FROM active_search_configuration WHERE singleton_id = 1"
-        ).fetchone() == (INITIAL_SEARCH_CONFIGURATION_REVISION_ID,)
 
 
 def test_configuration_service_saves_a_draft_and_preserves_its_base(
