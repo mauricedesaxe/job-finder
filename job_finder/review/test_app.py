@@ -112,6 +112,7 @@ from job_finder.review.operations import (
     RunListItem,
     RunsService,
     WorkAttemptSummary,
+    JobVerdict,
     WorkItemNotFound,
     WorkItemDetail,
     WorkItemState,
@@ -2380,6 +2381,7 @@ def _work_item_detail(
     dismissed: bool = False,
     dismissed_at: datetime | None = None,
     dismissed_by: str | None = None,
+    verdict: JobVerdict | None = None,
 ) -> WorkItemDetail:
     return WorkItemDetail(
         job_id=UUID(int=31),
@@ -2394,6 +2396,7 @@ def _work_item_detail(
         dismissed=dismissed,
         dismissed_at=dismissed_at,
         dismissed_by=dismissed_by,
+        verdict=verdict,
         attempts=(
             WorkAttemptSummary(
                 operation_key="evaluation",
@@ -2421,6 +2424,7 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
 
     assert response.status_code == 200
     assert "Job work" in response.text
+    assert "No pipeline decision has been recorded yet." in response.text
     assert 'class="schedule-state terminal_error"' in response.text
     assert ">Terminal<" in response.text
     assert "provider_timeout: OpenRouter did not respond" in response.text
@@ -2435,6 +2439,30 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
     assert re.search(
         _shell_link("/operations/runs", "Recent activity", current=True), response.text
     )
+
+
+def test_the_work_item_page_leads_with_the_recorded_pipeline_verdict() -> None:
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        work_detail=lambda _job: _work_item_detail(
+            verdict=JobVerdict(
+                outcome="qualified",
+                reason="Matches the backend role and location requirements.",
+                matched_profile="Backend engineer",
+                decided_at=NOW - timedelta(hours=1),
+            )
+        ),
+    )
+    client = _client(_queue(), operations=operations)
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 200
+    assert response.text.index("Pipeline verdict") < response.text.index("Current state")
+    assert "Qualified" in response.text
+    assert "Matches the backend role and location requirements." in response.text
+    assert "Matched profile: Backend engineer" in response.text
+    assert "Decided" in response.text
 
 
 def test_the_work_item_page_offers_retry_for_failed_work() -> None:

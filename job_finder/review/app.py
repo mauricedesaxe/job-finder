@@ -131,6 +131,7 @@ from job_finder.review.operations import (
     RunNotFound,
     RunsService,
     WorkAttemptSummary,
+    JobVerdict,
     WorkItemDetail,
     WorkItemNotFound,
     unknown_operations_service,
@@ -2255,6 +2256,7 @@ def _work_item_page(
             ),
             cls="operations-header",
         ),
+        _work_item_verdict(detail.verdict),
         Div(
             Small("Current state", cls="eyebrow"),
             H2("Status"),
@@ -2270,6 +2272,34 @@ def _work_item_page(
         _work_item_actions(detail, csrf_token),
         _work_attempt_history(detail.attempts),
         cls="review-shell operations-shell",
+    )
+
+
+_JOB_VERDICT_LABELS = {
+    "qualified": "Qualified",
+    "rejected": "Rejected",
+    "duplicate": "Duplicate",
+    "company_blocked": "Company blocked",
+    "company_applied": "Applied",
+}
+
+
+def _work_item_verdict(verdict: JobVerdict | None) -> object:
+    if verdict is None:
+        return Div(
+            Small("Latest decision", cls="eyebrow"),
+            H2("Pipeline verdict"),
+            P("No pipeline decision has been recorded yet.", cls="operations-muted"),
+            cls="operations-section",
+        )
+    return Div(
+        Small("Latest decision", cls="eyebrow"),
+        H2("Pipeline verdict"),
+        Strong(_JOB_VERDICT_LABELS[verdict.outcome]),
+        P(verdict.reason),
+        P(f"Matched profile: {verdict.matched_profile}") if verdict.matched_profile else None,
+        Small(f"Decided {absolute_time(verdict.decided_at)}"),
+        cls="operations-section",
     )
 
 
