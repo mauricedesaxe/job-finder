@@ -2361,8 +2361,8 @@ def test_the_activity_page_keeps_filters_on_the_next_page_link() -> None:
 
     assert listing.status_code == 200
     assert (
-        'href="/operations/runs?status=failed&amp;kind=work&amp;from=2026-09-01'
-        '&amp;cursor=next-cursor-token"' in listing.text
+        'href="/operations/runs?status=failed&amp;kind=work&amp;from=2026-09-01&amp;cursor=next-cursor-token"'
+        in listing.text
     )
 
 

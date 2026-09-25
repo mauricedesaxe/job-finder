@@ -20,6 +20,7 @@ from job_finder.benchmarks.scoring import (
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+ZERO = Decimal(0)
 
 
 def test_compares_case_transitions_deterministically_for_distinct_release_targets() -> None:
@@ -142,8 +143,8 @@ def _metrics(
     *,
     operational_failure_count: int = 0,
     critical_false_positive_count: int = 0,
-    false_positive_rate: Decimal = Decimal(0),
-    false_negative_rate: Decimal = Decimal(0),
+    false_positive_rate: Decimal = ZERO,
+    false_negative_rate: Decimal = ZERO,
 ) -> EvaluationMetrics:
     return EvaluationMetrics(
         result_count=0,
