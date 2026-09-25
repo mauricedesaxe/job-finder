@@ -65,6 +65,28 @@ class AcquisitionDraftChanged(_Model):
     current_draft: AcquisitionPolicyDraft
 
 
+class PublishAcquisitionPolicyCommand(_Model):
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    expected_draft_version: int = Field(ge=0, le=2**63 - 2)
+    expected_revision_id: _RevisionId
+    actor: str = Field(min_length=1, max_length=200)
+    timestamp: datetime
+
+
+class AcquisitionPublicationReceipt(_Model):
+    idempotency_key: str
+    outcome: Literal["published", "draft_changed"]
+    expected_draft_version: int
+    expected_revision_id: _RevisionId
+    actor: str
+    requested_at: datetime
+    observed_draft_version: int | None
+    observed_revision_id: _RevisionId | None
+    publication_revision_id: _RevisionId | None
+    rebased_draft_version: int | None
+    replayed: bool = False
+
+
 def load_acquisition_policy_revision(
     connection: _Connection, revision_id: AcquisitionPolicyRevisionId
 ) -> AcquisitionPolicyRevision:
@@ -149,3 +171,183 @@ def _draft_from_row(row: tuple[object, ...]) -> AcquisitionPolicyDraft:
             "updated_by": row[4],
         }
     )
+
+
+def publish_acquisition_policy(
+    connection: _Connection, command: PublishAcquisitionPolicyCommand
+) -> AcquisitionPublicationReceipt:
+    if not connection.autocommit:
+        raise AcquisitionPolicyServiceError("Acquisition publication requires autocommit")
+    with connection.transaction():
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"acquisition_publication:{command.idempotency_key}",),
+        )
+        existing = load_acquisition_publication_receipt(connection, command.idempotency_key)
+        if existing is not None:
+            _require_matching_publication_request(existing, command)
+            return existing.model_copy(update={"replayed": True})
+        row = connection.execute(
+            "SELECT base_revision_id, version, content, updated_at, updated_by FROM acquisition_policy_drafts WHERE singleton_id = 1 FOR UPDATE"
+        ).fetchone()
+        if row is None:
+            raise AcquisitionPolicyServiceError("Acquisition policy draft is missing")
+        draft = _draft_from_row(row)
+        observed_id = acquisition_policy_revision_id(draft.policy)
+        if (
+            draft.version != command.expected_draft_version
+            or observed_id != command.expected_revision_id
+        ):
+            _store_draft_changed_receipt(connection, command, draft.version, observed_id)
+        else:
+            _publish_locked_draft(connection, command, draft)
+        receipt = load_acquisition_publication_receipt(connection, command.idempotency_key)
+        if receipt is None:
+            raise AcquisitionPolicyServiceError("Acquisition publication receipt is missing")
+        return receipt
+
+
+def _publish_locked_draft(
+    connection: _Connection,
+    command: PublishAcquisitionPolicyCommand,
+    draft: AcquisitionPolicyDraft,
+) -> None:
+    revision_id = acquisition_policy_revision_id(draft.policy)
+    _ = connection.execute(
+        """
+        INSERT INTO acquisition_policy_revisions (id, content, created_at, created_by)
+        VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING
+        """,
+        (
+            revision_id,
+            Jsonb(draft.policy.model_dump(mode="json")),
+            command.timestamp,
+            command.actor,
+        ),
+    )
+    stored = load_acquisition_policy_revision(connection, revision_id)
+    if stored.policy != draft.policy:
+        raise AcquisitionPolicyServiceError("Stored acquisition revision differs from draft")
+    _ = connection.execute(
+        """
+        INSERT INTO acquisition_policy_publications (revision_id, published_at, published_by)
+        VALUES (%s, %s, %s) ON CONFLICT (revision_id) DO NOTHING
+        """,
+        (revision_id, command.timestamp, command.actor),
+    )
+    changed = connection.execute(
+        """
+        UPDATE acquisition_policy_drafts
+        SET base_revision_id = %s, version = version + 1,
+            content = %s, updated_at = %s, updated_by = %s
+        WHERE singleton_id = 1 AND base_revision_id = %s AND version = %s
+        """,
+        (
+            revision_id,
+            Jsonb(draft.policy.model_dump(mode="json")),
+            command.timestamp,
+            command.actor,
+            draft.base_revision_id,
+            draft.version,
+        ),
+    ).rowcount
+    if changed != 1:
+        raise AcquisitionPolicyServiceError("Locked acquisition draft changed unexpectedly")
+    _ = connection.execute(
+        """
+        INSERT INTO acquisition_policy_publication_receipts (
+          idempotency_key, outcome, expected_draft_version,
+          expected_revision_id, actor, requested_at,
+          publication_revision_id, rebased_draft_version
+        ) VALUES (%s, 'published', %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            command.idempotency_key,
+            command.expected_draft_version,
+            command.expected_revision_id,
+            command.actor,
+            command.timestamp,
+            revision_id,
+            draft.version + 1,
+        ),
+    )
+
+
+def _store_draft_changed_receipt(
+    connection: _Connection,
+    command: PublishAcquisitionPolicyCommand,
+    observed_version: int,
+    observed_id: AcquisitionPolicyRevisionId,
+) -> None:
+    _ = connection.execute(
+        """
+        INSERT INTO acquisition_policy_publication_receipts (
+          idempotency_key, outcome, expected_draft_version,
+          expected_revision_id, actor, requested_at,
+          observed_draft_version, observed_revision_id
+        ) VALUES (%s, 'draft_changed', %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            command.idempotency_key,
+            command.expected_draft_version,
+            command.expected_revision_id,
+            command.actor,
+            command.timestamp,
+            observed_version,
+            observed_id,
+        ),
+    )
+
+
+def load_acquisition_publication_receipt(
+    connection: _Connection, idempotency_key: str
+) -> AcquisitionPublicationReceipt | None:
+    row = connection.execute(
+        """
+        SELECT idempotency_key, outcome, expected_draft_version,
+               expected_revision_id, actor, requested_at,
+               observed_draft_version, observed_revision_id,
+               publication_revision_id, rebased_draft_version
+        FROM acquisition_policy_publication_receipts WHERE idempotency_key = %s
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return AcquisitionPublicationReceipt.model_validate(
+        dict(
+            zip(
+                (
+                    "idempotency_key",
+                    "outcome",
+                    "expected_draft_version",
+                    "expected_revision_id",
+                    "actor",
+                    "requested_at",
+                    "observed_draft_version",
+                    "observed_revision_id",
+                    "publication_revision_id",
+                    "rebased_draft_version",
+                ),
+                row,
+                strict=True,
+            )
+        )
+    )
+
+
+def _require_matching_publication_request(
+    receipt: AcquisitionPublicationReceipt, command: PublishAcquisitionPolicyCommand
+) -> None:
+    if (
+        receipt.expected_draft_version,
+        receipt.expected_revision_id,
+        receipt.actor,
+    ) != (
+        command.expected_draft_version,
+        command.expected_revision_id,
+        command.actor,
+    ):
+        raise AcquisitionPolicyServiceError(
+            "Idempotency key belongs to another acquisition publication"
+        )

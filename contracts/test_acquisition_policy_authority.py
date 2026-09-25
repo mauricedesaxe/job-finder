@@ -8,12 +8,15 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from job_finder.acquisition_policy import acquisition_policy_revision_id
 from job_finder.acquisition_policy_service import (
     AcquisitionDraftChanged,
     AcquisitionDraftSaved,
+    PublishAcquisitionPolicyCommand,
     ReplaceAcquisitionPolicyDraftCommand,
     get_acquisition_policy_draft,
     get_active_acquisition_policy,
+    publish_acquisition_policy,
     replace_acquisition_policy_draft,
 )
 from job_finder.config import PostgresContractSettings
@@ -67,6 +70,43 @@ def test_acquisition_draft_edits_are_independent_and_optimistic(authority_schema
         stale = replace_acquisition_policy_draft(connection, command)
         assert isinstance(stale, AcquisitionDraftChanged)
         assert stale.current_draft == saved.draft
+        assert get_active_acquisition_policy(connection) == active
+        assert (
+            connection.execute(
+                "SELECT base_revision_id, version, content FROM qualification_definition_drafts WHERE singleton_id = 1"
+            ).fetchone()
+            == before_qualification
+        )
+        assert (
+            connection.execute(
+                "SELECT base_revision_id, version, content FROM search_configuration_drafts WHERE singleton_id = 1"
+            ).fetchone()
+            == before_legacy
+        )
+
+        publish = PublishAcquisitionPolicyCommand(
+            idempotency_key="publish-acquisition-draft",
+            expected_draft_version=saved.draft.version,
+            expected_revision_id=acquisition_policy_revision_id(updated),
+            actor="owner",
+            timestamp=datetime(2026, 9, 25, tzinfo=UTC),
+        )
+        publication = publish_acquisition_policy(connection, publish)
+        assert publication.outcome == "published"
+        assert publication.publication_revision_id == publish.expected_revision_id
+        assert publication.rebased_draft_version == saved.draft.version + 1
+        assert publish_acquisition_policy(connection, publish).replayed
+        with pytest.raises(ValueError, match="another acquisition publication"):
+            _ = publish_acquisition_policy(
+                connection, publish.model_copy(update={"actor": "different"})
+            )
+        stale_command = publish.model_copy(
+            update={"idempotency_key": "stale-acquisition-publication"}
+        )
+        stale_publication = publish_acquisition_policy(connection, stale_command)
+        assert stale_publication.outcome == "draft_changed"
+        assert stale_publication.observed_draft_version == saved.draft.version + 1
+        assert publish_acquisition_policy(connection, stale_command).replayed
         assert get_active_acquisition_policy(connection) == active
         assert (
             connection.execute(
