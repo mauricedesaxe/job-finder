@@ -18,6 +18,7 @@ from anyio import Lock, to_thread
 from fasthtml.common import (
     A,
     Button,
+    Details,
     Div,
     Form,
     H1,
@@ -29,12 +30,14 @@ from fasthtml.common import (
     Ol,
     Option,
     P,
+    Pre,
     Script,
     Section,
     Select,
     Small,
     Span,
     Strong,
+    Summary,
     FastHTML,
     Request,
     Ul,
@@ -125,6 +128,7 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
+    ModelCallDetail,
     OperationsService,
     OperationsUnavailable,
     RunDetail,
@@ -2441,6 +2445,9 @@ def _work_attempt_history(attempts: tuple[WorkAttemptSummary, ...]) -> object:
                     if attempt.error_summary
                     else None,
                     Small(f"{attempt.model_calls} model calls · ${attempt.known_cost_usd:,.4f}"),
+                    Ul(*(_model_call_row(call) for call in attempt.calls), cls="operations-list")
+                    if attempt.calls
+                    else None,
                 )
                 for attempt in attempts
             ),
@@ -2454,6 +2461,38 @@ def _work_attempt_history(attempts: tuple[WorkAttemptSummary, ...]) -> object:
         H2("History"),
         rows,
         cls="operations-section",
+    )
+
+
+def _model_call_row(call: ModelCallDetail) -> object:
+    tokens = (
+        f"{call.input_tokens if call.input_tokens is not None else 'Unknown'} input tokens"
+        f" · {call.output_tokens if call.output_tokens is not None else 'Unknown'} output tokens"
+    )
+    cost = f"${call.cost_usd:,.4f}" if call.cost_usd is not None else "Cost unavailable"
+    return Li(
+        Div(
+            Strong(call.prompt_name),
+            Small(f"Version {call.prompt_version_id[:12]}", title=call.prompt_version_id),
+            Span(call.status, cls="run-status"),
+            cls="row-head",
+        ),
+        P(call.requested_model),
+        Small(f"{tokens} · {cost} · {call.latency_ms} ms"),
+        Pre(json.dumps(call.parsed_output, ensure_ascii=False, indent=2))
+        if call.parsed_output is not None
+        else P(call.error_summary or "No model answer recorded.", cls="operations-muted"),
+        Details(
+            Summary("Full request and response"),
+            Small(f"Prompt version: {call.prompt_version_id}"),
+            P("Request messages"),
+            Pre(json.dumps(call.request_messages, ensure_ascii=False, indent=2)),
+            P("Raw response"),
+            Pre(json.dumps(call.raw_response, ensure_ascii=False, indent=2))
+            if call.raw_response is not None
+            else P("No raw response recorded.", cls="operations-muted"),
+        ),
+        cls="model-call-row",
     )
 
 
