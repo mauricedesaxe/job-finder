@@ -292,12 +292,13 @@ def admit_onboarding_test_execution(
     idempotency_key: str,
     requested_at: datetime,
 ) -> ExecutionAdmission:
-    return _admit_execution(
-        connection,
-        idempotency_key=idempotency_key,
-        requested_at=requested_at,
-        allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
-    )
+    with connection.transaction():
+        return _admit_execution(
+            connection,
+            idempotency_key=idempotency_key,
+            requested_at=requested_at,
+            allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
+        )
 
 
 def _admit_execution(
@@ -321,6 +322,7 @@ def _admit_execution(
                maximum_provider_attempts
         FROM execution_budget_reservations
         WHERE idempotency_key = %s
+        FOR UPDATE
         """,
         (idempotency_key,),
     ).fetchone()

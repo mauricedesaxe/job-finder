@@ -272,6 +272,7 @@ EXPECTED_MIGRATIONS = (
     "0034_work_dismissals.sql",
     "0035_onboarding_work_scope.sql",
     "0036_execution_budget_authority.sql",
+    "0037_run_budget_authority_guard.sql",
 )
 
 
@@ -534,6 +535,31 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
         legacy.target.prompt_release_id,
         legacy.target.relevance_release_id,
     )
+    with _connection(authority_schema) as connection:
+        changed_configuration = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                DEFAULT_SEARCH_CONFIGURATION.model_copy(
+                    update={"search_keywords": ("different authority",)}
+                ),
+                created_at=datetime(2026, 9, 22, tzinfo=UTC),
+                created_by="test",
+            ),
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="reserved execution authority"):
+            prepare_orchestration_run(
+                connection,
+                idempotency_key="legacy-in-flight",
+                implementation_ref="test",
+                configuration_revision_id=changed_configuration.id,
+                target=legacy.target,
+                started_at=datetime(2026, 9, 22, tzinfo=UTC),
+                fetch_rates=lambda: ExchangeRateSnapshot(
+                    rates={"EUR": Decimal("1.11")},
+                    source="fallback",
+                    observed_at=datetime(2026, 9, 22, tzinfo=UTC),
+                ),
+            )
 
     barrier = Barrier(2)
 
