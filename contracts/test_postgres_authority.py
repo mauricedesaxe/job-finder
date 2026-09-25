@@ -271,6 +271,7 @@ EXPECTED_MIGRATIONS = (
     "0033_onboarding_test_search_requests.sql",
     "0034_work_dismissals.sql",
     "0035_onboarding_work_scope.sql",
+    "0036_execution_budget_authority.sql",
 )
 
 
@@ -368,11 +369,13 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
                 datetime(2026, 9, 22, tzinfo=UTC),
             ),
         )
-        assert admit_scheduled_execution(
+        admission = admit_scheduled_execution(
             connection,
             idempotency_key="legacy-without-owner-budget",
             requested_at=datetime(2026, 9, 22, tzinfo=UTC),
-        ) == ExecutionAdmitted(max_jobs=100)
+        )
+        assert isinstance(admission, ExecutionAdmitted)
+        assert admission.max_jobs == 100
 
 
 def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
@@ -506,12 +509,36 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
 
     assert sum(isinstance(result, ExecutionAdmitted) for result in admissions) == 1
     assert sum(isinstance(result, ExecutionBlocked) for result in admissions) == 1
+    admitted = next(result for result in admissions if isinstance(result, ExecutionAdmitted))
     with _connection(authority_schema) as connection:
         reservation_row = connection.execute(
-            "SELECT idempotency_key FROM execution_budget_reservations"
+            """
+            SELECT idempotency_key, configuration_revision_id, prompt_release_id,
+                   relevance_release_id, release_generation, search_queries,
+                   logical_model_calls_per_job, maximum_provider_attempts
+            FROM execution_budget_reservations
+            """
         ).fetchone()
         assert reservation_row is not None
         reservation_key = cast(str, reservation_row[0])
+        assert reservation_row[1:] == (
+            admitted.configuration_revision_id,
+            admitted.target.prompt_release_id,
+            admitted.target.relevance_release_id,
+            admitted.release_generation,
+            admitted.estimate.search_queries,
+            admitted.estimate.logical_model_calls_per_job,
+            admitted.estimate.maximum_provider_attempts,
+        )
+        with pytest.raises(psycopg.errors.CheckViolation, match="authority is immutable"):
+            connection.execute(
+                """
+                UPDATE execution_budget_reservations
+                SET maximum_provider_attempts = maximum_provider_attempts + 1
+                WHERE idempotency_key = %s
+                """,
+                (reservation_key,),
+            )
         assert reserve_discovery(connection, reservation_key)
         assert not reserve_discovery(connection, reservation_key)
         assert reserve_job_capacity(connection, reservation_key) == 10
@@ -649,8 +676,11 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             connection,
             idempotency_key="release-target:orchestration",
             implementation_ref="candidate",
+            configuration_revision_id=load_published_active_search_configuration(
+                connection
+            ).publication.revision_id,
+            target=candidate_target,
             started_at=now + timedelta(minutes=3),
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
 
@@ -1491,12 +1521,14 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
         return SearchSucceeded(urls=())
 
     with _connection(authority_schema) as connection:
+        active_target = get_active_release_target(connection)
         run = prepare_orchestration_run(
             connection,
             idempotency_key="mcp-configured-run",
             implementation_ref="mcp-contract",
+            configuration_revision_id=expected_revision_id,
+            target=active_target.target,
             started_at=datetime(2030, 1, 3, tzinfo=UTC),
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: ExchangeRateSnapshot(
                 rates={"EUR": Decimal("1.11")},
                 source="frankfurter",
@@ -1514,7 +1546,6 @@ def test_mcp_configuration_flow_pins_the_activated_revision_on_the_next_run(
             discovered_at=datetime(2030, 1, 3, tzinfo=UTC),
             max_workers=1,
         )
-        active_target = get_active_release_target(connection)
         stored_revision = load_search_configuration_revision(
             connection, run.configuration_revision_id
         )

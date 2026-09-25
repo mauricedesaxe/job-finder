@@ -18,6 +18,7 @@ from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.prompt_releases import bootstrap_prompt_release
+from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.pipeline.work_items import claim_next_job
 from job_finder.pipeline.runs import prepare_orchestration_run
@@ -727,12 +728,15 @@ def test_job_reevaluation_is_append_only_replay_safe_and_pins_the_active_target(
 
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        active_configuration = load_published_active_search_configuration(connection)
+        active_target = get_active_release_target(connection)
         run = prepare_orchestration_run(
             connection,
             idempotency_key="reevaluation-source",
             implementation_ref="source-ref",
+            configuration_revision_id=active_configuration.publication.revision_id,
+            target=active_target.target,
             started_at=now - timedelta(hours=1),
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: ExchangeRateSnapshot(
                 rates={"EUR": Decimal("1.1")},
                 source="frankfurter",

@@ -8,20 +8,16 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
-from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.evaluation.models import PromptReleaseId, RelevanceReleaseId
 from job_finder.execution_budget import (
     ExecutionAdmitted,
     ExecutionBlocked,
-    ExecutionBudgetPolicy,
+    ExecutionEstimate,
     admit_onboarding_test_execution,
-    estimate_execution,
     settle_execution_budget,
 )
 from job_finder.pipeline.work_items import JOB_WORK_ATTEMPT_LIMIT
-from job_finder.review.owner_access import OnboardingStage
 from job_finder.search_configuration import (
-    SearchConfiguration,
     SearchConfigurationRevisionId,
     SearchQuery,
 )
@@ -46,17 +42,16 @@ class OnboardingTestSearchLimits(OnboardingTestSearchModel):
     run_allowance_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=8)
 
     @classmethod
-    def from_policy(
-        cls, policy: ExecutionBudgetPolicy, configuration: SearchConfiguration
+    def from_estimate(
+        cls, estimate: ExecutionEstimate, run_allowance_usd: Decimal
     ) -> OnboardingTestSearchLimits:
-        estimate = estimate_execution(configuration, policy.max_jobs_per_run)
         return cls(
             max_queries=estimate.search_queries,
-            max_urls=policy.max_jobs_per_run * URLS_PER_JOB,
-            max_jobs=policy.max_jobs_per_run,
+            max_urls=estimate.jobs_per_run * URLS_PER_JOB,
+            max_jobs=estimate.jobs_per_run,
             max_work_attempts=JOB_WORK_ATTEMPT_LIMIT,
             max_provider_attempts=estimate.maximum_provider_attempts,
-            run_allowance_usd=policy.run_allowance_usd,
+            run_allowance_usd=run_allowance_usd,
         )
 
 
@@ -135,61 +130,15 @@ def create_onboarding_test_search(
         existing = _load_request(connection, command.idempotency_key)
         if existing is not None:
             return OnboardingTestSearchAccepted(replayed=True, request=existing)
-        owner_row = connection.execute(
-            "SELECT stage FROM owner_onboarding WHERE singleton_id = 1 FOR UPDATE"
-        ).fetchone()
-        if (
-            owner_row is None
-            or OnboardingStage(str(owner_row[0])) is not OnboardingStage.TEST_SEARCH
-        ):
-            return ExecutionBlocked(reason="onboarding_incomplete")
-        configuration_row = connection.execute(
-            """
-            SELECT revision_id
-            FROM active_search_configuration
-            WHERE singleton_id = 1
-            FOR SHARE
-            """
-        ).fetchone()
-        release_row = connection.execute(
-            """
-            SELECT prompt_release_id, relevance_release_id, generation
-            FROM active_release_target
-            WHERE singleton_id = 1
-            FOR SHARE
-            """
-        ).fetchone()
-        if configuration_row is None or release_row is None:
-            raise RuntimeError("Pinned onboarding search provenance is missing")
-        published = load_published_active_search_configuration(connection)
-        policy_row = connection.execute(
-            """
-            SELECT version, monthly_limit_usd, run_allowance_usd,
-                   max_jobs_per_run, max_search_queries_per_run,
-                   max_provider_attempts_per_run
-            FROM execution_budget_policy
-            WHERE singleton_id = 1
-            """
-        ).fetchone()
-        if policy_row is None:
-            return ExecutionBlocked(reason="budget_not_configured")
-        policy = ExecutionBudgetPolicy(
-            version=cast(int, policy_row[0]),
-            monthly_limit_usd=Decimal(str(policy_row[1])),
-            run_allowance_usd=Decimal(str(policy_row[2])),
-            max_jobs_per_run=cast(int, policy_row[3]),
-            max_search_queries_per_run=cast(int, policy_row[4]),
-            max_provider_attempts_per_run=cast(int, policy_row[5]),
-        )
-        limits = OnboardingTestSearchLimits.from_policy(
-            policy, published.active.revision.configuration
-        )
         reservation_key = onboarding_test_search_reservation_key(command.idempotency_key)
         admission = admit_onboarding_test_execution(
             connection, idempotency_key=reservation_key, requested_at=command.timestamp
         )
         if not isinstance(admission, ExecutionAdmitted):
             return admission
+        limits = OnboardingTestSearchLimits.from_estimate(
+            admission.estimate, admission.run_allowance_usd
+        )
         run_id = onboarding_test_search_run_id(command.idempotency_key)
         _ = connection.execute(
             """
@@ -206,11 +155,11 @@ def create_onboarding_test_search(
             (
                 command.idempotency_key,
                 run_id,
-                published.active.revision.id,
-                str(release_row[0]),
-                str(release_row[1]),
-                release_row[2],
-                policy.version,
+                admission.configuration_revision_id,
+                admission.target.prompt_release_id,
+                admission.target.relevance_release_id,
+                admission.release_generation,
+                admission.budget_policy_version,
                 reservation_key,
                 limits.max_queries,
                 limits.max_urls,

@@ -17,10 +17,10 @@ from dagster import (
 )
 
 from job_finder.config import DatabaseSettings, LangfuseSettings, OrchestrationSettings
-from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot, fetch_exchange_rates
 from job_finder.execution_budget import (
+    ExecutionAdmitted,
     ExecutionBlocked,
     admit_scheduled_execution,
     reserve_discovery,
@@ -92,7 +92,7 @@ def job_finder_cycle(
         run: OrchestrationRun | None = None
         work_started = False
         try:
-            run = _prepare_run(connection, context, settings, observed_at)
+            run = _prepare_run(connection, context, settings, admission, observed_at)
             work_started = True
             if reserve_discovery(connection, run_key):
                 discovery = discover_jobs(
@@ -167,7 +167,7 @@ def job_work_queue_cycle(
         run: OrchestrationRun | None = None
         work_started = False
         try:
-            run = _prepare_run(connection, context, settings, observed_at)
+            run = _prepare_run(connection, context, settings, admission, observed_at)
             work_started = True
             processing = _process_admitted_batch(
                 connection, run_key, run, boundaries, credentials, settings, observed_at
@@ -292,14 +292,16 @@ def _prepare_run(
     connection: Connection,
     context: AssetExecutionContext,
     settings: OrchestrationSettings,
+    admission: ExecutionAdmitted,
     observed_at: datetime,
 ) -> OrchestrationRun:
     return prepare_orchestration_run(
         connection,
         idempotency_key=f"dagster:{context.run.run_id}",
         implementation_ref=settings.implementation_ref,
+        configuration_revision_id=admission.configuration_revision_id,
+        target=admission.target,
         started_at=observed_at,
-        load_active_configuration=load_published_active_search_configuration,
         fetch_rates=lambda: _fetch_rates(observed_at),
     )
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 from job_finder.execution_budget import ExecutionBudgetPolicy, estimate_execution
+from job_finder.evaluation.prompt_releases import build_prompt_release
+from job_finder.evaluation.relevance_releases import build_jev_atomic_policy
 from job_finder.onboarding_test_search import (
     URLS_PER_JOB,
     OnboardingTestSearchLimits,
@@ -23,9 +25,14 @@ def test_limits_derive_urls_from_job_cap_and_reuse_work_attempt_limit() -> None:
         max_provider_attempts_per_run=1000000,
     )
     configuration = DEFAULT_SEARCH_CONFIGURATION
-    estimate = estimate_execution(configuration, policy.max_jobs_per_run)
+    estimate = estimate_execution(
+        configuration,
+        build_prompt_release(configuration),
+        build_jev_atomic_policy(),
+        max_jobs=policy.max_jobs_per_run,
+    )
 
-    limits = OnboardingTestSearchLimits.from_policy(policy, configuration)
+    limits = OnboardingTestSearchLimits.from_estimate(estimate, policy.run_allowance_usd)
 
     assert limits.max_queries == estimate.search_queries
     assert limits.max_urls == policy.max_jobs_per_run * URLS_PER_JOB

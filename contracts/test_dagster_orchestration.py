@@ -86,12 +86,15 @@ def test_run_retry_reuses_frozen_configuration_pair_and_exchange_rates(
     )
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        active_configuration = load_published_active_search_configuration(connection)
+        active_target = get_active_release_target(connection)
         first = prepare_orchestration_run(
             connection,
             idempotency_key="dagster:run-1",
             implementation_ref="commit-1",
+            configuration_revision_id=active_configuration.publication.revision_id,
+            target=active_target.target,
             started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         fail_orchestration_run(
@@ -105,10 +108,9 @@ def test_run_retry_reuses_frozen_configuration_pair_and_exchange_rates(
             connection,
             idempotency_key="dagster:run-1",
             implementation_ref="commit-1",
+            configuration_revision_id=first.configuration_revision_id,
+            target=first.target,
             started_at=now + timedelta(hours=1),
-            load_active_configuration=lambda _connection: pytest.fail(
-                "active configuration was reloaded"
-            ),
             fetch_rates=lambda: pytest.fail("rates were refetched"),
         )
 
@@ -136,12 +138,14 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
         initial = load_published_active_search_configuration(connection)
+        active_target = get_active_release_target(connection)
         first = prepare_orchestration_run(
             connection,
             idempotency_key="dagster:configuration-pair-1",
             implementation_ref="commit-1",
+            configuration_revision_id=initial.publication.revision_id,
+            target=active_target.target,
             started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         changed_configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
@@ -192,18 +196,18 @@ def test_configuration_activation_only_changes_new_orchestration_run_configurati
             connection,
             idempotency_key="dagster:configuration-pair-1",
             implementation_ref="commit-1",
+            configuration_revision_id=first.configuration_revision_id,
+            target=first.target,
             started_at=now + timedelta(minutes=3),
-            load_active_configuration=lambda _connection: pytest.fail(
-                "active configuration was reloaded"
-            ),
             fetch_rates=lambda: pytest.fail("rates were refetched"),
         )
         second = prepare_orchestration_run(
             connection,
             idempotency_key="dagster:configuration-pair-2",
             implementation_ref="commit-1",
+            configuration_revision_id=revision.id,
+            target=active_target.target,
             started_at=now + timedelta(minutes=3),
-            load_active_configuration=load_published_active_search_configuration,
             fetch_rates=lambda: rates,
         )
         discovery = discover_jobs(
@@ -236,18 +240,7 @@ def test_exact_url_registration_precedes_exclusive_leased_work(
     raw_url = "https://jobs.ashbyhq.com/acme/one"
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
-        run = prepare_orchestration_run(
-            connection,
-            idempotency_key="dagster:run-2",
-            implementation_ref="commit-1",
-            started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
-            fetch_rates=lambda: ExchangeRateSnapshot(
-                rates={"EUR": Decimal("1.11")},
-                source="frankfurter",
-                observed_at=now,
-            ),
-        )
+        run = _prepare_run(connection, "dagster:run-2", now)
         first_registration = register_discoveries(
             connection,
             run_id=run.id,
@@ -304,18 +297,7 @@ def test_failed_work_becomes_claimable_after_retry_time(authority_schema: str) -
     now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
-        run = prepare_orchestration_run(
-            connection,
-            idempotency_key="dagster:run-3",
-            implementation_ref="commit-1",
-            started_at=now,
-            load_active_configuration=load_published_active_search_configuration,
-            fetch_rates=lambda: ExchangeRateSnapshot(
-                rates={"EUR": Decimal("1.11")},
-                source="frankfurter",
-                observed_at=now,
-            ),
-        )
+        run = _prepare_run(connection, "dagster:run-3", now)
         _ = register_discoveries(
             connection,
             run_id=run.id,
@@ -434,12 +416,35 @@ def test_dagster_job_executes_the_domain_cycle(
         ).fetchone()
         publication = load_published_active_search_configuration(connection).publication
         active_target = get_active_release_target(connection)
+        reservation = connection.execute(
+            """
+            SELECT reservation.configuration_revision_id,
+                   reservation.prompt_release_id,
+                   reservation.relevance_release_id,
+                   reservation.search_queries,
+                   reservation.logical_model_calls_per_job,
+                   reservation.maximum_provider_attempts,
+                   reservation.pipeline_run_id = run.id
+            FROM execution_budget_reservations reservation
+            JOIN pipeline_runs run ON run.id = reservation.pipeline_run_id
+            WHERE run.kind = 'orchestration'
+            """
+        ).fetchone()
     assert stored == (
         "completed",
         "commit-1",
         publication.revision_id,
         publication.prompt_release_id,
         active_target.target.relevance_release_id,
+    )
+    assert reservation == (
+        publication.revision_id,
+        active_target.target.prompt_release_id,
+        active_target.target.relevance_release_id,
+        128,
+        8,
+        1000,
+        True,
     )
 
 
@@ -1756,12 +1761,15 @@ def test_profile_stage_rejection_runs_every_criterion_before_rejecting(
 
 
 def _prepare_run(connection: psycopg.Connection[tuple[object, ...]], key: str, now: datetime):
+    active_configuration = load_published_active_search_configuration(connection)
+    active_target = get_active_release_target(connection)
     return prepare_orchestration_run(
         connection,
         idempotency_key=key,
         implementation_ref="commit-1",
+        configuration_revision_id=active_configuration.publication.revision_id,
+        target=active_target.target,
         started_at=now,
-        load_active_configuration=load_published_active_search_configuration,
         fetch_rates=lambda: ExchangeRateSnapshot(
             rates={"EUR": Decimal("1.11")},
             source="frankfurter",
