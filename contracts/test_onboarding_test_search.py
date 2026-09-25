@@ -25,6 +25,7 @@ from job_finder.onboarding_test_search import (
     claim_next_onboarding_test_search,
     complete_onboarding_test_search,
     create_onboarding_test_search,
+    fail_onboarding_test_search,
     load_onboarding_test_search,
 )
 from job_finder.review.owner_access import OwnerBootstrapped, postgres_owner_access_service
@@ -95,6 +96,12 @@ def test_replay_keeps_pinned_provenance_after_active_config_changes(
         assert isinstance(created, OnboardingTestSearchAccepted)
         assert created.replayed is False
         original = created.request
+        assert original.limits.max_queries == 128
+        assert original.limits.max_urls == 40
+        assert original.limits.max_jobs == 10
+        assert original.limits.max_work_attempts == 3
+        assert original.limits.max_provider_attempts == 640
+        assert original.limits.run_allowance_usd == Decimal("50")
         _ = connection.execute(
             """
             UPDATE active_search_configuration
@@ -203,6 +210,82 @@ def test_leases_are_exclusive_reclaimable_and_reject_stale_owners(
             connection.execute(
                 "DELETE FROM onboarding_test_search_requests WHERE idempotency_key = 'owner-setup'"
             )
+
+
+def test_worker_failure_fails_the_request_and_rejects_late_failures(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    _prepare_test_search_owner(authority_schema, now)
+    owner = uuid4()
+    with _connection(authority_schema) as connection:
+        created = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="owner-setup",
+                actor="owner",
+                timestamp=now,
+            ),
+        )
+        assert isinstance(created, OnboardingTestSearchAccepted)
+        with pytest.raises(ValueError, match="lease must be positive"):
+            claim_next_onboarding_test_search(
+                connection,
+                owner_token=owner,
+                claimed_at=now,
+                lease_for=timedelta(0),
+            )
+        claimed = claim_next_onboarding_test_search(
+            connection,
+            owner_token=owner,
+            claimed_at=now,
+            lease_for=timedelta(minutes=5),
+        )
+        assert claimed is not None
+        assert claimed.state == "leased"
+        failed = fail_onboarding_test_search(
+            connection,
+            run_id=created.request.run_id,
+            owner_token=owner,
+            completed_at=now + timedelta(minutes=1),
+            error_code="provider_outage",
+            error_reason="Upstream provider returned 503 for every retry",
+        )
+        assert failed is not None
+        assert failed.state == "failed"
+        assert failed.error_code == "provider_outage"
+        assert failed.error_reason == "Upstream provider returned 503 for every retry"
+        assert failed.completed_at == now + timedelta(minutes=1)
+        stored = load_onboarding_test_search(connection, "owner-setup")
+        assert stored is not None
+        assert stored.state == "failed"
+        assert stored.error_code == "provider_outage"
+        assert stored.error_reason == "Upstream provider returned 503 for every retry"
+        assert stored.completed_at == now + timedelta(minutes=1)
+        assert (
+            claim_next_onboarding_test_search(
+                connection,
+                owner_token=uuid4(),
+                claimed_at=now + timedelta(minutes=10),
+                lease_for=timedelta(minutes=5),
+            )
+            is None
+        )
+        assert (
+            fail_onboarding_test_search(
+                connection,
+                run_id=created.request.run_id,
+                owner_token=owner,
+                completed_at=now + timedelta(minutes=2),
+                error_code="late_failure",
+                error_reason="Worker reported after the request became terminal",
+            )
+            is None
+        )
+        unchanged = load_onboarding_test_search(connection, "owner-setup")
+        assert unchanged is not None
+        assert unchanged.state == "failed"
+        assert unchanged.error_code == "provider_outage"
 
 
 def test_attempt_exhaustion_fails_the_request(authority_schema: str) -> None:
