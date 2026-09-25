@@ -22,13 +22,13 @@ import pytest
 from fastmcp import Client
 from psycopg import sql
 from psycopg.types.json import Jsonb
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 
 import job_finder.configuration_service as configuration_service_module
 import job_finder.evaluation.manifest_execution as manifest_execution_module
 import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.acquisition_policy import AcquisitionPolicy, acquisition_policy_revision_id
-from job_finder.ats.models import CompensationObservation
+from job_finder.ats.models import AtsAvailable, AtsNotApplicable, CompensationObservation
 from job_finder.benchmarks.comparisons import preview_run_comparison
 from job_finder.benchmarks.executions import (
     CompletedEvaluationExecution,
@@ -60,6 +60,9 @@ from job_finder.benchmarks.qualification_evidence import (
     store_fixture_set,
     store_qualification_evidence,
     store_relevance_experiment_input,
+)
+from job_finder.benchmarks.input_preparation_execution import (
+    execute_input_preparation_fixture_set,
 )
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
@@ -785,6 +788,113 @@ def test_qualification_prompt_compilation_requires_exact_published_release(
                         "owner",
                     ),
                 )
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_input_preparation_fixtures_execute_shared_production_path(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    markdown = "Title: Backend engineer\nBuild services."
+    url = "https://jobs.lever.co/acme/role-1"
+    direct_evidence = AtsNotApplicable().model_dump(mode="json")
+    ats_evidence = AtsAvailable(
+        source="lever",
+        location="Berlin",
+        locations=("Berlin",),
+        workplace_type="OnSite",
+        country="DE",
+        description="A detailed ATS description",
+    ).model_dump(mode="json")
+    listing: dict[str, JsonValue] = {
+        "title": "Backend engineer",
+        "company": "acme",
+        "url": url,
+        "source": "lever",
+        "keywords_matched": ["backend"],
+        "date_posted": None,
+        "date_scraped": "2026-09-25",
+        "description": markdown,
+        "location": "",
+        "profile": "",
+    }
+    ats_description = (
+        "## ATS Structured Data (from lever API)\n"
+        "- Primary location: Berlin\n"
+        "- All listed locations: Berlin\n"
+        "- Workplace type: OnSite\n"
+        "- Country fallback when locations are non-geographic: DE\n"
+        "---\n\nA detailed ATS description"
+    )
+    fixture = PhaseFixtureSet(
+        phase="input_preparation",
+        cases=(
+            FixtureCase(
+                input={
+                    "markdown": markdown,
+                    "url": url,
+                    "keyword": "backend",
+                    "scraped_on": "2026-09-25",
+                    "ats_evidence": direct_evidence,
+                },
+                expected={
+                    "listing": listing,
+                    "ats_evidence": direct_evidence,
+                    "body": markdown,
+                    "structural_decision": {"kind": "pass"},
+                },
+                input_path="direct",
+            ),
+            FixtureCase(
+                input={
+                    "markdown": markdown,
+                    "url": url,
+                    "keyword": "backend",
+                    "scraped_on": "2026-09-25",
+                    "ats_evidence": ats_evidence,
+                },
+                expected={
+                    "listing": {**listing, "description": ats_description, "location": "Berlin"},
+                    "ats_evidence": ats_evidence,
+                    "body": "A detailed ATS description",
+                    "structural_decision": {
+                        "kind": "rejected",
+                        "reason": "ATS workplaceType=OnSite (Berlin)",
+                    },
+                },
+                input_path="ats",
+            ),
+        ),
+    )
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        fixture_id = store_fixture_set(connection, fixture, created_at=now, created_by="owner")
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_input_preparation_fixture_set(
+                connection,
+                target_id,
+                fixture_id,
+                artifact_path,
+                completed_at=now,
+                created_by="owner",
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s", (evidence_id,)
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.origin == "canonical"
+            assert evidence.outcome == "passed"
+            assert evidence.result["case_count"] == 2
+            assert evidence.result["passed_count"] == 2
         finally:
             artifact_path.unlink(missing_ok=True)
 
