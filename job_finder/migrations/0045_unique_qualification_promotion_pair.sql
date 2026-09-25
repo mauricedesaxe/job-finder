@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX qualification_promotion_decisions_target_pair_unique
+ON qualification_promotion_decisions (baseline_target_id, candidate_target_id);

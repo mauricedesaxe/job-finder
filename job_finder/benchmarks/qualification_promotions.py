@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from job_finder.benchmarks.comparisons import promotion_eligibility_failures
+from job_finder.benchmarks.identity import canonical_digest
 from job_finder.benchmarks.manifests import load_manifest
 from job_finder.benchmarks.provider_attempts import provider_attempt_evidence
 from job_finder.benchmarks.qualification_evidence import (
@@ -71,6 +73,178 @@ class QualificationPromotionPreview(BaseModel):
     evidence: PromotionEvidenceSelection
     eligible: bool
     failures: tuple[str, ...]
+
+
+class QualificationPromotionDecision(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    id: Annotated[str, Field(pattern=_DIGEST)]
+    baseline_target_id: QualificationTargetId
+    candidate_target_id: QualificationTargetId
+    evidence: PromotionEvidenceSelection
+    decision: Literal["approved", "rejected"]
+    reason: str
+    actor: str
+    created_at: datetime
+
+
+def record_qualification_promotion_decision(
+    connection: psycopg.Connection[tuple[object, ...]],
+    *,
+    baseline_target_id: QualificationTargetId,
+    candidate_target_id: QualificationTargetId,
+    evidence: PromotionEvidenceSelection,
+    artifact_path: Path,
+    decision: Literal["approved", "rejected"],
+    reason: str,
+    actor: str,
+    created_at: datetime,
+    idempotency_key: str,
+) -> QualificationPromotionDecision:
+    _validate_promotion_request(
+        connection, baseline_target_id, candidate_target_id, idempotency_key, reason, actor
+    )
+    with connection.transaction():
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"qualification_promotion_key:{idempotency_key}",),
+        )
+        existing = load_qualification_promotion_decision(connection, idempotency_key)
+        if existing is not None:
+            if not _same_promotion_request(
+                existing, baseline_target_id, candidate_target_id, evidence, decision, reason, actor
+            ):
+                raise ValueError("Idempotency key belongs to a different promotion decision")
+            return existing
+        _ = connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"qualification_promotion_pair:{baseline_target_id}:{candidate_target_id}",),
+        )
+        duplicate = connection.execute(
+            "SELECT 1 FROM qualification_promotion_decisions WHERE baseline_target_id = %s AND candidate_target_id = %s",
+            (baseline_target_id, candidate_target_id),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("This target pair already has a promotion decision")
+        preview = preview_qualification_promotion(
+            connection, baseline_target_id, candidate_target_id, evidence, artifact_path
+        )
+        if decision == "approved" and not preview.eligible:
+            raise ValueError(
+                "Ineligible qualification target cannot be approved: " + "; ".join(preview.failures)
+            )
+        promotion = QualificationPromotionDecision(
+            id=canonical_digest(
+                {"kind": "qualification_promotion", "idempotency_key": idempotency_key}
+            ),
+            baseline_target_id=baseline_target_id,
+            candidate_target_id=candidate_target_id,
+            evidence=evidence,
+            decision=decision,
+            reason=reason,
+            actor=actor,
+            created_at=created_at,
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO qualification_promotion_decisions (
+              id, idempotency_key, baseline_target_id, candidate_target_id,
+              input_preparation_evidence_id, relevance_evidence_id,
+              enrichment_evidence_id, deduplication_evidence_id,
+              composition_evidence_id, relevance_comparison_id, decision,
+              reason, actor, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                promotion.id,
+                idempotency_key,
+                baseline_target_id,
+                candidate_target_id,
+                evidence.input_preparation_evidence_id,
+                evidence.relevance_evidence_id,
+                evidence.enrichment_evidence_id,
+                evidence.deduplication_evidence_id,
+                evidence.composition_evidence_id,
+                evidence.relevance_comparison_id,
+                decision,
+                reason,
+                actor,
+                created_at,
+            ),
+        )
+    return promotion
+
+
+def _validate_promotion_request(
+    connection: psycopg.Connection[tuple[object, ...]],
+    baseline_target_id: QualificationTargetId,
+    candidate_target_id: QualificationTargetId,
+    idempotency_key: str,
+    reason: str,
+    actor: str,
+) -> None:
+    if not connection.autocommit:
+        raise ValueError("Promotion decisions require an autocommit connection")
+    if not idempotency_key or not reason.strip() or not actor.strip():
+        raise ValueError("Promotion key, reason, and actor must not be blank")
+    if baseline_target_id == candidate_target_id:
+        raise ValueError("Candidate is the baseline target")
+
+
+def _same_promotion_request(
+    existing: QualificationPromotionDecision,
+    baseline_target_id: QualificationTargetId,
+    candidate_target_id: QualificationTargetId,
+    evidence: PromotionEvidenceSelection,
+    decision: Literal["approved", "rejected"],
+    reason: str,
+    actor: str,
+) -> bool:
+    return (
+        existing.baseline_target_id,
+        existing.candidate_target_id,
+        existing.evidence,
+        existing.decision,
+        existing.reason,
+        existing.actor,
+    ) == (baseline_target_id, candidate_target_id, evidence, decision, reason, actor)
+
+
+def load_qualification_promotion_decision(
+    connection: psycopg.Connection[tuple[object, ...]], idempotency_key: str
+) -> QualificationPromotionDecision | None:
+    row = connection.execute(
+        """
+        SELECT id, baseline_target_id, candidate_target_id,
+               input_preparation_evidence_id, relevance_evidence_id,
+               enrichment_evidence_id, deduplication_evidence_id,
+               composition_evidence_id, relevance_comparison_id, decision,
+               reason, actor, created_at
+        FROM qualification_promotion_decisions WHERE idempotency_key = %s
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return QualificationPromotionDecision.model_validate(
+        {
+            "id": row[0],
+            "baseline_target_id": row[1],
+            "candidate_target_id": row[2],
+            "evidence": {
+                "input_preparation_evidence_id": row[3],
+                "relevance_evidence_id": row[4],
+                "enrichment_evidence_id": row[5],
+                "deduplication_evidence_id": row[6],
+                "composition_evidence_id": row[7],
+                "relevance_comparison_id": row[8],
+            },
+            "decision": row[9],
+            "reason": row[10],
+            "actor": row[11],
+            "created_at": row[12],
+        }
+    )
 
 
 def preview_qualification_promotion(
