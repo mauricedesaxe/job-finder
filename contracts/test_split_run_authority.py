@@ -12,8 +12,15 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from contracts.test_postgres_authority import _store_default_qualification_target  # pyright: ignore[reportPrivateUsage]
+from job_finder.acquisition_policy import (
+    AcquisitionPolicyRevisionId,
+    acquisition_policy_revision_id,
+)
+from job_finder.acquisition_policy_service import load_acquisition_policy_revision
+from job_finder.ats.models import AtsNotApplicable
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
+from job_finder.discovery.jina import JinaUnavailable, SearchSucceeded
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
 from job_finder.evaluation.qualification_components import (
     QualificationTargetId,
@@ -22,6 +29,8 @@ from job_finder.evaluation.qualification_components import (
 from job_finder.evaluation.qualification_prompt_compilations import (
     bind_qualification_prompt_release,
 )
+from job_finder.pipeline.runs import SplitOrchestrationRun, load_run_by_id
+from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
 
 
 @contextmanager
@@ -56,6 +65,59 @@ def _compiled_release(
         )
 
 
+def _store_alternate_acquisition_policy(
+    connection: psycopg.Connection[tuple[object, ...]], now: datetime
+) -> AcquisitionPolicyRevisionId:
+    active = connection.execute(
+        "SELECT revision_id FROM active_acquisition_policy WHERE singleton_id = 1"
+    ).fetchone()
+    assert active is not None
+    policy = load_acquisition_policy_revision(
+        connection, AcquisitionPolicyRevisionId(str(active[0]))
+    ).policy
+    different = policy.model_copy(
+        update={
+            "search_keywords": ("split policy",),
+            "enabled_sources": (policy.enabled_sources[0],),
+        }
+    )
+    revision_id = acquisition_policy_revision_id(different)
+    _ = connection.execute(
+        """
+        INSERT INTO acquisition_policy_revisions (id, content, created_at, created_by)
+        VALUES (%s, %s, %s, 'owner')
+        """,
+        (revision_id, Jsonb(different.model_dump(mode="json")), now),
+    )
+    return revision_id
+
+
+def _assert_split_discovery(
+    connection: psycopg.Connection[tuple[object, ...]], run: SplitOrchestrationRun, now: datetime
+) -> None:
+    searches: list[tuple[str, str]] = []
+
+    def search(keyword: str, domain: str) -> SearchSucceeded:
+        searches.append((keyword, domain))
+        return SearchSucceeded(urls=())
+
+    discovery = discover_jobs(
+        connection,
+        run,
+        PipelineBoundaries(
+            search=search,
+            scrape=lambda _url: JinaUnavailable(
+                operation="scrape", error_code="unused", reason="unused"
+            ),
+            fetch_ats=lambda _url, _title: AtsNotApplicable(),
+        ),
+        discovered_at=now,
+        max_workers=1,
+    )
+    assert discovery.query_count == 1
+    assert len(searches) == 1 and searches[0][0] == "split policy"
+
+
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     with _schema() as connection:
@@ -64,10 +126,7 @@ def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> 
         qualification_id = qualification_target_id(target)
         prompt_id = _compiled_release(connection, qualification_id, now)
         relevance_id = components[1].relevance_release_id
-        acquisition = connection.execute(
-            "SELECT revision_id FROM active_acquisition_policy WHERE singleton_id = 1"
-        ).fetchone()
-        assert acquisition is not None
+        acquisition_id = _store_alternate_acquisition_policy(connection, now)
         run_id = uuid4()
         with connection.transaction():
             _ = connection.execute(
@@ -84,7 +143,7 @@ def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> 
                     run_id,
                     str(run_id),
                     now,
-                    acquisition[0],
+                    acquisition_id,
                     qualification_id,
                     prompt_id,
                     relevance_id,
@@ -107,7 +166,13 @@ def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> 
             """,
             (run_id,),
         ).fetchone()
-        assert row == ("split", None, prompt_id, relevance_id, acquisition[0], qualification_id)
+        assert row == ("split", None, prompt_id, relevance_id, acquisition_id, qualification_id)
+        loaded = load_run_by_id(connection, run_id)
+        assert isinstance(loaded, SplitOrchestrationRun)
+        assert loaded.acquisition_policy_revision_id == acquisition_id
+        assert loaded.qualification_target_id == qualification_id
+        assert loaded.target.prompt_release_id == prompt_id
+        _assert_split_discovery(connection, loaded, now)
         with pytest.raises(psycopg.errors.CheckViolation):
             _ = connection.execute(
                 """
