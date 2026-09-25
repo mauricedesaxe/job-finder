@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from mcp.types import ToolAnnotations
 
@@ -19,6 +20,7 @@ class McpDependencies:
     actor: str = "mcp-owner"
     now: Clock = lambda: datetime.now(UTC)
     run_evaluation: EvaluationRunner | None = None
+    implementation_artifact_path: Path | None = None
 
 
 READ_ONLY = ToolAnnotations(

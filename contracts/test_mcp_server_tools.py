@@ -60,6 +60,12 @@ from scripts.serve_mcp import create_server
 _NOW = datetime(2026, 9, 19, 12, tzinfo=UTC)
 _RAW_URL = "https://example.com/jobs/mcp-contract"
 _TOOL_NAMES = {
+    "qualification_active_get",
+    "qualification_candidate_get",
+    "qualification_candidate_create",
+    "qualification_promotion_preview",
+    "qualification_promotion_decide",
+    "qualification_activate",
     "acquisition_active_get",
     "acquisition_draft_get",
     "acquisition_revision_get",
