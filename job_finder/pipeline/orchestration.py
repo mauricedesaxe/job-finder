@@ -72,20 +72,23 @@ from job_finder.jobs.title_deduplication import (
     title_deduplication_values,
 )
 from job_finder.pipeline.connection import Connection
-from job_finder.pipeline.state import (
+from job_finder.pipeline.processing_attempts import (
+    complete_model_call_context,
+    ensure_model_call_context,
+    fail_model_call_context,
+)
+from job_finder.pipeline.discoveries import register_discoveries
+from job_finder.pipeline.work_items import (
     JOB_WORK_ATTEMPT_LIMIT,
     JobWorkClaim,
     claim_next_job,
     complete_job_claim,
-    complete_model_call_context,
-    ensure_model_call_context,
     fail_job_claim,
-    fail_model_call_context,
     find_terminal_decision_id,
     terminally_fail_job_claim,
+    load_processing_run,
 )
-from job_finder.pipeline.runs import OrchestrationRun, load_processing_run
-from job_finder.pipeline.discoveries import register_discoveries
+from job_finder.pipeline.runs import OrchestrationRun
 from job_finder.review.queue import enqueue_qualified_review_item
 from job_finder.search_configuration import (
     SearchQuery,

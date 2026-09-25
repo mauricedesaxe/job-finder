@@ -18,7 +18,7 @@ from job_finder.execution_budget import (
     estimate_execution,
     settle_execution_budget,
 )
-from job_finder.pipeline.state import JOB_WORK_ATTEMPT_LIMIT
+from job_finder.pipeline.work_items import JOB_WORK_ATTEMPT_LIMIT
 from job_finder.review.owner_access import OnboardingStage
 from job_finder.search_configuration import (
     SearchConfiguration,
