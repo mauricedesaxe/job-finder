@@ -114,6 +114,7 @@ class ExecutionBlocked(ExecutionBudgetModel):
         "monthly_budget_exhausted",
         "already_consumed",
         "qualification_target_not_active",
+        "qualification_candidate_required",
     ]
 
 
@@ -317,6 +318,7 @@ def admit_onboarding_test_execution(
     idempotency_key: str,
     requested_at: datetime,
     artifact_path: Path | None = None,
+    candidate_target_id: QualificationTargetId | None = None,
 ) -> ExecutionAdmission:
     with connection.transaction():
         return _admit_execution(
@@ -325,6 +327,8 @@ def admit_onboarding_test_execution(
             requested_at=requested_at,
             allowed_stages=_ONBOARDING_TEST_SEARCH_STAGES,
             artifact_path=artifact_path,
+            candidate_target_id=candidate_target_id,
+            candidate_required=artifact_path is not None,
         )
 
 
@@ -335,6 +339,8 @@ def _admit_execution(
     requested_at: datetime,
     allowed_stages: frozenset[OnboardingStage],
     artifact_path: Path | None = None,
+    candidate_target_id: QualificationTargetId | None = None,
+    candidate_required: bool = False,
 ) -> ExecutionAdmission:
     period_start = date(requested_at.year, requested_at.month, 1)
     owner_row = connection.execute(
@@ -376,7 +382,13 @@ def _admit_execution(
         active_legacy = _load_active_execution(connection)
         _, configuration, _, _, prompt_release, relevance_release = active_legacy
     else:
-        active_split = _load_active_split_execution(connection, artifact_path)
+        if candidate_required and candidate_target_id is None:
+            return ExecutionBlocked(reason="qualification_candidate_required")
+        active_split = (
+            _load_active_split_execution(connection, artifact_path)
+            if candidate_target_id is None
+            else _load_candidate_split_execution(connection, candidate_target_id, artifact_path)
+        )
         if active_split is None:
             return ExecutionBlocked(reason="qualification_target_not_active")
         _, configuration, _, _, _, prompt_release, relevance_release = active_split
@@ -586,6 +598,39 @@ def _load_active_split_execution(
         cast(int, row[3]),
         compiled.prompt_release,
         load_relevance_release(connection, relevance.relevance_release_id),
+    )
+
+
+def _load_candidate_split_execution(
+    connection: Connection, target_id: QualificationTargetId, artifact_path: Path
+) -> tuple[
+    AcquisitionPolicyRevisionId,
+    SearchQuerySource,
+    int,
+    QualificationTargetId,
+    int,
+    PromptRelease,
+    RelevanceRelease,
+]:
+    row = connection.execute(
+        """
+        SELECT revision_id, generation FROM active_acquisition_policy
+        WHERE singleton_id = 1 FOR SHARE
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Active acquisition policy is missing")
+    acquisition_id = AcquisitionPolicyRevisionId(str(row[0]))
+    policy = load_acquisition_policy_revision(connection, acquisition_id).policy
+    compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
+    return (
+        acquisition_id,
+        policy,
+        cast(int, row[1]),
+        target_id,
+        0,
+        compiled.prompt_release,
+        load_relevance_release(connection, compiled.target.relevance.relevance_release_id),
     )
 
 

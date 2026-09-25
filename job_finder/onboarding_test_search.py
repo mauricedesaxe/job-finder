@@ -64,6 +64,9 @@ class CreateOnboardingTestSearch(OnboardingTestSearchModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     actor: str = Field(min_length=1, max_length=200)
     timestamp: datetime
+    candidate_target_id: (
+        Annotated[QualificationTargetId, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    ) = None
 
 
 class _RequestFields(OnboardingTestSearchModel):
@@ -147,6 +150,8 @@ def create_onboarding_test_search(
     artifact_path: Path | None = None,
 ) -> CreateOnboardingTestSearchResult:
     _require_autocommit(connection)
+    if artifact_path is None and command.candidate_target_id is not None:
+        raise ValueError("A qualification candidate requires split execution")
     with connection.transaction():
         _ = connection.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
@@ -154,6 +159,11 @@ def create_onboarding_test_search(
         )
         existing = _load_request(connection, command.idempotency_key)
         if existing is not None:
+            if isinstance(existing, SplitOnboardingTestSearchRequest):
+                if existing.qualification_target_id != command.candidate_target_id:
+                    raise ValueError("Onboarding request key belongs to another candidate")
+            elif command.candidate_target_id is not None:
+                raise ValueError("Onboarding request key belongs to legacy authority")
             return OnboardingTestSearchAccepted(replayed=True, request=existing)
         reservation_key = onboarding_test_search_reservation_key(command.idempotency_key)
         admission = admit_onboarding_test_execution(
@@ -161,6 +171,7 @@ def create_onboarding_test_search(
             idempotency_key=reservation_key,
             requested_at=command.timestamp,
             artifact_path=artifact_path,
+            candidate_target_id=command.candidate_target_id,
         )
         if isinstance(admission, ExecutionBlocked):
             return admission
