@@ -315,6 +315,98 @@ def prepare_onboarding_run(
     return stored
 
 
+def prepare_split_onboarding_run(
+    connection: Connection,
+    *,
+    run_id: UUID,
+    request_key: str,
+    implementation_ref: str,
+    acquisition_policy_revision_id: AcquisitionPolicyRevisionId,
+    qualification_target_id: QualificationTargetId,
+    artifact_path: Path,
+    started_at: datetime,
+    fetch_rates: RateSnapshotFactory,
+) -> SplitOrchestrationRun:
+    require_autocommit(connection)
+    existing = connection.execute(
+        "SELECT kind, implementation_ref FROM pipeline_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    if existing is not None:
+        if str(existing[0]) != "onboarding" or str(existing[1]) != implementation_ref:
+            raise ValueError("Onboarding run identity belongs to another execution")
+        stored = load_run_by_id(connection, run_id)
+        if not isinstance(stored, SplitOrchestrationRun) or (
+            stored.idempotency_key != f"onboarding:{request_key}"
+            or stored.implementation_ref != implementation_ref
+            or stored.acquisition_policy_revision_id != acquisition_policy_revision_id
+            or stored.qualification_target_id != qualification_target_id
+        ):
+            raise ValueError("Onboarding run provenance differs from its pinned request")
+        if stored.status == "failed":
+            with connection.transaction():
+                _ = connection.execute(
+                    """
+                    UPDATE pipeline_runs SET status = 'running', completed_at = NULL, error = NULL
+                    WHERE id = %s AND status = 'failed'
+                    """,
+                    (run_id,),
+                )
+            resumed = load_run_by_id(connection, run_id)
+            if not isinstance(resumed, SplitOrchestrationRun):
+                raise RuntimeError("Split onboarding run changed authority while resuming")
+            return resumed
+        return stored
+    compiled = load_compiled_qualification_target(
+        connection, qualification_target_id, artifact_path
+    )
+    target = ReleaseTarget(
+        prompt_release_id=compiled.prompt_release.id,
+        relevance_release_id=compiled.target.relevance.relevance_release_id,
+    )
+    rates = fetch_rates()
+    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    with connection.transaction():
+        _ = connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref,
+              execution_authority_kind, acquisition_policy_revision_id,
+              qualification_target_id, prompt_release_id, relevance_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'onboarding', %s, 'split', %s, %s, %s, %s,
+                      %s, 'running', %s)
+            """,
+            (
+                run_id,
+                f"onboarding:{request_key}",
+                implementation_ref,
+                acquisition_policy_revision_id,
+                qualification_target_id,
+                target.prompt_release_id,
+                target.relevance_release_id,
+                Jsonb({"request_key": request_key}),
+                started_at,
+            ),
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO run_exchange_rate_snapshots (
+              pipeline_run_id, content_digest, rates, source, observed_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
+        )
+    stored = load_run_by_id(connection, run_id)
+    if not isinstance(stored, SplitOrchestrationRun) or (
+        stored.idempotency_key != f"onboarding:{request_key}"
+        or stored.implementation_ref != implementation_ref
+        or stored.acquisition_policy_revision_id != acquisition_policy_revision_id
+        or stored.qualification_target_id != qualification_target_id
+    ):
+        raise ValueError("Onboarding run provenance differs from its pinned request")
+    return stored
+
+
 def complete_orchestration_run(
     connection: Connection, run_id: UUID, *, completed_at: datetime
 ) -> None:
