@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, ClassVar, Literal, Self
@@ -11,6 +9,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import job_finder.projections.outbox as _projection_outbox
+from job_finder.benchmarks.identity import canonical_digest
 from job_finder.database import Connection
 from job_finder.evaluation.models import EvaluationOutcome
 
@@ -240,7 +239,7 @@ def create_manifest(
             "policy": policy.model_dump(mode="json"),
             "cases": [case.model_dump(mode="json") for case in cases],
         }
-        digest = _digest(content)
+        digest = canonical_digest(content)
         inserted = connection.execute(
             """
             INSERT INTO evaluation_manifests (
@@ -588,11 +587,6 @@ def _require_matching_curation(
         or existing.actor != actor
     ):
         raise ManifestOperationError("Idempotency key belongs to a different curation command")
-
-
-def _digest(value: object) -> _Digest:
-    content = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def _require_autocommit(connection: Connection) -> None:

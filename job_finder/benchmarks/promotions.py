@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 from typing import ClassVar, Literal, Self
 
@@ -14,6 +12,7 @@ import job_finder.benchmarks.executions as _executions
 import job_finder.benchmarks.manifests as _benchmark_manifests
 import job_finder.benchmarks.scoring as _scoring
 import job_finder.projections.outbox as _projection_outbox
+from job_finder.benchmarks.identity import canonical_digest
 from job_finder.evaluation.models import ReleaseTarget
 
 _Connection = psycopg.Connection[tuple[object, ...]]
@@ -106,7 +105,9 @@ def record_prompt_promotion_decision(
             raise ValueError("This run comparison already has a promotion decision")
         baseline = _executions.load_run(connection, baseline_run_id)
         candidate = _executions.load_run(connection, candidate_run_id)
-        promotion_id = _digest({"kind": "prompt_promotion", "idempotency_key": idempotency_key})
+        promotion_id = canonical_digest(
+            {"kind": "prompt_promotion", "idempotency_key": idempotency_key}
+        )
         promotion = PromptPromotionDecision(
             id=promotion_id,
             manifest_id=comparison.manifest_id,
@@ -206,11 +207,6 @@ def load_promotion_decision(
             "created_at": row[14],
         }
     )
-
-
-def _digest(value: object) -> _Digest:
-    content = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def _require_autocommit(connection: _Connection) -> None:
