@@ -62,6 +62,7 @@ from job_finder.pipeline.work_items import JobWorkClaim, claim_next_job
 from job_finder.pipeline.runs import prepare_onboarding_run, prepare_orchestration_run
 from job_finder.pipeline.discoveries import register_discoveries
 from job_finder.review.owner_access import OwnerBootstrapped, postgres_owner_access_service
+from job_finder.review.onboarding import postgres_test_search_service
 from job_finder.search_configuration import (
     build_search_configuration_revision,
     build_search_queries,
@@ -118,6 +119,58 @@ def test_concurrent_same_key_submissions_produce_one_request(authority_schema: s
             "SELECT count(*) FROM execution_budget_reservations"
         ).fetchone()
         assert reservations == (1,)
+
+
+def test_setup_launch_replays_active_request_and_retries_after_failure(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    _prepare_test_search_owner(authority_schema, now)
+    service = postgres_test_search_service(lambda: _connection(authority_schema))
+    barrier = Barrier(2)
+
+    def launch(_index: int) -> object:
+        _ = barrier.wait()
+        return service.launch("owner", now)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        submissions = tuple(executor.map(launch, range(2)))
+    accepted = [item for item in submissions if isinstance(item, OnboardingTestSearchAccepted)]
+    assert len(accepted) == 2
+    assert sum(item.replayed for item in accepted) == 1
+    assert accepted[0].request.run_id == accepted[1].request.run_id
+    assert service.inspect().request == accepted[0].request
+
+    with _connection(authority_schema) as connection:
+        owner_token = uuid4()
+        claimed = claim_next_onboarding_test_search(
+            connection,
+            owner_token=owner_token,
+            claimed_at=now,
+            lease_for=timedelta(minutes=5),
+        )
+        assert claimed is not None
+        failed = fail_onboarding_test_search(
+            connection,
+            run_id=claimed.run_id,
+            owner_token=owner_token,
+            completed_at=now + timedelta(minutes=1),
+            error_code="provider_outage",
+            error_reason="The provider did not respond",
+        )
+        assert failed is not None
+    assert service.inspect().request == failed
+
+    retried = service.launch("owner", now + timedelta(minutes=2))
+    assert isinstance(retried, OnboardingTestSearchAccepted)
+    assert not retried.replayed
+    assert retried.request.run_id != accepted[0].request.run_id
+    assert service.inspect().request == retried.request
+    with _connection(authority_schema) as connection:
+        count = connection.execute(
+            "SELECT count(*) FROM onboarding_test_search_requests"
+        ).fetchone()
+    assert count == (2,)
 
 
 def test_onboarding_work_cannot_enter_the_production_claim_queue(authority_schema: str) -> None:
@@ -255,6 +308,11 @@ def test_worker_completes_pinned_empty_search_once(authority_schema: str) -> Non
     assert len(queries) == created.request.limits.max_queries
     assert replay.state == "idle"
     assert reservation == ("settled", Decimal("50"))
+    with _connection(authority_schema) as connection:
+        stage = connection.execute(
+            "SELECT stage FROM owner_onboarding WHERE singleton_id = 1"
+        ).fetchone()
+    assert stage == ("complete",)
 
 
 def test_dagster_worker_runs_a_pending_onboarding_request(
@@ -393,6 +451,12 @@ def test_worker_processes_only_its_scoped_job(authority_schema: str) -> None:
     assert result.state == "completed"
     assert result.jobs == 1
     assert rows == [(test_url, "completed"), (production_url, "pending")]
+    progress = postgres_test_search_service(lambda: _connection(authority_schema)).inspect()
+    assert progress.request is not None
+    assert progress.request.state == "completed"
+    assert progress.jobs_found == 1
+    assert len(progress.jobs) == 1
+    assert progress.jobs[0].url == test_url
 
 
 def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
