@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from fastmcp import Client
+from fastmcp.client.transports.memory import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from psycopg import sql
 from pydantic import TypeAdapter
@@ -97,11 +98,8 @@ _TOOL_NAMES = {
     "configuration_draft_get",
     "configuration_validate",
     "configuration_preview",
-    "configuration_draft_update",
-    "configuration_publish",
     "configuration_revision_list",
     "configuration_revision_get",
-    "configuration_activate",
 }
 _ACTIVATION_RESULT: TypeAdapter[ActivateReleaseTargetResult] = TypeAdapter(
     ActivateReleaseTargetResult
@@ -235,6 +233,121 @@ def _seed_pursued_feedback(connection: Connection) -> UUID:
     return saved.review_event_id
 
 
+async def _assert_feedback_tools(client: Client[FastMCPTransport], review_event_id: UUID) -> None:
+    active_target = ActiveReleaseTarget.model_validate(
+        (await client.call_tool("release_target_active_get", {})).structured_content
+    )
+    candidate = ReleaseTarget.model_validate(
+        (
+            await client.call_tool(
+                "release_target_candidate_create",
+                {"prompt_release_id": active_target.target.prompt_release_id},
+            )
+        ).structured_content
+    )
+    assert candidate == active_target.target
+
+    listed = ReviewFeedbackPage.model_validate(
+        (await client.call_tool("feedback_list", {"curation": "uncurated"})).structured_content
+    )
+    assert tuple(item.review_event_id for item in listed.items) == (review_event_id,)
+    assert listed.items[0].decision == "pursue"
+    assert listed.items[0].title == "Product Engineer"
+    assert listed.items[0].company == "Acme"
+
+    feedback = ReviewFeedback.model_validate(
+        (
+            await client.call_tool("feedback_get", {"review_event_id": str(review_event_id)})
+        ).structured_content
+    )
+    assert feedback.curation is None
+    assert feedback.original_outcome == "qualified"
+
+    with pytest.raises(ToolError, match="Review feedback does not exist"):
+        _ = await client.call_tool("feedback_get", {"review_event_id": str(uuid4())})
+
+    curated = CuratedReviewEvent.model_validate(
+        (
+            await client.call_tool(
+                "feedback_curate",
+                {
+                    "review_event_id": str(review_event_id),
+                    "action": "include",
+                    "reason": "Known false negative.",
+                    "idempotency_key": "curation:contract",
+                    "critical": True,
+                },
+            )
+        ).structured_content
+    )
+    assert curated.review_event_id == review_event_id
+    assert curated.action == "include"
+    assert curated.critical is True
+    assert curated.actor == "contract-owner"
+    assert curated.created_at == _NOW
+
+    with pytest.raises(ToolError, match="Excluded feedback cannot be marked critical"):
+        _ = await client.call_tool(
+            "feedback_curate",
+            {
+                "review_event_id": str(review_event_id),
+                "action": "exclude",
+                "reason": "Not useful.",
+                "idempotency_key": "curation:rejected",
+                "critical": True,
+            },
+        )
+
+    curated_feedback = ReviewFeedback.model_validate(
+        (
+            await client.call_tool("feedback_get", {"review_event_id": str(review_event_id)})
+        ).structured_content
+    )
+    assert curated_feedback.curation is not None
+    assert curated_feedback.curation.actor == "contract-owner"
+
+
+async def _assert_manifest_tools(client: Client[FastMCPTransport]) -> None:
+    preview = ManifestSummary.model_validate(
+        (await client.call_tool("manifest_preview", {})).structured_content
+    )
+    assert preview.id == "0" * 64
+    assert preview.case_count == 1
+    assert preview.critical_count == 1
+    assert preview.trial_count == 3
+
+    created = ManifestSummary.model_validate(
+        (
+            await client.call_tool("manifest_create", {"idempotency_key": "manifest:contract"})
+        ).structured_content
+    )
+    assert created.created_by == "contract-owner"
+    assert created.case_count == 1
+    recreated = ManifestSummary.model_validate(
+        (
+            await client.call_tool("manifest_create", {"idempotency_key": "manifest:contract"})
+        ).structured_content
+    )
+    assert recreated.id == created.id
+
+    fetched = ManifestSummary.model_validate(
+        (await client.call_tool("manifest_get", {"manifest_id": created.id})).structured_content
+    )
+    assert fetched.id == created.id
+    with pytest.raises(ToolError, match="Evaluation manifest does not exist"):
+        _ = await client.call_tool("manifest_get", {"manifest_id": "a" * 64})
+
+    manifests = ManifestSummaryPage.model_validate(
+        (await client.call_tool("manifest_list", {})).structured_content
+    )
+    assert created.id in {item.id for item in manifests.items}
+
+    projection = ProjectionQueueStatus.model_validate(
+        (await client.call_tool("langfuse_projection_status", {})).structured_content
+    )
+    assert projection.pending_count >= 1
+
+
 def test_mcp_tools_serve_real_database_state(authority_schema: str) -> None:
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
@@ -248,128 +361,8 @@ def test_mcp_tools_serve_real_database_state(authority_schema: str) -> None:
 
     async def exercise() -> None:
         async with Client(server) as client:
-            active_target = ActiveReleaseTarget.model_validate(
-                (await client.call_tool("release_target_active_get", {})).structured_content
-            )
-            candidate = ReleaseTarget.model_validate(
-                (
-                    await client.call_tool(
-                        "release_target_candidate_create",
-                        {"prompt_release_id": active_target.target.prompt_release_id},
-                    )
-                ).structured_content
-            )
-            assert candidate == active_target.target
-
-            listed = ReviewFeedbackPage.model_validate(
-                (
-                    await client.call_tool("feedback_list", {"curation": "uncurated"})
-                ).structured_content
-            )
-            assert tuple(item.review_event_id for item in listed.items) == (review_event_id,)
-            assert listed.items[0].decision == "pursue"
-            assert listed.items[0].title == "Product Engineer"
-            assert listed.items[0].company == "Acme"
-
-            feedback = ReviewFeedback.model_validate(
-                (
-                    await client.call_tool(
-                        "feedback_get", {"review_event_id": str(review_event_id)}
-                    )
-                ).structured_content
-            )
-            assert feedback.curation is None
-            assert feedback.original_outcome == "qualified"
-
-            with pytest.raises(ToolError, match="Review feedback does not exist"):
-                _ = await client.call_tool("feedback_get", {"review_event_id": str(uuid4())})
-
-            curated = CuratedReviewEvent.model_validate(
-                (
-                    await client.call_tool(
-                        "feedback_curate",
-                        {
-                            "review_event_id": str(review_event_id),
-                            "action": "include",
-                            "reason": "Known false negative.",
-                            "idempotency_key": "curation:contract",
-                            "critical": True,
-                        },
-                    )
-                ).structured_content
-            )
-            assert curated.review_event_id == review_event_id
-            assert curated.action == "include"
-            assert curated.critical is True
-            assert curated.actor == "contract-owner"
-            assert curated.created_at == _NOW
-
-            with pytest.raises(ToolError, match="Excluded feedback cannot be marked critical"):
-                _ = await client.call_tool(
-                    "feedback_curate",
-                    {
-                        "review_event_id": str(review_event_id),
-                        "action": "exclude",
-                        "reason": "Not useful.",
-                        "idempotency_key": "curation:rejected",
-                        "critical": True,
-                    },
-                )
-
-            curated_feedback = ReviewFeedback.model_validate(
-                (
-                    await client.call_tool(
-                        "feedback_get", {"review_event_id": str(review_event_id)}
-                    )
-                ).structured_content
-            )
-            assert curated_feedback.curation is not None
-            assert curated_feedback.curation.actor == "contract-owner"
-
-            preview = ManifestSummary.model_validate(
-                (await client.call_tool("manifest_preview", {})).structured_content
-            )
-            assert preview.id == "0" * 64
-            assert preview.case_count == 1
-            assert preview.critical_count == 1
-            assert preview.trial_count == 3
-
-            created = ManifestSummary.model_validate(
-                (
-                    await client.call_tool(
-                        "manifest_create", {"idempotency_key": "manifest:contract"}
-                    )
-                ).structured_content
-            )
-            assert created.created_by == "contract-owner"
-            assert created.case_count == 1
-            recreated = ManifestSummary.model_validate(
-                (
-                    await client.call_tool(
-                        "manifest_create", {"idempotency_key": "manifest:contract"}
-                    )
-                ).structured_content
-            )
-            assert recreated.id == created.id
-
-            fetched = ManifestSummary.model_validate(
-                (
-                    await client.call_tool("manifest_get", {"manifest_id": created.id})
-                ).structured_content
-            )
-            assert fetched.id == created.id
-            with pytest.raises(ToolError, match="Evaluation manifest does not exist"):
-                _ = await client.call_tool("manifest_get", {"manifest_id": "a" * 64})
-
-            manifests = ManifestSummaryPage.model_validate(
-                (await client.call_tool("manifest_list", {})).structured_content
-            )
-            assert created.id in {item.id for item in manifests.items}
-
-            projection = ProjectionQueueStatus.model_validate(
-                (await client.call_tool("langfuse_projection_status", {})).structured_content
-            )
-            assert projection.pending_count >= 1
+            await _assert_feedback_tools(client, review_event_id)
+            await _assert_manifest_tools(client)
 
     asyncio.run(exercise())
 
@@ -393,6 +386,205 @@ def test_serve_mcp_builds_the_server_from_the_environment(
     assert asyncio.run(exercise()) == _TOOL_NAMES
     with _connection(authority_schema) as connection:
         assert load_active_search_configuration(connection).generation == 0
+
+
+async def _create_release_candidate(
+    client: Client[FastMCPTransport], authority_schema: str
+) -> tuple[ActiveReleaseTarget, ReleaseTarget]:
+    active = ActiveReleaseTarget.model_validate(
+        (await client.call_tool("release_target_active_get", {})).structured_content
+    )
+    with _connection(authority_schema) as connection:
+        prompt_release = load_prompt_release(connection, active.target.prompt_release_id)
+    candidate = ReleaseTarget.model_validate(
+        (
+            await client.call_tool(
+                "release_target_candidate_create",
+                {
+                    "prompt_release_id": active.target.prompt_release_id,
+                    "relevance_policy": build_jev_faithful_policy(prompt_release).model_dump(
+                        mode="json"
+                    ),
+                },
+            )
+        ).structured_content
+    )
+    assert candidate != active.target
+
+    with pytest.raises(ToolError, match="Prompt release not found"):
+        await client.call_tool(
+            "release_target_candidate_create",
+            {"prompt_release_id": "0" * 64},
+        )
+    with pytest.raises(ToolError, match="both a relevance release and policy"):
+        await client.call_tool(
+            "release_target_candidate_create",
+            {
+                "prompt_release_id": active.target.prompt_release_id,
+                "relevance_release_id": candidate.relevance_release_id,
+                "relevance_policy": build_jev_faithful_policy(prompt_release).model_dump(
+                    mode="json"
+                ),
+            },
+        )
+    with pytest.raises(ToolError, match="Evaluation execution does not exist"):
+        await client.call_tool("evaluation_execution_get", {"execution_id": "0" * 64})
+    with pytest.raises(ToolError, match="Evaluation run does not exist"):
+        await client.call_tool("evaluation_run_get", {"run_id": "0" * 64})
+    return active, candidate
+
+
+async def _run_release_evaluations(
+    client: Client[FastMCPTransport],
+    manifest_id: str,
+    active: ActiveReleaseTarget,
+    candidate: ReleaseTarget,
+) -> list[str]:
+    executions: list[CompletedEvaluationExecution] = []
+    with pytest.raises(ToolError, match="Relevance release not found"):
+        await client.call_tool(
+            "evaluation_run",
+            {
+                "idempotency_key": "release-lifecycle:invalid-target",
+                "manifest_id": manifest_id,
+                "target": {
+                    "prompt_release_id": active.target.prompt_release_id,
+                    "relevance_release_id": "0" * 64,
+                },
+                "implementation_ref": "contract",
+            },
+        )
+    for key, target in (
+        ("release-lifecycle:baseline", active.target),
+        ("release-lifecycle:candidate", candidate),
+    ):
+        content = (
+            await client.call_tool(
+                "evaluation_run",
+                {
+                    "idempotency_key": key,
+                    "manifest_id": manifest_id,
+                    "target": target.model_dump(mode="json"),
+                    "implementation_ref": "contract",
+                },
+            )
+        ).structured_content
+        executions.append(CompletedEvaluationExecution.model_validate(_unwrap_tool_union(content)))
+
+    with pytest.raises(ToolError, match="different evaluation execution"):
+        await client.call_tool(
+            "evaluation_run",
+            {
+                "idempotency_key": "release-lifecycle:baseline",
+                "manifest_id": manifest_id,
+                "target": candidate.model_dump(mode="json"),
+                "implementation_ref": "contract",
+            },
+        )
+
+    fetched_execution = CompletedEvaluationExecution.model_validate(
+        _unwrap_tool_union(
+            (
+                await client.call_tool(
+                    "evaluation_execution_get", {"execution_id": executions[0].id}
+                )
+            ).structured_content
+        )
+    )
+    assert fetched_execution == executions[0]
+    run_ids = [execution.run.id for execution in executions]
+    fetched_run = (
+        await client.call_tool("evaluation_run_get", {"run_id": run_ids[0]})
+    ).structured_content
+    assert fetched_run is not None
+    assert fetched_run["target"] == active.target.model_dump(mode="json")
+    return run_ids
+
+
+async def _activate_release_candidate(
+    client: Client[FastMCPTransport],
+    active: ActiveReleaseTarget,
+    candidate: ReleaseTarget,
+    run_ids: list[str],
+) -> None:
+    comparison = EvaluationRunComparison.model_validate(
+        (
+            await client.call_tool(
+                "release_target_compare",
+                {"baseline_run_id": run_ids[0], "candidate_run_id": run_ids[1]},
+            )
+        ).structured_content
+    )
+    assert comparison.eligible is True
+    with pytest.raises(ToolError, match="release targets must differ"):
+        await client.call_tool(
+            "release_target_compare",
+            {
+                "baseline_run_id": run_ids[0],
+                "candidate_run_id": run_ids[0],
+            },
+        )
+    with pytest.raises(ToolError, match="evidence is stale"):
+        await client.call_tool(
+            "release_target_decide",
+            {
+                "baseline_run_id": run_ids[0],
+                "candidate_run_id": run_ids[1],
+                "expected_comparison_id": "0" * 64,
+                "decision": "approved",
+                "reason": "Stale evidence must remain visible.",
+                "idempotency_key": "release-lifecycle:stale-decision",
+            },
+        )
+    decision = PromptPromotionDecision.model_validate(
+        (
+            await client.call_tool(
+                "release_target_decide",
+                {
+                    "baseline_run_id": run_ids[0],
+                    "candidate_run_id": run_ids[1],
+                    "expected_comparison_id": comparison.id,
+                    "decision": "approved",
+                    "reason": "Contract candidate passed.",
+                    "idempotency_key": "release-lifecycle:decision",
+                },
+            )
+        ).structured_content
+    )
+    activation_input = {
+        "promotion_decision_id": decision.id,
+        "expected_active_target": active.target.model_dump(mode="json"),
+        "expected_generation": active.generation,
+        "idempotency_key": "release-lifecycle:activation",
+    }
+    activated = _ACTIVATION_RESULT.validate_python(
+        _unwrap_tool_union(
+            (await client.call_tool("release_target_activate", activation_input)).structured_content
+        )
+    )
+    replayed = _ACTIVATION_RESULT.validate_python(
+        _unwrap_tool_union(
+            (await client.call_tool("release_target_activate", activation_input)).structured_content
+        )
+    )
+    assert isinstance(activated, ReleaseTargetActivated)
+    assert activated.replayed is False
+    assert activated.active.target == candidate
+    assert isinstance(replayed, ReleaseTargetActivated)
+    assert replayed.replayed is True
+
+    stale = _ACTIVATION_RESULT.validate_python(
+        _unwrap_tool_union(
+            (
+                await client.call_tool(
+                    "release_target_activate",
+                    {**activation_input, "idempotency_key": "release-lifecycle:stale"},
+                )
+            ).structured_content
+        )
+    )
+    assert isinstance(stale, ActiveReleaseTargetChanged)
+    assert stale.active.target == candidate
 
 
 def test_mcp_release_lifecycle_activates_exact_approved_target(authority_schema: str) -> None:
@@ -446,189 +638,8 @@ def test_mcp_release_lifecycle_activates_exact_approved_target(authority_schema:
 
     async def exercise() -> None:
         async with Client(server) as client:
-            active = ActiveReleaseTarget.model_validate(
-                (await client.call_tool("release_target_active_get", {})).structured_content
-            )
-            with _connection(authority_schema) as connection:
-                prompt_release = load_prompt_release(connection, active.target.prompt_release_id)
-            candidate = ReleaseTarget.model_validate(
-                (
-                    await client.call_tool(
-                        "release_target_candidate_create",
-                        {
-                            "prompt_release_id": active.target.prompt_release_id,
-                            "relevance_policy": build_jev_faithful_policy(
-                                prompt_release
-                            ).model_dump(mode="json"),
-                        },
-                    )
-                ).structured_content
-            )
-            assert candidate != active.target
-
-            with pytest.raises(ToolError, match="Prompt release not found"):
-                await client.call_tool(
-                    "release_target_candidate_create",
-                    {"prompt_release_id": "0" * 64},
-                )
-            with pytest.raises(ToolError, match="both a relevance release and policy"):
-                await client.call_tool(
-                    "release_target_candidate_create",
-                    {
-                        "prompt_release_id": active.target.prompt_release_id,
-                        "relevance_release_id": candidate.relevance_release_id,
-                        "relevance_policy": build_jev_faithful_policy(prompt_release).model_dump(
-                            mode="json"
-                        ),
-                    },
-                )
-            with pytest.raises(ToolError, match="Evaluation execution does not exist"):
-                await client.call_tool("evaluation_execution_get", {"execution_id": "0" * 64})
-            with pytest.raises(ToolError, match="Evaluation run does not exist"):
-                await client.call_tool("evaluation_run_get", {"run_id": "0" * 64})
-
-            executions: list[CompletedEvaluationExecution] = []
-            with pytest.raises(ToolError, match="Relevance release not found"):
-                await client.call_tool(
-                    "evaluation_run",
-                    {
-                        "idempotency_key": "release-lifecycle:invalid-target",
-                        "manifest_id": manifest.id,
-                        "target": {
-                            "prompt_release_id": active.target.prompt_release_id,
-                            "relevance_release_id": "0" * 64,
-                        },
-                        "implementation_ref": "contract",
-                    },
-                )
-            for key, target in (
-                ("release-lifecycle:baseline", active.target),
-                ("release-lifecycle:candidate", candidate),
-            ):
-                content = (
-                    await client.call_tool(
-                        "evaluation_run",
-                        {
-                            "idempotency_key": key,
-                            "manifest_id": manifest.id,
-                            "target": target.model_dump(mode="json"),
-                            "implementation_ref": "contract",
-                        },
-                    )
-                ).structured_content
-                executions.append(
-                    CompletedEvaluationExecution.model_validate(_unwrap_tool_union(content))
-                )
-
-            with pytest.raises(ToolError, match="different evaluation execution"):
-                await client.call_tool(
-                    "evaluation_run",
-                    {
-                        "idempotency_key": "release-lifecycle:baseline",
-                        "manifest_id": manifest.id,
-                        "target": candidate.model_dump(mode="json"),
-                        "implementation_ref": "contract",
-                    },
-                )
-
-            fetched_execution = CompletedEvaluationExecution.model_validate(
-                _unwrap_tool_union(
-                    (
-                        await client.call_tool(
-                            "evaluation_execution_get", {"execution_id": executions[0].id}
-                        )
-                    ).structured_content
-                )
-            )
-            assert fetched_execution == executions[0]
-            run_ids = [execution.run.id for execution in executions]
-            fetched_run = (
-                await client.call_tool("evaluation_run_get", {"run_id": run_ids[0]})
-            ).structured_content
-            assert fetched_run is not None
-            assert fetched_run["target"] == active.target.model_dump(mode="json")
-
-            comparison = EvaluationRunComparison.model_validate(
-                (
-                    await client.call_tool(
-                        "release_target_compare",
-                        {"baseline_run_id": run_ids[0], "candidate_run_id": run_ids[1]},
-                    )
-                ).structured_content
-            )
-            assert comparison.eligible is True
-            with pytest.raises(ToolError, match="release targets must differ"):
-                await client.call_tool(
-                    "release_target_compare",
-                    {
-                        "baseline_run_id": run_ids[0],
-                        "candidate_run_id": run_ids[0],
-                    },
-                )
-            with pytest.raises(ToolError, match="evidence is stale"):
-                await client.call_tool(
-                    "release_target_decide",
-                    {
-                        "baseline_run_id": run_ids[0],
-                        "candidate_run_id": run_ids[1],
-                        "expected_comparison_id": "0" * 64,
-                        "decision": "approved",
-                        "reason": "Stale evidence must remain visible.",
-                        "idempotency_key": "release-lifecycle:stale-decision",
-                    },
-                )
-            decision = PromptPromotionDecision.model_validate(
-                (
-                    await client.call_tool(
-                        "release_target_decide",
-                        {
-                            "baseline_run_id": run_ids[0],
-                            "candidate_run_id": run_ids[1],
-                            "expected_comparison_id": comparison.id,
-                            "decision": "approved",
-                            "reason": "Contract candidate passed.",
-                            "idempotency_key": "release-lifecycle:decision",
-                        },
-                    )
-                ).structured_content
-            )
-            activation_input = {
-                "promotion_decision_id": decision.id,
-                "expected_active_target": active.target.model_dump(mode="json"),
-                "expected_generation": active.generation,
-                "idempotency_key": "release-lifecycle:activation",
-            }
-            activated = _ACTIVATION_RESULT.validate_python(
-                _unwrap_tool_union(
-                    (
-                        await client.call_tool("release_target_activate", activation_input)
-                    ).structured_content
-                )
-            )
-            replayed = _ACTIVATION_RESULT.validate_python(
-                _unwrap_tool_union(
-                    (
-                        await client.call_tool("release_target_activate", activation_input)
-                    ).structured_content
-                )
-            )
-            assert isinstance(activated, ReleaseTargetActivated)
-            assert activated.replayed is False
-            assert activated.active.target == candidate
-            assert isinstance(replayed, ReleaseTargetActivated)
-            assert replayed.replayed is True
-
-            stale = _ACTIVATION_RESULT.validate_python(
-                _unwrap_tool_union(
-                    (
-                        await client.call_tool(
-                            "release_target_activate",
-                            {**activation_input, "idempotency_key": "release-lifecycle:stale"},
-                        )
-                    ).structured_content
-                )
-            )
-            assert isinstance(stale, ActiveReleaseTargetChanged)
-            assert stale.active.target == candidate
+            active, candidate = await _create_release_candidate(client, authority_schema)
+            run_ids = await _run_release_evaluations(client, manifest.id, active, candidate)
+            await _activate_release_candidate(client, active, candidate, run_ids)
 
     asyncio.run(exercise())
