@@ -30,6 +30,18 @@ _Avoid_: Qualification definition
 The exact prompt release and relevance release evaluated, promoted, and executed together.
 _Avoid_: Qualification definition, active configuration
 
+**Qualification target**:
+The exact input-preparation, relevance, enrichment, and deduplication component releases promoted, activated, and executed together.
+_Avoid_: Qualification definition, independent phase targets
+
+**Implementation artifact**:
+A content-addressed executable build whose runtime, dependencies, entrypoints, and owned source are fixed.
+_Avoid_: Implementation label, source-file hash
+
+**Experiment input**:
+The immutable manifest, exchange rates, and provider settings shared by benchmark runs that may be compared.
+_Avoid_: Manifest
+
 ## Lifecycle
 
 **Publication**:
@@ -43,3 +55,7 @@ _Avoid_: Active search configuration
 **Active release target**:
 The promoted release target selected for new qualification work.
 _Avoid_: Active qualification definition
+
+**Active qualification target**:
+The promoted composite qualification target selected atomically for new qualification work.
+_Avoid_: Active relevance target, active enrichment target, active deduplication target
