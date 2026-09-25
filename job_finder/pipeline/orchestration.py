@@ -219,6 +219,7 @@ def process_claimed_jobs(
     lease_for: timedelta,
     retry_after: timedelta,
     enable_ats_enrichment: bool,
+    onboarding_request_key: str | None = None,
     now: Now = lambda: datetime.now(UTC),
 ) -> ProcessingSummary:
     if run.status != "running":
@@ -239,6 +240,7 @@ def process_claimed_jobs(
             owner_token=owner_token,
             claimed_at=now(),
             lease_for=lease_for,
+            onboarding_request_key=onboarding_request_key,
         )
         if claim is None:
             break

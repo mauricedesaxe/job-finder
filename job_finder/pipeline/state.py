@@ -153,6 +153,71 @@ def load_orchestration_run(connection: Connection, idempotency_key: str) -> Orch
     return None if row is None else _load_run_by_id(connection, UUID(str(row[0])))
 
 
+def prepare_onboarding_run(
+    connection: Connection,
+    *,
+    run_id: UUID,
+    request_key: str,
+    implementation_ref: str,
+    configuration_revision_id: SearchConfigurationRevisionId,
+    target: ReleaseTarget,
+    started_at: datetime,
+    fetch_rates: RateSnapshotFactory,
+) -> OrchestrationRun:
+    _require_autocommit(connection)
+    existing = connection.execute(
+        "SELECT id, kind, implementation_ref FROM pipeline_runs WHERE id = %s", (run_id,)
+    ).fetchone()
+    if existing is not None:
+        if str(existing[1]) != "onboarding" or str(existing[2]) != implementation_ref:
+            raise ValueError("Onboarding run identity belongs to another execution")
+        stored = _load_run_by_id(connection, run_id)
+        if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
+            raise ValueError("Onboarding run provenance differs from its pinned request")
+        if stored.status == "failed":
+            with connection.transaction():
+                _ = connection.execute(
+                    """
+                    UPDATE pipeline_runs SET status = 'running', completed_at = NULL, error = NULL
+                    WHERE id = %s AND status = 'failed'
+                    """,
+                    (run_id,),
+                )
+            return _load_run_by_id(connection, run_id)
+        return stored
+    rates = fetch_rates()
+    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    with connection.transaction():
+        _ = connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref,
+              configuration_revision_id, prompt_release_id, relevance_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, 'running', %s)
+            """,
+            (
+                run_id,
+                f"onboarding:{request_key}",
+                implementation_ref,
+                configuration_revision_id,
+                target.prompt_release_id,
+                target.relevance_release_id,
+                Jsonb({"request_key": request_key}),
+                started_at,
+            ),
+        )
+        _ = connection.execute(
+            """
+            INSERT INTO run_exchange_rate_snapshots (
+              pipeline_run_id, content_digest, rates, source, observed_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            """,
+            (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
+        )
+    return _load_run_by_id(connection, run_id)
+
+
 def complete_orchestration_run(
     connection: Connection, run_id: UUID, *, completed_at: datetime
 ) -> None:
@@ -196,6 +261,7 @@ def register_discoveries(
     domain: str,
     raw_urls: tuple[str, ...],
     discovered_at: datetime,
+    onboarding_request_key: str | None = None,
 ) -> DiscoveryRegistration:
     _require_autocommit(connection)
     discovered_count = 0
@@ -240,11 +306,12 @@ def register_discoveries(
                 inserted_work = connection.execute(
                     """
                     INSERT INTO job_work_items (
-                      job_id, discovery_run_id, keyword, state, created_at
-                    ) VALUES (%s, %s, %s, 'pending', %s)
+                      job_id, discovery_run_id, keyword, state, created_at,
+                      onboarding_request_key
+                    ) VALUES (%s, %s, %s, 'pending', %s, %s)
                     RETURNING job_id
                     """,
-                    (job_id, run_id, keyword, discovered_at),
+                    (job_id, run_id, keyword, discovered_at, onboarding_request_key),
                 ).fetchone()
                 if inserted_work is not None:
                     new_work_count += 1
@@ -260,6 +327,7 @@ def claim_next_job(
     owner_token: UUID,
     claimed_at: datetime,
     lease_for: timedelta,
+    onboarding_request_key: str | None = None,
 ) -> JobWorkClaim | None:
     _require_autocommit(connection)
     if lease_for <= timedelta(0):
@@ -276,6 +344,7 @@ def claim_next_job(
                   ELSE %s
                 END
             WHERE attempt_count >= %s
+              AND onboarding_request_key IS NOT DISTINCT FROM %s
               AND (
                 (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
                 OR (state = 'leased' AND lease_expires_at <= %s)
@@ -293,6 +362,7 @@ def claim_next_job(
                     }
                 ),
                 JOB_WORK_ATTEMPT_LIMIT,
+                onboarding_request_key,
                 claimed_at,
                 claimed_at,
             ),
@@ -312,6 +382,7 @@ def claim_next_job(
               SELECT job_id
               FROM job_work_items
               WHERE attempt_count < %s
+                AND onboarding_request_key IS NOT DISTINCT FROM %s
                 AND (
                   state = 'pending'
                   OR (state = 'failed' AND COALESCE(retry_at, created_at) <= %s)
@@ -332,6 +403,7 @@ def claim_next_job(
             """,
             (
                 JOB_WORK_ATTEMPT_LIMIT,
+                onboarding_request_key,
                 claimed_at,
                 claimed_at,
                 owner_token,
@@ -644,7 +716,7 @@ def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
                x.rates, x.source, x.observed_at
         FROM pipeline_runs r
         JOIN run_exchange_rate_snapshots x ON x.pipeline_run_id = r.id
-        WHERE r.id = %s AND r.kind IN ('orchestration', 'reevaluation')
+            WHERE r.id = %s AND r.kind IN ('orchestration', 'reevaluation', 'onboarding')
         """,
         (run_id,),
     ).fetchone()

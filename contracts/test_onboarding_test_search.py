@@ -13,7 +13,10 @@ import pytest
 from psycopg import sql
 
 from job_finder.config import PostgresContractSettings
+from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import apply_migrations
+from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
+from job_finder.evaluation.models import ReleaseTarget
 from job_finder.execution_budget import (
     BudgetSaved,
     ExecutionBlocked,
@@ -27,6 +30,12 @@ from job_finder.onboarding_test_search import (
     create_onboarding_test_search,
     fail_onboarding_test_search,
     load_onboarding_test_search,
+)
+from job_finder.pipeline.state import (
+    claim_next_job,
+    prepare_onboarding_run,
+    prepare_orchestration_run,
+    register_discoveries,
 )
 from job_finder.review.owner_access import OwnerBootstrapped, postgres_owner_access_service
 from job_finder.search_configuration import load_active_search_configuration
@@ -79,6 +88,74 @@ def test_concurrent_same_key_submissions_produce_one_request(authority_schema: s
             "SELECT count(*) FROM execution_budget_reservations"
         ).fetchone()
         assert reservations == (1,)
+
+
+def test_onboarding_work_cannot_enter_the_production_claim_queue(authority_schema: str) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(
+        rates={"EUR": Decimal("1.11")}, source="frankfurter", observed_at=now
+    )
+    _prepare_test_search_owner(authority_schema, now)
+    with _connection(authority_schema) as connection:
+        created = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(idempotency_key="owner-setup", actor="owner", timestamp=now),
+        )
+        assert isinstance(created, OnboardingTestSearchAccepted)
+        request = created.request
+        onboarding_run = prepare_onboarding_run(
+            connection,
+            run_id=request.run_id,
+            request_key=request.idempotency_key,
+            implementation_ref="commit-1",
+            configuration_revision_id=request.configuration_revision_id,
+            target=ReleaseTarget(
+                prompt_release_id=request.prompt_release_id,
+                relevance_release_id=request.relevance_release_id,
+            ),
+            started_at=now,
+            fetch_rates=lambda: rates,
+        )
+        production_run = prepare_orchestration_run(
+            connection,
+            idempotency_key="dagster:scope-test",
+            implementation_ref="commit-1",
+            started_at=now,
+            load_active_configuration=load_published_active_search_configuration,
+            fetch_rates=lambda: rates,
+        )
+        _ = register_discoveries(
+            connection,
+            run_id=onboarding_run.id,
+            keyword="product engineer",
+            domain="jobs.ashbyhq.com",
+            raw_urls=("https://jobs.ashbyhq.com/acme/onboarding",),
+            discovered_at=now,
+            onboarding_request_key=request.idempotency_key,
+        )
+        _ = register_discoveries(
+            connection,
+            run_id=production_run.id,
+            keyword="product engineer",
+            domain="jobs.ashbyhq.com",
+            raw_urls=("https://jobs.ashbyhq.com/acme/production",),
+            discovered_at=now,
+        )
+        production_claim = claim_next_job(
+            connection, owner_token=uuid4(), claimed_at=now, lease_for=timedelta(minutes=5)
+        )
+        onboarding_claim = claim_next_job(
+            connection,
+            owner_token=uuid4(),
+            claimed_at=now,
+            lease_for=timedelta(minutes=5),
+            onboarding_request_key=request.idempotency_key,
+        )
+
+    assert production_claim is not None
+    assert production_claim.raw_url.endswith("/production")
+    assert onboarding_claim is not None
+    assert onboarding_claim.raw_url.endswith("/onboarding")
 
 
 def test_replay_keeps_pinned_provenance_after_active_config_changes(
