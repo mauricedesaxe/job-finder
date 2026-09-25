@@ -208,7 +208,7 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import SearchSucceeded
 from job_finder.mcp_server import McpDependencies, create_mcp_server
 from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
-from job_finder.pipeline.state import prepare_orchestration_run
+from job_finder.pipeline.runs import prepare_orchestration_run
 from job_finder.provider_credentials import (
     ProviderCapability,
     ProviderCredentialChanged,

@@ -43,8 +43,8 @@ from job_finder.pipeline.orchestration import (
     process_claimed_jobs,
     production_boundaries,
 )
-from job_finder.pipeline.state import (
-    Connection,
+from job_finder.pipeline.connection import Connection
+from job_finder.pipeline.runs import (
     OrchestrationRun,
     complete_orchestration_run,
     fail_orchestration_run,

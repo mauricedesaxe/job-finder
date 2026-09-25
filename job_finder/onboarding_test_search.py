@@ -25,7 +25,7 @@ from job_finder.search_configuration import (
     SearchConfigurationRevisionId,
     SearchQuery,
 )
-from job_finder.pipeline.state import DiscoveryRegistration, register_discoveries
+from job_finder.pipeline.discoveries import DiscoveryRegistration, register_discoveries
 
 Connection = psycopg.Connection[tuple[object, ...]]
 RESERVATION_KEY_PREFIX = "onboarding-test-search:"

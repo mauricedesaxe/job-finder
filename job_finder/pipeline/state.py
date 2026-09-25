@@ -1,66 +1,28 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Callable
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import Annotated, ClassVar, Literal
+from typing import ClassVar, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-import psycopg
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field
 
-from job_finder.configuration_service import PublishedActiveSearchConfiguration
-from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import (
     InputDigest,
     ModelCallContext,
     OperationalError,
     PromptReleaseId,
-    ReleaseTarget,
-    RelevanceReleaseId,
     RetryableOperationalError,
 )
-from job_finder.evaluation.release_targets import get_active_release_target
-from job_finder.jobs.decision_pipeline import job_id_for_url
-from job_finder.search_configuration import SearchConfigurationRevisionId
+from job_finder.pipeline.connection import Connection, require_autocommit
+from job_finder.pipeline.runs import fail_reevaluation_for_request, fail_reevaluation_run
 
-Connection = psycopg.Connection[tuple[object, ...]]
-RateSnapshotFactory = Callable[[], ExchangeRateSnapshot]
-ActiveConfigurationLoader = Callable[[Connection], PublishedActiveSearchConfiguration]
 JobWorkFailureOutcome = Literal["retry", "terminal_error", "lease_lost"]
 JOB_WORK_ATTEMPT_LIMIT = 3
-_RATES = TypeAdapter(dict[str, Decimal])
 
 
 class PipelineStateModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
-
-
-class OrchestrationRun(PipelineStateModel):
-    id: UUID
-    idempotency_key: str
-    implementation_ref: str
-    configuration_revision_id: Annotated[
-        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
-    ]
-    target: ReleaseTarget
-    exchange_rates: ExchangeRateSnapshot
-    status: Literal["running", "completed", "failed"]
-    started_at: datetime
-    completed_at: datetime | None
-
-    @property
-    def prompt_release_id(self) -> PromptReleaseId:
-        return self.target.prompt_release_id
-
-
-class DiscoveryRegistration(PipelineStateModel):
-    discovered_count: int = Field(ge=0)
-    new_work_count: int = Field(ge=0)
-    processed_url_count: int = Field(default=0, ge=0)
 
 
 class JobWorkClaim(PipelineStateModel):
@@ -77,260 +39,6 @@ class JobWorkClaim(PipelineStateModel):
     reevaluation_pipeline_run_id: UUID | None = None
 
 
-def prepare_orchestration_run(
-    connection: Connection,
-    *,
-    idempotency_key: str,
-    implementation_ref: str,
-    started_at: datetime,
-    load_active_configuration: ActiveConfigurationLoader,
-    fetch_rates: RateSnapshotFactory,
-) -> OrchestrationRun:
-    _require_autocommit(connection)
-    existing = load_orchestration_run(connection, idempotency_key)
-    if existing is not None:
-        if existing.implementation_ref != implementation_ref:
-            raise ValueError("Run idempotency key belongs to another implementation")
-        if existing.status == "failed":
-            with connection.transaction():
-                _ = connection.execute(
-                    """
-                    UPDATE pipeline_runs
-                    SET status = 'running', completed_at = NULL, error = NULL
-                    WHERE id = %s AND status = 'failed'
-                    """,
-                    (existing.id,),
-                )
-            return _load_run_by_id(connection, existing.id)
-        return existing
-    active_configuration = load_active_configuration(connection)
-    active_target = get_active_release_target(connection)
-    rates = fetch_rates()
-    run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
-    rate_digest = _digest(rate_data)
-    with connection.transaction():
-        inserted = connection.execute(
-            """
-            INSERT INTO pipeline_runs (
-              id, idempotency_key, kind, implementation_ref,
-              configuration_revision_id, prompt_release_id, relevance_release_id,
-              parameters, status, started_at
-            ) VALUES (%s, %s, 'orchestration', %s, %s, %s, %s, '{}'::jsonb, 'running', %s)
-            ON CONFLICT (idempotency_key) DO NOTHING
-            RETURNING id
-            """,
-            (
-                run_id,
-                idempotency_key,
-                implementation_ref,
-                active_configuration.publication.revision_id,
-                active_target.target.prompt_release_id,
-                active_target.target.relevance_release_id,
-                started_at,
-            ),
-        ).fetchone()
-        if inserted is not None:
-            _ = connection.execute(
-                """
-                INSERT INTO run_exchange_rate_snapshots (
-                  pipeline_run_id, content_digest, rates, source, observed_at
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (run_id, rate_digest, Jsonb(rate_data), rates.source, rates.observed_at),
-            )
-    stored = load_orchestration_run(connection, idempotency_key)
-    if stored is None:
-        raise RuntimeError("Orchestration run could not be loaded after creation")
-    if stored.implementation_ref != implementation_ref:
-        raise ValueError("Run idempotency key belongs to another implementation")
-    return stored
-
-
-def load_orchestration_run(connection: Connection, idempotency_key: str) -> OrchestrationRun | None:
-    row = connection.execute(
-        "SELECT id FROM pipeline_runs WHERE idempotency_key = %s AND kind = 'orchestration'",
-        (idempotency_key,),
-    ).fetchone()
-    return None if row is None else _load_run_by_id(connection, UUID(str(row[0])))
-
-
-def prepare_onboarding_run(
-    connection: Connection,
-    *,
-    run_id: UUID,
-    request_key: str,
-    implementation_ref: str,
-    configuration_revision_id: SearchConfigurationRevisionId,
-    target: ReleaseTarget,
-    started_at: datetime,
-    fetch_rates: RateSnapshotFactory,
-) -> OrchestrationRun:
-    _require_autocommit(connection)
-    existing = connection.execute(
-        "SELECT id, kind, implementation_ref FROM pipeline_runs WHERE id = %s", (run_id,)
-    ).fetchone()
-    if existing is not None:
-        if str(existing[1]) != "onboarding" or str(existing[2]) != implementation_ref:
-            raise ValueError("Onboarding run identity belongs to another execution")
-        stored = _load_run_by_id(connection, run_id)
-        if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
-            raise ValueError("Onboarding run provenance differs from its pinned request")
-        if stored.status == "failed":
-            with connection.transaction():
-                _ = connection.execute(
-                    """
-                    UPDATE pipeline_runs SET status = 'running', completed_at = NULL, error = NULL
-                    WHERE id = %s AND status = 'failed'
-                    """,
-                    (run_id,),
-                )
-            return _load_run_by_id(connection, run_id)
-        return stored
-    rates = fetch_rates()
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
-    with connection.transaction():
-        _ = connection.execute(
-            """
-            INSERT INTO pipeline_runs (
-              id, idempotency_key, kind, implementation_ref,
-              configuration_revision_id, prompt_release_id, relevance_release_id,
-              parameters, status, started_at
-            ) VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, 'running', %s)
-            """,
-            (
-                run_id,
-                f"onboarding:{request_key}",
-                implementation_ref,
-                configuration_revision_id,
-                target.prompt_release_id,
-                target.relevance_release_id,
-                Jsonb({"request_key": request_key}),
-                started_at,
-            ),
-        )
-        _ = connection.execute(
-            """
-            INSERT INTO run_exchange_rate_snapshots (
-              pipeline_run_id, content_digest, rates, source, observed_at
-            ) VALUES (%s, %s, %s, %s, %s)
-            """,
-            (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
-        )
-    return _load_run_by_id(connection, run_id)
-
-
-def complete_orchestration_run(
-    connection: Connection, run_id: UUID, *, completed_at: datetime
-) -> None:
-    _require_autocommit(connection)
-    with connection.transaction():
-        _ = connection.execute(
-            """
-            UPDATE pipeline_runs
-            SET status = 'completed', completed_at = %s, error = NULL
-            WHERE id = %s AND status = 'running'
-            """,
-            (completed_at, run_id),
-        )
-
-
-def fail_orchestration_run(
-    connection: Connection,
-    run_id: UUID,
-    *,
-    completed_at: datetime,
-    error_code: str,
-    reason: str,
-) -> None:
-    _require_autocommit(connection)
-    with connection.transaction():
-        _ = connection.execute(
-            """
-            UPDATE pipeline_runs
-            SET status = 'failed', completed_at = %s, error = %s
-            WHERE id = %s AND status = 'running'
-            """,
-            (completed_at, Jsonb({"code": error_code, "reason": reason}), run_id),
-        )
-
-
-def register_discoveries(
-    connection: Connection,
-    *,
-    run_id: UUID,
-    keyword: str,
-    domain: str,
-    raw_urls: tuple[str, ...],
-    discovered_at: datetime,
-    onboarding_request_key: str | None = None,
-    max_new_work: int | None = None,
-) -> DiscoveryRegistration:
-    _require_autocommit(connection)
-    if max_new_work is not None and max_new_work < 0:
-        raise ValueError("Maximum new work must be nonnegative")
-    discovered_count = 0
-    new_work_count = 0
-    processed_url_count = 0
-    with connection.transaction():
-        for raw_url in raw_urls:
-            if max_new_work is not None and new_work_count >= max_new_work:
-                break
-            processed_url_count += 1
-            job_id = job_id_for_url(raw_url)
-            inserted_job = connection.execute(
-                """
-                INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (raw_url) DO NOTHING
-                RETURNING id
-                """,
-                (job_id, raw_url, discovered_at, discovered_at),
-            ).fetchone()
-            job_row = connection.execute(
-                """
-                UPDATE jobs
-                SET last_discovered_at = GREATEST(last_discovered_at, %s)
-                WHERE raw_url = %s
-                RETURNING id
-                """,
-                (discovered_at, raw_url),
-            ).fetchone()
-            if job_row is None:
-                raise RuntimeError("Registered job could not be loaded")
-            job_id = UUID(str(job_row[0]))
-            inserted_discovery = connection.execute(
-                """
-                INSERT INTO job_discoveries (
-                  pipeline_run_id, job_id, keyword, domain, discovered_at
-                ) VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING job_id
-                """,
-                (run_id, job_id, keyword, domain, discovered_at),
-            ).fetchone()
-            if inserted_discovery is not None:
-                discovered_count += 1
-            if inserted_job is not None:
-                inserted_work = connection.execute(
-                    """
-                    INSERT INTO job_work_items (
-                      job_id, discovery_run_id, keyword, state, created_at,
-                      onboarding_request_key
-                    ) VALUES (%s, %s, %s, 'pending', %s, %s)
-                    RETURNING job_id
-                    """,
-                    (job_id, run_id, keyword, discovered_at, onboarding_request_key),
-                ).fetchone()
-                if inserted_work is not None:
-                    new_work_count += 1
-    return DiscoveryRegistration(
-        discovered_count=discovered_count,
-        new_work_count=new_work_count,
-        processed_url_count=processed_url_count,
-    )
-
-
 def claim_next_job(
     connection: Connection,
     *,
@@ -340,7 +48,7 @@ def claim_next_job(
     onboarding_request_key: str | None = None,
     attempt_limit: int = JOB_WORK_ATTEMPT_LIMIT,
 ) -> JobWorkClaim | None:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     if lease_for <= timedelta(0):
         raise ValueError("Job claim lease must be positive")
     if attempt_limit < 1:
@@ -382,7 +90,7 @@ def claim_next_job(
         ).fetchall()
         for row in exhausted_rows:
             if row[0] is not None:
-                _fail_reevaluation_for_request(
+                fail_reevaluation_for_request(
                     connection,
                     str(row[0]),
                     claimed_at,
@@ -461,7 +169,7 @@ def complete_job_claim(
     decision_id: str,
     completed_at: datetime,
 ) -> bool:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     with connection.transaction():
         changed = connection.execute(
             """
@@ -495,7 +203,7 @@ def fail_job_claim(
     error_code: str,
     reason: str,
 ) -> JobWorkFailureOutcome:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     if retry_after < timedelta(0):
         raise ValueError("Job retry delay cannot be negative")
     exhausted = claim.attempt_count >= claim.attempt_limit
@@ -527,7 +235,7 @@ def fail_job_claim(
             ),
         ).rowcount
         if changed == 1 and exhausted and claim.reevaluation_pipeline_run_id is not None:
-            _fail_reevaluation_run(
+            fail_reevaluation_run(
                 connection,
                 claim.reevaluation_pipeline_run_id,
                 failed_at,
@@ -547,7 +255,7 @@ def terminally_fail_job_claim(
     error_code: str,
     reason: str,
 ) -> bool:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     with connection.transaction():
         changed = connection.execute(
             """
@@ -574,7 +282,7 @@ def terminally_fail_job_claim(
             ),
         ).rowcount
         if changed == 1 and claim.reevaluation_pipeline_run_id is not None:
-            _fail_reevaluation_run(
+            fail_reevaluation_run(
                 connection,
                 claim.reevaluation_pipeline_run_id,
                 completed_at,
@@ -599,10 +307,6 @@ def find_terminal_decision_id(connection: Connection, job_id: UUID) -> str | Non
     return None if row is None else str(row[0])
 
 
-def load_processing_run(connection: Connection, run_id: UUID) -> OrchestrationRun:
-    return _load_run_by_id(connection, run_id)
-
-
 def ensure_model_call_context(
     connection: Connection,
     *,
@@ -613,7 +317,7 @@ def ensure_model_call_context(
     started_at: datetime,
     prompt_release_id: PromptReleaseId,
 ) -> ModelCallContext:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     row = connection.execute(
         """
         SELECT id FROM processing_attempts
@@ -676,7 +380,7 @@ def ensure_model_call_context(
 def complete_model_call_context(
     connection: Connection, context: ModelCallContext, *, completed_at: datetime
 ) -> None:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     with connection.transaction():
         _ = connection.execute(
             """
@@ -695,7 +399,7 @@ def fail_model_call_context(
     *,
     completed_at: datetime,
 ) -> None:
-    _require_autocommit(connection)
+    require_autocommit(connection)
     with connection.transaction():
         _ = connection.execute(
             """
@@ -719,94 +423,3 @@ def fail_model_call_context(
                 context.processing_attempt_id,
             ),
         )
-
-
-def _load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
-    row = connection.execute(
-        """
-        SELECT r.idempotency_key, r.implementation_ref, r.configuration_revision_id,
-               r.prompt_release_id, r.relevance_release_id,
-               r.status, r.started_at, r.completed_at,
-               x.rates, x.source, x.observed_at
-        FROM pipeline_runs r
-        JOIN run_exchange_rate_snapshots x ON x.pipeline_run_id = r.id
-            WHERE r.id = %s AND r.kind IN ('orchestration', 'reevaluation', 'onboarding')
-        """,
-        (run_id,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Orchestration run is incomplete")
-    if row[4] is None:
-        raise RuntimeError("Legacy orchestration run has unknown relevance provenance")
-    return OrchestrationRun.model_validate(
-        {
-            "id": run_id,
-            "idempotency_key": row[0],
-            "implementation_ref": row[1],
-            "configuration_revision_id": row[2],
-            "target": {
-                "prompt_release_id": PromptReleaseId(str(row[3])),
-                "relevance_release_id": RelevanceReleaseId(str(row[4])),
-            },
-            "status": row[5],
-            "started_at": row[6],
-            "completed_at": row[7],
-            "exchange_rates": {
-                "rates": _RATES.validate_python(row[8]),
-                "source": row[9],
-                "observed_at": row[10],
-            },
-        }
-    )
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _require_autocommit(connection: Connection) -> None:
-    if not connection.autocommit:
-        raise ValueError("Pipeline state operations require an autocommit connection")
-
-
-def _fail_reevaluation_run(
-    connection: Connection,
-    run_id: UUID,
-    completed_at: datetime,
-    error_code: str,
-    reason: str,
-) -> None:
-    _ = connection.execute(
-        """
-        UPDATE pipeline_runs
-        SET status = 'failed', completed_at = %s, error = %s
-        WHERE id = %s AND kind = 'reevaluation' AND status = 'running'
-        """,
-        (completed_at, Jsonb({"code": error_code, "reason": reason}), run_id),
-    )
-
-
-def _fail_reevaluation_for_request(
-    connection: Connection,
-    request_key: str,
-    completed_at: datetime,
-    error_code: str,
-    reason: str,
-) -> None:
-    _ = connection.execute(
-        """
-        UPDATE pipeline_runs run
-        SET status = 'failed', completed_at = %s, error = %s
-        FROM job_reevaluation_requests request
-        WHERE request.idempotency_key = %s
-          AND run.id = request.reevaluation_pipeline_run_id
-          AND run.kind = 'reevaluation'
-          AND run.status = 'running'
-        """,
-        (
-            completed_at,
-            Jsonb({"code": error_code, "reason": reason}),
-            request_key,
-        ),
-    )

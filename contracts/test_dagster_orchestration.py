@@ -41,10 +41,9 @@ from job_finder.pipeline.state import (
     claim_next_job,
     complete_job_claim,
     fail_job_claim,
-    fail_orchestration_run,
-    prepare_orchestration_run,
-    register_discoveries,
 )
+from job_finder.pipeline.runs import fail_orchestration_run, prepare_orchestration_run
+from job_finder.pipeline.discoveries import register_discoveries
 from job_finder.review.operations import (
     JobReevaluationAccepted,
     JobReevaluationCommand,
