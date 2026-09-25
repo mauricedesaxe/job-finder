@@ -2283,14 +2283,17 @@ def test_the_activity_page_renders_runs_work_and_pagination() -> None:
     listing = client.get("/operations/runs")
 
     assert listing.status_code == 200
-    assert "Idle tick — nothing was due." in listing.text
+    assert "A run is one pipeline pass; a job is one listing being worked on." in listing.text
+    assert "Scheduler tick" in listing.text
+    assert "Nothing was due." in listing.text
+    assert "Discovery run" in listing.text
     assert "4 discovered · 3 processed · 2 model calls" in listing.text
     assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
-    assert "Job work" in listing.text
-    assert ">retrying</span>" in listing.text
+    assert "Job</strong>" in listing.text
+    assert ">Retrying</span>" in listing.text
     assert "provider_timeout: OpenRouter did not respond" in listing.text
     assert 'href="/operations/work/00000000-0000-0000-0000-000000000009"' in listing.text
-    assert "Open work →" in listing.text
+    assert "Open job →" in listing.text
     assert 'class="row-head"' in listing.text
     assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
     assert "Next page →" in listing.text
@@ -2305,6 +2308,9 @@ def test_the_activity_page_renders_the_filter_form() -> None:
     assert listing.status_code == 200
     assert 'name="status" value="failed"' in listing.text
     assert 'name="kind"' in listing.text
+    assert '<option value="orchestration">Scheduler tick</option>' in listing.text
+    assert '<option value="evaluation">Evaluation run</option>' in listing.text
+    assert "<span>Needs attention</span>" in listing.text
     assert 'name="from"' in listing.text
     assert "Apply filters" in listing.text
 
@@ -2336,7 +2342,7 @@ def test_the_run_detail_page_keeps_its_run_content() -> None:
     detail = client.get("/operations/runs/00000000-0000-0000-0000-000000000002")
 
     assert detail.status_code == 200
-    assert "Discovery" in detail.text
+    assert "Discovery run" in detail.text
     assert "No jobs were discovered by this run." in detail.text
     assert "1 call returned no usage, so it has no recorded cost." in detail.text
     assert 'href="/operations/runs"' in detail.text
@@ -2446,10 +2452,10 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
     response = client.get(f"/operations/work/{UUID(int=31)}")
 
     assert response.status_code == 200
-    assert "Job work" in response.text
+    assert "<h1>Job</h1>" in response.text
     assert "No pipeline decision has been recorded yet." in response.text
     assert 'class="schedule-state terminal_error"' in response.text
-    assert ">Terminal<" in response.text
+    assert ">Needs attention<" in response.text
     assert "provider_timeout: OpenRouter did not respond" in response.text
     assert "Attempt count" in response.text
     assert "Dismissed" in response.text
