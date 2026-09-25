@@ -9,7 +9,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-import job_finder.mcp_server as server_module
+import job_finder.mcp_tools.configuration as configuration_tools
 from job_finder.configuration_service import ConfigurationRevisionNotFound
 from job_finder.database import Connection
 from job_finder.mcp_server import McpDependencies, create_mcp_server
@@ -164,7 +164,7 @@ def test_mcp_configuration_revision_get_sanitizes_only_not_found(
     def missing(*_args: object) -> None:
         raise ConfigurationRevisionNotFound("Search configuration revision does not exist")
 
-    monkeypatch.setattr(server_module, "get_search_configuration_revision", missing)
+    monkeypatch.setattr(configuration_tools, "get_search_configuration_revision", missing)
     server = create_mcp_server(McpDependencies(connect=_connect))
 
     async def exercise_missing() -> None:
@@ -179,7 +179,7 @@ def test_mcp_configuration_revision_get_sanitizes_only_not_found(
     def corrupt(*_args: object) -> None:
         raise RuntimeError("secret database details")
 
-    monkeypatch.setattr(server_module, "get_search_configuration_revision", corrupt)
+    monkeypatch.setattr(configuration_tools, "get_search_configuration_revision", corrupt)
     server = create_mcp_server(McpDependencies(connect=_connect))
 
     async def exercise_corrupt() -> None:
