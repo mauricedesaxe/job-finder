@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -1190,7 +1191,7 @@ def test_pipeline_run_reads_expose_counts_costs_and_children(
 def test_spend_analytics_reads_totals_days_and_models(
     authority_schema: str,
 ) -> None:
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
     recent_run_id = uuid4()
     older_run_id = uuid4()
     job_id = uuid4()
@@ -1640,6 +1641,189 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
 
         with pytest.raises(ValueError):
             load_activity_page(connection, ActivityQuery(cursor="garbage!"))
+
+
+def test_activity_pagination_neither_duplicates_nor_skips_tied_entries(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    tied_job_ids = [uuid4() for _ in range(3)]
+    older_job_id = uuid4()
+    oldest_job_id = uuid4()
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at, completed_at
+            ) VALUES (%s, %s, 'processing', 'activity-tie-contract', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (
+                run_id,
+                f"activity-tie:{run_id}",
+                release.id,
+                now - timedelta(hours=3),
+                now - timedelta(hours=3),
+            ),
+        )
+        work_rows = [(job_id, now) for job_id in tied_job_ids] + [
+            (older_job_id, now - timedelta(hours=1)),
+            (oldest_job_id, now - timedelta(hours=2)),
+        ]
+        for job_id, created in work_rows:
+            connection.execute(
+                """
+                INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (job_id, f"https://example.com/tie-{job_id}", created, created),
+            )
+            connection.execute(
+                """
+                INSERT INTO job_work_items (
+                  job_id, discovery_run_id, keyword, state, created_at
+                ) VALUES (%s, %s, 'python', 'pending', %s)
+                """,
+                (job_id, run_id, created),
+            )
+
+        def refs(page: ActivityPage) -> list[str]:
+            return [entry.ref for entry in page.entries]
+
+        everything = load_activity_page(connection, ActivityQuery(limit=50))
+        assert len(everything.entries) == 6
+        assert {entry.ref for entry in everything.entries[:3]} == {
+            str(job_id) for job_id in tied_job_ids
+        }
+        assert all(entry.occurred_at == now for entry in everything.entries[:3])
+
+        pages: list[ActivityPage] = []
+        cursor: str | None = None
+        for _ in range(10):
+            page = load_activity_page(connection, ActivityQuery(limit=2, cursor=cursor))
+            pages.append(page)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        assert cursor is None
+
+        paged_refs = [entry.ref for page in pages for entry in page.entries]
+        assert [len(page.entries) for page in pages] == [2, 2, 2]
+        assert paged_refs == refs(everything)
+        assert len(set(paged_refs)) == 6
+        assert pages[0].entries[-1].occurred_at == now
+        assert pages[1].entries[0].occurred_at == now
+        assert pages[0].entries[-1].ref != pages[1].entries[0].ref
+
+
+def test_activity_cursor_continues_filtered_pages_without_duplicates_or_skips(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    run_id = uuid4()
+    retrying_job_ids = [uuid4() for _ in range(4)]
+    pending_job_ids = [uuid4() for _ in range(3)]
+    retry_error = (
+        '{"retryability":"retryable","code":"provider_timeout","reason":"Provider did not respond"}'
+    )
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref, prompt_release_id,
+              parameters, status, started_at, completed_at
+            ) VALUES (%s, %s, 'processing', 'activity-filter-contract', %s, '{}'::jsonb,
+              'completed', %s, %s)
+            """,
+            (
+                run_id,
+                f"activity-filter:{run_id}",
+                release.id,
+                now - timedelta(hours=3),
+                now - timedelta(hours=3),
+            ),
+        )
+        retry_rows = list(
+            zip(
+                retrying_job_ids,
+                [
+                    now,
+                    now - timedelta(minutes=10),
+                    now - timedelta(minutes=20),
+                    now - timedelta(minutes=30),
+                ],
+                strict=True,
+            )
+        )
+        for job_id, failed_at in retry_rows:
+            connection.execute(
+                """
+                INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (job_id, f"https://example.com/retry-{job_id}", failed_at, failed_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO job_work_items (
+                  job_id, discovery_run_id, keyword, state, created_at,
+                  last_failed_at, retry_at, last_error
+                ) VALUES (%s, %s, 'python', 'failed', %s, %s, %s, %s::jsonb)
+                """,
+                (job_id, run_id, failed_at, failed_at, failed_at + timedelta(hours=2), retry_error),
+            )
+        for job_id, created in zip(
+            pending_job_ids,
+            [now - timedelta(minutes=5), now - timedelta(minutes=15), now - timedelta(minutes=25)],
+            strict=True,
+        ):
+            connection.execute(
+                """
+                INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (job_id, f"https://example.com/filtered-{job_id}", created, created),
+            )
+            connection.execute(
+                """
+                INSERT INTO job_work_items (
+                  job_id, discovery_run_id, keyword, state, created_at
+                ) VALUES (%s, %s, 'python', 'pending', %s)
+                """,
+                (job_id, run_id, created),
+            )
+
+        def refs(page: ActivityPage) -> list[str]:
+            return [entry.ref for entry in page.entries]
+
+        filtered = ActivityQuery(
+            statuses=frozenset({"retrying"}),
+            from_at=now - timedelta(hours=1),
+            to_at=now + timedelta(minutes=1),
+        )
+        everything = load_activity_page(connection, replace(filtered, limit=50))
+        assert refs(everything) == [str(job_id) for job_id in retrying_job_ids]
+        assert all(entry.status == "retrying" for entry in everything.entries)
+
+        first = load_activity_page(connection, replace(filtered, limit=3))
+        assert first.next_cursor is not None
+        second = load_activity_page(
+            connection, replace(filtered, limit=3, cursor=first.next_cursor)
+        )
+        assert refs(first) == refs(everything)[:3]
+        assert refs(second) == refs(everything)[3:]
+        assert second.next_cursor is None
+        assert set(refs(first) + refs(second)).isdisjoint(
+            {str(job_id) for job_id in pending_job_ids}
+        )
 
 
 def test_work_item_detail_reads_state_dismissal_and_attempt_history(
