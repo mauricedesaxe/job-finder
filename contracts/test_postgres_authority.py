@@ -49,6 +49,18 @@ from job_finder.benchmarks.manifests import (
     preview_manifest,
 )
 from job_finder.benchmarks.promotions import record_prompt_promotion_decision
+from job_finder.benchmarks.qualification_evidence import (
+    FixtureCase,
+    PhaseFixtureSet,
+    ProviderExperimentSettings,
+    QualificationEvidence,
+    RelevanceExperimentInput,
+    qualification_evidence_id,
+    record_relevance_comparison,
+    store_fixture_set,
+    store_qualification_evidence,
+    store_relevance_experiment_input,
+)
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
     ActivationTargetUnpublished,
@@ -94,7 +106,9 @@ from job_finder.evaluation.qualification_components import (
     EnrichmentContent,
     InputPreparationContent,
     RelevanceContent,
+    QualificationTargetContent,
     build_qualification_target,
+    qualification_target_id,
     store_component_release,
     store_qualification_target,
 )
@@ -300,6 +314,7 @@ EXPECTED_MIGRATIONS = (
     "0038_policy_revisions.sql",
     "0039_policy_lifecycle_state.sql",
     "0040_qualification_components.sql",
+    "0041_qualification_evidence.sql",
 )
 
 
@@ -571,59 +586,69 @@ def test_split_policy_state_seeds_without_changing_legacy_authority(
             )
 
 
+def _store_default_qualification_target(
+    connection: psycopg.Connection[tuple[object, ...]], now: datetime
+) -> tuple[
+    ImplementationArtifact,
+    tuple[InputPreparationContent, RelevanceContent, EnrichmentContent, DeduplicationContent],
+    QualificationTargetContent,
+]:
+    artifact = build_implementation_artifact(Path(__file__).resolve().parents[1])
+    _ = store_implementation_artifact(connection, artifact, created_at=now, created_by="build")
+    definition_row = connection.execute(
+        "SELECT revision_id FROM qualification_definition_publications LIMIT 1"
+    ).fetchone()
+    relevance_row = connection.execute("SELECT id FROM relevance_releases LIMIT 1").fetchone()
+    assert definition_row is not None and relevance_row is not None
+    versions = connection.execute(
+        "SELECT id, phase, output_schema FROM prompt_versions ORDER BY phase, id"
+    ).fetchall()
+    relevance_versions = tuple(
+        PromptVersionId(str(row[0])) for row in versions if row[1] in ("filter", "profile")
+    )
+    enrichment_version = next(row for row in versions if row[1] == "enrichment")
+    deduplication_version = next(row for row in versions if row[1] == "deduplication")
+    output_schema = json.dumps(
+        enrichment_version[2], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    input_preparation = InputPreparationContent(
+        artifact_id=artifact.id,
+        ats_sources=tuple(SupportedSearchSource),
+    )
+    relevance = RelevanceContent(
+        artifact_id=artifact.id,
+        qualification_definition_revision_id=QualificationDefinitionRevisionId(
+            str(definition_row[0])
+        ),
+        relevance_release_id=RelevanceReleaseId(str(relevance_row[0])),
+        prompt_version_ids=relevance_versions,
+    )
+    enrichment = EnrichmentContent(
+        artifact_id=artifact.id,
+        prompt_version_id=PromptVersionId(str(enrichment_version[0])),
+        output_schema_digest=hashlib.sha256(output_schema.encode()).hexdigest(),
+    )
+    deduplication = DeduplicationContent(
+        artifact_id=artifact.id,
+        prompt_version_id=PromptVersionId(str(deduplication_version[0])),
+    )
+    components = (input_preparation, relevance, enrichment, deduplication)
+    for content in components:
+        _ = store_component_release(connection, content, created_at=now, created_by="owner")
+    target = build_qualification_target(*components)
+    _ = store_qualification_target(connection, target, created_at=now, created_by="owner")
+    return artifact, components, target
+
+
 def test_qualification_target_requires_four_components_from_one_artifact(
     authority_schema: str,
 ) -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
-    artifact = build_implementation_artifact(Path(__file__).resolve().parents[1])
     with _connection(authority_schema) as connection:
         _ = apply_migrations(connection)
-        _ = store_implementation_artifact(connection, artifact, created_at=now, created_by="build")
-        definition_row = connection.execute(
-            "SELECT revision_id FROM qualification_definition_publications LIMIT 1"
-        ).fetchone()
-        relevance_row = connection.execute("SELECT id FROM relevance_releases LIMIT 1").fetchone()
-        assert definition_row is not None and relevance_row is not None
-        versions = connection.execute(
-            "SELECT id, phase, output_schema FROM prompt_versions ORDER BY phase, id"
-        ).fetchall()
-        relevance_versions = tuple(
-            PromptVersionId(str(row[0])) for row in versions if row[1] in ("filter", "profile")
-        )
-        enrichment_version = next(row for row in versions if row[1] == "enrichment")
-        deduplication_version = next(row for row in versions if row[1] == "deduplication")
-        output_schema = json.dumps(
-            enrichment_version[2], sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        )
-        input_preparation = InputPreparationContent(
-            artifact_id=artifact.id,
-            ats_sources=tuple(SupportedSearchSource),
-        )
-        relevance = RelevanceContent(
-            artifact_id=artifact.id,
-            qualification_definition_revision_id=QualificationDefinitionRevisionId(
-                str(definition_row[0])
-            ),
-            relevance_release_id=RelevanceReleaseId(str(relevance_row[0])),
-            prompt_version_ids=relevance_versions,
-        )
-        enrichment = EnrichmentContent(
-            artifact_id=artifact.id,
-            prompt_version_id=PromptVersionId(str(enrichment_version[0])),
-            output_schema_digest=hashlib.sha256(output_schema.encode()).hexdigest(),
-        )
-        deduplication = DeduplicationContent(
-            artifact_id=artifact.id,
-            prompt_version_id=PromptVersionId(str(deduplication_version[0])),
-        )
-        component_ids = tuple(
-            store_component_release(connection, content, created_at=now, created_by="owner")
-            for content in (input_preparation, relevance, enrichment, deduplication)
-        )
-        target = build_qualification_target(input_preparation, relevance, enrichment, deduplication)
-        target_id = store_qualification_target(
-            connection, target, created_at=now, created_by="owner"
-        )
+        artifact, components, target = _store_default_qualification_target(connection, now)
+        input_preparation, relevance, enrichment, deduplication = components
+        target_id = qualification_target_id(target)
         assert connection.execute(
             "SELECT count(*) FROM qualification_targets WHERE id = %s", (target_id,)
         ).fetchone() == (1,)
@@ -632,7 +657,9 @@ def test_qualification_target_requires_four_components_from_one_artifact(
             == target_id
         )
 
-        wrong_kind = target.model_copy(update={"enrichment_release_id": component_ids[3]})
+        wrong_kind = target.model_copy(
+            update={"enrichment_release_id": target.deduplication_release_id}
+        )
         with pytest.raises(psycopg.errors.CheckViolation):
             _ = store_qualification_target(
                 connection, wrong_kind, created_at=now, created_by="owner"
@@ -665,6 +692,117 @@ def test_qualification_target_requires_four_components_from_one_artifact(
         with pytest.raises(psycopg.errors.CheckViolation):
             _ = connection.execute(
                 "UPDATE qualification_component_releases SET created_by = 'changed'"
+            )
+
+
+def test_qualification_evidence_pins_target_components_and_experiment_inputs(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, _, rates = _seed_evaluation_execution_context(connection, now)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        experiment = RelevanceExperimentInput(
+            manifest_id=manifest_id,
+            exchange_rates=rates,
+            provider_settings=ProviderExperimentSettings(
+                provider="openrouter", temperature=0, seed=1, retry_limit=2
+            ),
+            input_path="direct",
+        )
+        experiment_id = store_relevance_experiment_input(
+            connection, experiment, created_at=now, created_by="owner"
+        )
+        baseline = QualificationEvidence(
+            target_id=qualification_target_id(target),
+            phase="relevance",
+            component_release_id=target.relevance_release_id,
+            experiment_input_id=experiment_id,
+            executor_artifact_id=artifact.id,
+            origin="synthetic",
+            outcome="passed",
+            result={"qualified": 1},
+            completed_at=now,
+        )
+        candidate = baseline.model_copy(update={"result": {"qualified": 2}})
+        _ = store_qualification_evidence(connection, baseline, created_at=now, created_by="owner")
+        _ = store_qualification_evidence(connection, candidate, created_at=now, created_by="owner")
+        comparison_id = record_relevance_comparison(
+            connection, baseline, candidate, created_at=now, created_by="owner"
+        )
+        assert connection.execute(
+            "SELECT experiment_input_id FROM qualification_relevance_comparisons WHERE id = %s",
+            (comparison_id,),
+        ).fetchone() == (experiment_id,)
+
+        changed_experiment = experiment.model_copy(update={"input_path": "ats"})
+        changed_id = store_relevance_experiment_input(
+            connection, changed_experiment, created_at=now, created_by="owner"
+        )
+        changed_candidate = candidate.model_copy(update={"experiment_input_id": changed_id})
+        changed_evidence_id = store_qualification_evidence(
+            connection, changed_candidate, created_at=now, created_by="owner"
+        )
+        with pytest.raises(ValueError, match="same frozen experiment input"):
+            _ = record_relevance_comparison(
+                connection, baseline, changed_candidate, created_at=now, created_by="owner"
+            )
+        forged_comparison = {
+            "experiment_input_id": experiment_id,
+            "baseline_evidence_id": qualification_evidence_id(baseline),
+            "candidate_evidence_id": changed_evidence_id,
+        }
+        forged_id = hashlib.sha256(
+            json.dumps(forged_comparison, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                """
+                INSERT INTO qualification_relevance_comparisons (
+                  id, experiment_input_id, baseline_evidence_id,
+                  candidate_evidence_id, created_at, created_by
+                ) VALUES (%s, %s, %s, %s, %s, 'owner')
+                """,
+                (
+                    forged_id,
+                    experiment_id,
+                    forged_comparison["baseline_evidence_id"],
+                    changed_evidence_id,
+                    now,
+                ),
+            )
+
+        fixtures = PhaseFixtureSet(
+            phase="enrichment",
+            cases=(
+                FixtureCase(
+                    input={"title": "Engineer"},
+                    expected={"title": "Engineer"},
+                    input_path="direct",
+                ),
+            ),
+        )
+        fixture_id = store_fixture_set(connection, fixtures, created_at=now, created_by="owner")
+        enrichment_evidence = QualificationEvidence(
+            target_id=qualification_target_id(target),
+            phase="enrichment",
+            component_release_id=target.enrichment_release_id,
+            fixture_set_id=fixture_id,
+            executor_artifact_id=artifact.id,
+            origin="synthetic",
+            outcome="passed",
+            result={"matched": 1},
+            completed_at=now,
+        )
+        _ = store_qualification_evidence(
+            connection, enrichment_evidence, created_at=now, created_by="owner"
+        )
+        wrong_component = enrichment_evidence.model_copy(
+            update={"component_release_id": target.deduplication_release_id}
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = store_qualification_evidence(
+                connection, wrong_component, created_at=now, created_by="owner"
             )
 
 
