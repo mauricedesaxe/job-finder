@@ -626,6 +626,19 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
         assert isinstance(replayed_undo, WorkDismissalApplied)
         assert replayed_undo.replayed is True
 
+        never_dismissed = undo(terminal_job_id, 3, "undo-never-dismissed")
+        assert isinstance(never_dismissed, WorkDismissalNotFound)
+        never_dismissed_row = connection.execute(
+            """
+            SELECT outcome, prior_state, prior_attempt_count, resulting_attempt_count
+            FROM work_dismissal_receipts WHERE idempotency_key = 'undo-never-dismissed'
+            """
+        ).fetchone()
+        assert never_dismissed_row == ("not_found", None, None, None)
+        replayed_never_dismissed = undo(terminal_job_id, 3, "undo-never-dismissed")
+        assert isinstance(replayed_never_dismissed, WorkDismissalNotFound)
+        assert replayed_never_dismissed.replayed is True
+
         after = load_operations_snapshot(connection)
         assert after.health is OperationsHealth.ACTION_REQUIRED
         assert after.dismissed_terminal == 0
@@ -639,6 +652,22 @@ def test_work_dismissal_is_atomic_replay_safe_and_undoable(
 
         not_found = dismiss(uuid4(), 0, "dismiss-missing")
         assert isinstance(not_found, WorkDismissalNotFound)
+
+        dismissed_again = dismiss(terminal_job_id, 3, "dismiss-again")
+        assert isinstance(dismissed_again, WorkDismissalApplied)
+        connection.execute(
+            "UPDATE job_work_items SET attempt_count = 2 WHERE job_id = %s",
+            (terminal_job_id,),
+        )
+        stale_dismissal_undo = undo(terminal_job_id, 2, "undo-stale-dismissal")
+        assert isinstance(stale_dismissal_undo, WorkDismissalNotFound)
+        stale_dismissal_row = connection.execute(
+            """
+            SELECT outcome, prior_state, prior_attempt_count, resulting_attempt_count
+            FROM work_dismissal_receipts WHERE idempotency_key = 'undo-stale-dismissal'
+            """
+        ).fetchone()
+        assert stale_dismissal_row == ("not_found", None, None, None)
 
 
 def test_operations_health_follows_real_postgres_state_transitions(

@@ -1301,8 +1301,9 @@ def dismiss_work(connection: Connection, command: WorkDismissalCommand) -> WorkD
                 (command.job_id,),
             ).fetchone()
             if dismissed_row is None or int(str(dismissed_row[0])) != prior[1]:
-                outcome = "not_found" if dismissed_row is None else "stale_state"
-                resulting_attempt_count = prior[1]
+                outcome = "not_found"
+                resulting_attempt_count = None
+                prior = None
             else:
                 outcome = "applied"
                 resulting_attempt_count = prior[1]
