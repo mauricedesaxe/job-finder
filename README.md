@@ -9,12 +9,63 @@ listings, and OpenRouter to evaluate them.
 
 [Watch the Job Finder demo on YouTube](https://youtu.be/bO7vzA0xbWg).
 
-This README has two setup paths:
+This README has three setup paths:
 
+- [Deploy a hosted instance for an owner](#deploy-a-hosted-instance-for-an-owner)
+  if you are onboarding someone yourself.
 - [Run Job Finder for yourself](#run-job-finder-for-yourself) if you want job
   results as soon as possible.
 - [Contribute to Job Finder](#contribute-to-job-finder) if you want a local
   development environment.
+
+## Deploy a hosted instance for an owner
+
+The operator command creates one Railway project per owner. It provisions
+managed PostgreSQL, a private Dagster webserver and daemon, and a public review
+app. It generates the session, credential-encryption, and first-owner secrets;
+the owner enters provider keys, job preferences, and a spend budget in the
+browser. No SQL, environment-file editing, or Dagster access is needed during
+onboarding.
+
+Install Python 3.12 and the [Railway CLI](https://docs.railway.com/cli), then
+sign in with `railway login`. Run `railway whoami --json` to find the ID of the
+workspace that will pay for and operate this owner's instance. Run from a clone
+of this repository:
+
+```sh
+python3 scripts/deploy_railway.py --name job-finder-owner-name --workspace YOUR_WORKSPACE_ID
+```
+
+Use a unique project name for each owner. The command prints the project URL,
+waits for the three application services to deploy, then prints the review URL
+and a one-time bootstrap token. Keep the token private and enter it with the
+owner on the first visit to create their account. The owner can then finish the
+guided setup and run the bounded test search. Provider keys are entered in the
+app, not in Railway. The app's `/readyz` endpoint is the Railway health check;
+only the review service receives a public domain.
+
+If a deployment fails before any services are created, resume that exact empty
+project with `--project PROJECT_ID`. If services already exist, use the printed
+project URL to inspect their logs and variables. The command never deletes a
+project automatically; running it again without `--project` creates a separate
+project with new secrets and data.
+Once the owner is set up, remove `JOB_FINDER_BOOTSTRAP_TOKEN` from the review
+service variables in Railway.
+
+### Hosted deployment smoke check
+
+For a fresh instance, check the following before handing it to an owner:
+
+1. The Railway project has four services: Postgres, review, dagster-webserver,
+   and dagster-daemon. Only review has a public domain; Postgres has no public
+   TCP proxy.
+2. The review URL's `/readyz` returns HTTP 200, and the landing page redirects
+   to owner setup.
+3. With the generated bootstrap token, create the owner account, enter provider
+   credentials and preferences, set a spend budget, and run the bounded test
+   search. Confirm progress and results appear in the browser.
+4. Check `/operations/control` after setup. It should show the expected schedules
+   without exposing Dagster's GraphQL service publicly.
 
 ## Run Job Finder for yourself
 
@@ -295,16 +346,11 @@ variables change optional behavior or production settings:
 
 ## Deployment
 
-One Docker image serves three roles on Railway. Set each service's start
-command:
-
-- Review app: `uv run --no-sync uvicorn scripts.serve_review:create_app --factory --host 0.0.0.0 --port $PORT`
-- Dagster webserver: `uv run --no-sync dagster-webserver -h 0.0.0.0 -p $PORT -w workspace.yaml`
-- Dagster daemon: `uv run --no-sync dagster-daemon run -w workspace.yaml`
-
-`railway.toml` contains the shared build configuration. Configure health checks,
-start commands, PostgreSQL, and environment variables on each service. Merges
-to `main` create a CalVer tag and a GitHub release with generated notes.
+The hosted deployment command above configures the three roles of the Docker
+image and their private PostgreSQL and Dagster connections. `railway.toml` is
+retained for existing Railway services; new projects use the Dockerfile and the
+settings set by the command. Merges to `main` create a CalVer tag and a GitHub
+release with generated notes.
 
 ## License
 

@@ -119,7 +119,8 @@ class CorpusEvaluationSettings(BaseModel):
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),
                 "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY"),
-                "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF"),
+                "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF")
+                or os.environ.get("RAILWAY_GIT_COMMIT_SHA"),
                 "worker_count": os.environ.get("JOB_FINDER_EVAL_WORKER_COUNT", "12"),
             }
         )
@@ -189,7 +190,8 @@ class OrchestrationSettings(BaseModel):
                 "jina_api_key": os.environ.get("JINA_API_KEY") or None,
                 "credential_encryption_key": os.environ.get("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY")
                 or None,
-                "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF"),
+                "implementation_ref": os.environ.get("JOB_FINDER_IMPLEMENTATION_REF")
+                or os.environ.get("RAILWAY_GIT_COMMIT_SHA"),
                 "enable_ats_enrichment": os.environ.get("ENABLE_ATS_ENRICHMENT", "true") == "true",
                 "search_worker_count": os.environ.get("JOB_FINDER_SEARCH_WORKER_COUNT", "8"),
                 "work_batch_size": os.environ.get("JOB_FINDER_WORK_BATCH_SIZE", "100"),

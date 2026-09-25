@@ -131,6 +131,16 @@ def test_corpus_settings_require_openrouter_storage(monkeypatch: pytest.MonkeyPa
     assert settings.openrouter_api_key == "openrouter-secret"
 
 
+def test_railway_commit_supplies_implementation_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://example/production")
+    monkeypatch.delenv("JOB_FINDER_IMPLEMENTATION_REF", raising=False)
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+
+    assert CorpusEvaluationSettings.from_environment().implementation_ref == "a" * 40
+    assert OrchestrationSettings.from_environment().implementation_ref == "a" * 40
+
+
 def test_jev_corpus_settings_only_require_the_typesafe_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
