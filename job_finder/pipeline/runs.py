@@ -5,14 +5,16 @@ import json
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, TypeAlias
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from job_finder.acquisition_policy import AcquisitionPolicyRevisionId
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
+from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.pipeline.connection import Connection, require_autocommit
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
@@ -24,13 +26,10 @@ class PipelineRunModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
 
-class OrchestrationRun(PipelineRunModel):
+class _RunFields(PipelineRunModel):
     id: UUID
     idempotency_key: str
     implementation_ref: str
-    configuration_revision_id: Annotated[
-        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
-    ]
     target: ReleaseTarget
     exchange_rates: ExchangeRateSnapshot
     status: Literal["running", "completed", "failed"]
@@ -42,6 +41,24 @@ class OrchestrationRun(PipelineRunModel):
         return self.target.prompt_release_id
 
 
+class LegacyOrchestrationRun(_RunFields):
+    authority_kind: Literal["legacy"] = "legacy"
+    configuration_revision_id: Annotated[
+        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+
+
+class SplitOrchestrationRun(_RunFields):
+    authority_kind: Literal["split"] = "split"
+    acquisition_policy_revision_id: Annotated[
+        AcquisitionPolicyRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    qualification_target_id: Annotated[QualificationTargetId, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+OrchestrationRun: TypeAlias = LegacyOrchestrationRun | SplitOrchestrationRun
+
+
 def prepare_orchestration_run(
     connection: Connection,
     *,
@@ -51,10 +68,12 @@ def prepare_orchestration_run(
     target: ReleaseTarget,
     started_at: datetime,
     fetch_rates: RateSnapshotFactory,
-) -> OrchestrationRun:
+) -> LegacyOrchestrationRun:
     require_autocommit(connection)
     existing = load_orchestration_run(connection, idempotency_key)
     if existing is not None:
+        if isinstance(existing, SplitOrchestrationRun):
+            raise ValueError("Run idempotency key belongs to another execution authority")
         if existing.implementation_ref != implementation_ref:
             raise ValueError("Run idempotency key belongs to another implementation")
         if (
@@ -72,7 +91,10 @@ def prepare_orchestration_run(
                     """,
                     (existing.id,),
                 )
-            return load_run_by_id(connection, existing.id)
+            resumed = load_run_by_id(connection, existing.id)
+            if isinstance(resumed, SplitOrchestrationRun):
+                raise ValueError("Run idempotency key belongs to another execution authority")
+            return resumed
         return existing
     rates = fetch_rates()
     run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
@@ -113,6 +135,8 @@ def prepare_orchestration_run(
         raise RuntimeError("Orchestration run could not be loaded after creation")
     if stored.implementation_ref != implementation_ref:
         raise ValueError("Run idempotency key belongs to another implementation")
+    if isinstance(stored, SplitOrchestrationRun):
+        raise ValueError("Run idempotency key belongs to another execution authority")
     if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
         raise ValueError("Run idempotency key belongs to another execution authority")
     return stored
@@ -136,7 +160,7 @@ def prepare_onboarding_run(
     target: ReleaseTarget,
     started_at: datetime,
     fetch_rates: RateSnapshotFactory,
-) -> OrchestrationRun:
+) -> LegacyOrchestrationRun:
     require_autocommit(connection)
     existing = connection.execute(
         "SELECT id, kind, implementation_ref FROM pipeline_runs WHERE id = %s", (run_id,)
@@ -145,6 +169,8 @@ def prepare_onboarding_run(
         if str(existing[1]) != "onboarding" or str(existing[2]) != implementation_ref:
             raise ValueError("Onboarding run identity belongs to another execution")
         stored = load_run_by_id(connection, run_id)
+        if isinstance(stored, SplitOrchestrationRun):
+            raise ValueError("Onboarding run provenance differs from its pinned request")
         if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
             raise ValueError("Onboarding run provenance differs from its pinned request")
         if stored.status == "failed":
@@ -156,7 +182,10 @@ def prepare_onboarding_run(
                     """,
                     (run_id,),
                 )
-            return load_run_by_id(connection, run_id)
+            resumed = load_run_by_id(connection, run_id)
+            if isinstance(resumed, SplitOrchestrationRun):
+                raise ValueError("Onboarding run provenance differs from its pinned request")
+            return resumed
         return stored
     rates = fetch_rates()
     rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
@@ -188,7 +217,10 @@ def prepare_onboarding_run(
             """,
             (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
         )
-    return load_run_by_id(connection, run_id)
+    stored = load_run_by_id(connection, run_id)
+    if isinstance(stored, SplitOrchestrationRun):
+        raise ValueError("Onboarding run provenance differs from its pinned request")
+    return stored
 
 
 def complete_orchestration_run(
@@ -232,7 +264,9 @@ def load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
         SELECT r.idempotency_key, r.implementation_ref, r.configuration_revision_id,
                r.prompt_release_id, r.relevance_release_id,
                r.status, r.started_at, r.completed_at,
-               x.rates, x.source, x.observed_at
+               x.rates, x.source, x.observed_at,
+               r.execution_authority_kind, r.acquisition_policy_revision_id,
+               r.qualification_target_id
         FROM pipeline_runs r
         JOIN run_exchange_rate_snapshots x ON x.pipeline_run_id = r.id
             WHERE r.id = %s AND r.kind IN ('orchestration', 'reevaluation', 'onboarding')
@@ -241,28 +275,36 @@ def load_run_by_id(connection: Connection, run_id: UUID) -> OrchestrationRun:
     ).fetchone()
     if row is None:
         raise RuntimeError("Orchestration run is incomplete")
-    if row[4] is None:
-        raise RuntimeError("Legacy orchestration run has unknown relevance provenance")
-    return OrchestrationRun.model_validate(
-        {
-            "id": run_id,
-            "idempotency_key": row[0],
-            "implementation_ref": row[1],
-            "configuration_revision_id": row[2],
-            "target": {
-                "prompt_release_id": PromptReleaseId(str(row[3])),
-                "relevance_release_id": RelevanceReleaseId(str(row[4])),
-            },
-            "status": row[5],
-            "started_at": row[6],
-            "completed_at": row[7],
-            "exchange_rates": {
-                "rates": _RATES.validate_python(row[8]),
-                "source": row[9],
-                "observed_at": row[10],
-            },
-        }
-    )
+    if row[3] is None or row[4] is None:
+        raise RuntimeError("Orchestration run has incomplete execution release provenance")
+    common = {
+        "id": run_id,
+        "idempotency_key": row[0],
+        "implementation_ref": row[1],
+        "target": {
+            "prompt_release_id": PromptReleaseId(str(row[3])),
+            "relevance_release_id": RelevanceReleaseId(str(row[4])),
+        },
+        "status": row[5],
+        "started_at": row[6],
+        "completed_at": row[7],
+        "exchange_rates": {
+            "rates": _RATES.validate_python(row[8]),
+            "source": row[9],
+            "observed_at": row[10],
+        },
+    }
+    if row[11] == "split":
+        return SplitOrchestrationRun.model_validate(
+            {
+                **common,
+                "acquisition_policy_revision_id": row[12],
+                "qualification_target_id": row[13],
+            }
+        )
+    if row[11] != "legacy":
+        raise RuntimeError("Orchestration run has unknown execution authority")
+    return LegacyOrchestrationRun.model_validate({**common, "configuration_revision_id": row[2]})
 
 
 def _digest(value: object) -> str:

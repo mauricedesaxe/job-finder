@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
+from job_finder.acquisition_policy import SearchQuery, build_search_queries
+from job_finder.acquisition_policy_service import load_acquisition_policy_revision
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable
 from job_finder.ats.policy import ats_structural_filter, format_ats_description
@@ -89,13 +91,9 @@ from job_finder.pipeline.work_items import (
     terminally_fail_job_claim,
     load_processing_run,
 )
-from job_finder.pipeline.runs import OrchestrationRun
+from job_finder.pipeline.runs import OrchestrationRun, SplitOrchestrationRun
 from job_finder.review.queue import enqueue_qualified_review_item
-from job_finder.search_configuration import (
-    SearchQuery,
-    build_search_queries,
-    load_search_configuration_revision,
-)
+from job_finder.search_configuration import load_search_configuration_revision
 
 POLICY_VERSION = "orchestration-v1"
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -177,10 +175,15 @@ def discover_jobs(
         raise ValueError("Discovery requires a running orchestration run")
     if max_workers < 1:
         raise ValueError("Discovery requires at least one search worker")
-    configuration = load_search_configuration_revision(
-        connection, run.configuration_revision_id
-    ).configuration
-    queries = build_search_queries(configuration)
+    if isinstance(run, SplitOrchestrationRun):
+        source = load_acquisition_policy_revision(
+            connection, run.acquisition_policy_revision_id
+        ).policy
+    else:
+        source = load_search_configuration_revision(
+            connection, run.configuration_revision_id
+        ).configuration
+    queries = build_search_queries(source)
 
     def run_search(query: SearchQuery) -> SearchResult:
         return boundaries.search(query.keyword, query.domain)
