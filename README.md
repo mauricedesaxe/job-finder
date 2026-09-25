@@ -39,10 +39,11 @@ first-run check.
 
 The operator command creates one Railway project per owner. It provisions
 managed PostgreSQL, a private Dagster webserver and daemon, and a public review
-app. It generates the session, credential-encryption, and first-owner secrets;
-the owner enters provider keys, job preferences, and a spend budget in the
-browser. No SQL, environment-file editing, or Dagster access is needed during
-onboarding.
+app. It generates the session, credential-encryption, and first-owner secrets
+and enables the independent search setup flow. During the setup session, enter
+the provider keys yourself, then work through search preferences and the spend
+budget with the owner. No SQL, environment-file editing, or Dagster access is
+needed during onboarding.
 
 Install Python 3.12 and the [Railway CLI](https://docs.railway.com/cli), then
 sign in with `railway login`. Run `railway whoami --json` to find the ID of the
@@ -56,10 +57,14 @@ python3 scripts/deploy_railway.py --name job-finder-owner-name --workspace YOUR_
 Use a unique project name for each owner. The command prints the project URL,
 waits for the three application services to deploy, then prints the review URL
 and a one-time bootstrap token. Keep the token private and enter it with the
-owner on the first visit to create their account. The owner can then finish the
-guided setup and run the bounded test search. Provider keys are entered in the
-app, not in Railway. The app's `/readyz` endpoint is the Railway health check;
-only the review service receives a public domain.
+owner on the first visit to create their account. Enter your provider keys in
+the app, not in Railway. Save and publish the acquisition policy and
+qualification definition separately, activate acquisition, set the budget,
+then run the bounded test search. The test search uses a candidate qualification
+target without activating it for scheduled runs. After reviewing its evidence,
+use the qualification MCP tools to approve and activate that target. Scheduled
+discovery waits for this activation. The app's `/readyz` endpoint is the Railway
+health check; only the review service receives a public domain.
 
 If a deployment fails before any services are created, resume that exact empty
 project with `--project PROJECT_ID`. If services already exist, use the printed
