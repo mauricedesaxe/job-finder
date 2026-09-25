@@ -113,6 +113,8 @@ def prepare_orchestration_run(
         raise RuntimeError("Orchestration run could not be loaded after creation")
     if stored.implementation_ref != implementation_ref:
         raise ValueError("Run idempotency key belongs to another implementation")
+    if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
+        raise ValueError("Run idempotency key belongs to another execution authority")
     return stored
 
 

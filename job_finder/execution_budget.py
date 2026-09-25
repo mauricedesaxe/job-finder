@@ -9,16 +9,16 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.database import Connection, ConnectionFactory
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 from job_finder.evaluation.prompt_releases import PromptRelease
-from job_finder.evaluation.release_targets import get_active_release_target, load_release_target
+from job_finder.evaluation.release_targets import load_release_target
 from job_finder.evaluation.relevance_releases import (
     GeminiExecutionPolicy,
     JevAtomicExecutionPolicy,
     JevFaithfulExecutionPolicy,
     RelevanceExecutionPolicy,
+    RelevanceRelease,
 )
 from job_finder.evaluation.jev import JevRetryPolicy
 from job_finder.evaluation.openrouter import RetryPolicy as OpenRouterRetryPolicy
@@ -77,7 +77,7 @@ class ExecutionAdmitted(ExecutionBudgetModel):
         SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
     ]
     target: ReleaseTarget
-    release_generation: int = Field(ge=0)
+    release_generation: int | None = Field(default=None, ge=0)
     budget_policy_version: int = Field(ge=1)
     run_allowance_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=8)
     estimate: ExecutionEstimate
@@ -315,7 +315,7 @@ def _admit_execution(
         return ExecutionBlocked(reason="onboarding_incomplete")
     existing = connection.execute(
         """
-        SELECT max_jobs, status, policy_version, reserved_usd,
+        SELECT max_jobs, status, authority_kind, policy_version, reserved_usd,
                configuration_revision_id, prompt_release_id, relevance_release_id,
                release_generation, search_queries, logical_model_calls_per_job,
                maximum_provider_attempts
@@ -327,7 +327,7 @@ def _admit_execution(
     if existing is not None:
         if str(existing[1]) == "settled":
             return ExecutionBlocked(reason="already_consumed")
-        return _admitted_from_row(existing)
+        return _admitted_from_row(connection, idempotency_key, existing)
     policy_row = connection.execute(
         """
         SELECT version, monthly_limit_usd, run_allowance_usd, max_jobs_per_run,
@@ -339,27 +339,14 @@ def _admit_execution(
     ).fetchone()
     if policy_row is None:
         return ExecutionBlocked(reason="budget_not_configured")
-    authority_row = connection.execute(
-        """
-        SELECT configuration.revision_id,
-               target.prompt_release_id, target.relevance_release_id, target.generation
-        FROM active_search_configuration configuration
-        CROSS JOIN active_release_target target
-        WHERE configuration.singleton_id = 1 AND target.singleton_id = 1
-        FOR SHARE OF configuration, target
-        """
-    ).fetchone()
-    if authority_row is None:
-        raise RuntimeError("Active execution authority is missing")
-    configuration_revision_id = SearchConfigurationRevisionId(str(authority_row[0]))
-    target = ReleaseTarget(
-        prompt_release_id=PromptReleaseId(str(authority_row[1])),
-        relevance_release_id=RelevanceReleaseId(str(authority_row[2])),
-    )
-    configuration = load_search_configuration_revision(
-        connection, configuration_revision_id
-    ).configuration
-    prompt_release, relevance_release = load_release_target(connection, target)
+    (
+        configuration_revision_id,
+        configuration,
+        target,
+        release_generation,
+        prompt_release,
+        relevance_release,
+    ) = _load_active_execution(connection)
     estimate = estimate_execution(
         configuration,
         prompt_release,
@@ -389,11 +376,11 @@ def _admit_execution(
         """
         INSERT INTO execution_budget_reservations (
           idempotency_key, policy_version, period_start, reserved_usd,
-          status, max_jobs, configuration_revision_id, prompt_release_id,
+          status, max_jobs, authority_kind, configuration_revision_id, prompt_release_id,
           relevance_release_id, release_generation, search_queries,
           logical_model_calls_per_job, maximum_provider_attempts, created_at
         ) VALUES (
-          %s, %s, %s, %s, 'reserved', %s, %s, %s, %s, %s, %s, %s, %s, %s
+          %s, %s, %s, %s, 'reserved', %s, 'pinned', %s, %s, %s, %s, %s, %s, %s, %s
         )
         """,
         (
@@ -405,7 +392,7 @@ def _admit_execution(
             configuration_revision_id,
             target.prompt_release_id,
             target.relevance_release_id,
-            authority_row[3],
+            release_generation,
             estimate.search_queries,
             estimate.logical_model_calls_per_job,
             estimate.maximum_provider_attempts,
@@ -416,7 +403,7 @@ def _admit_execution(
         max_jobs=cast(int, policy_row[3]),
         configuration_revision_id=configuration_revision_id,
         target=target,
-        release_generation=cast(int, authority_row[3]),
+        release_generation=release_generation,
         budget_policy_version=cast(int, policy_row[0]),
         run_allowance_usd=reservation,
         estimate=estimate,
@@ -424,11 +411,7 @@ def _admit_execution(
 
 
 def _estimate_active_execution(connection: Connection, max_jobs: int) -> ExecutionEstimate:
-    configuration = load_published_active_search_configuration(
-        connection
-    ).active.revision.configuration
-    active_target = get_active_release_target(connection)
-    prompt_release, relevance_release = load_release_target(connection, active_target.target)
+    _, configuration, _, _, prompt_release, relevance_release = _load_active_execution(connection)
     return estimate_execution(
         configuration,
         prompt_release,
@@ -437,27 +420,158 @@ def _estimate_active_execution(connection: Connection, max_jobs: int) -> Executi
     )
 
 
-def _admitted_from_row(row: tuple[object, ...]) -> ExecutionAdmitted:
-    if any(value is None for value in row[4:]):
-        raise RuntimeError("Existing execution reservation has no pinned authority")
-    max_jobs = cast(int, row[0])
+def _load_active_execution(
+    connection: Connection,
+) -> tuple[
+    SearchConfigurationRevisionId,
+    SearchConfiguration,
+    ReleaseTarget,
+    int,
+    PromptRelease,
+    RelevanceRelease,
+]:
+    row = connection.execute(
+        """
+        SELECT configuration.revision_id,
+               target.prompt_release_id, target.relevance_release_id, target.generation
+        FROM active_search_configuration configuration
+        CROSS JOIN active_release_target target
+        WHERE configuration.singleton_id = 1 AND target.singleton_id = 1
+        FOR SHARE OF configuration, target
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Active execution authority is missing")
+    configuration_revision_id = SearchConfigurationRevisionId(str(row[0]))
     target = ReleaseTarget(
-        prompt_release_id=PromptReleaseId(str(row[5])),
-        relevance_release_id=RelevanceReleaseId(str(row[6])),
+        prompt_release_id=PromptReleaseId(str(row[1])),
+        relevance_release_id=RelevanceReleaseId(str(row[2])),
+    )
+    configuration = load_search_configuration_revision(
+        connection, configuration_revision_id
+    ).configuration
+    prompt_release, relevance_release = load_release_target(connection, target)
+    return (
+        configuration_revision_id,
+        configuration,
+        target,
+        cast(int, row[3]),
+        prompt_release,
+        relevance_release,
+    )
+
+
+def _admitted_from_row(
+    connection: Connection,
+    idempotency_key: str,
+    row: tuple[object, ...],
+) -> ExecutionAdmitted:
+    max_jobs = cast(int, row[0])
+    if str(row[2]) == "legacy":
+        return _legacy_admission(
+            connection,
+            idempotency_key=idempotency_key,
+            max_jobs=max_jobs,
+            budget_policy_version=cast(int, row[3]),
+            run_allowance_usd=Decimal(str(row[4])),
+        )
+    if str(row[2]) not in {"adopted", "pinned"}:
+        raise RuntimeError("Execution reservation has an unknown authority kind")
+    required_indexes = (5, 6, 7, 9, 10, 11)
+    if any(row[index] is None for index in required_indexes) or (
+        str(row[2]) == "pinned" and row[8] is None
+    ):
+        raise RuntimeError("Execution reservation has incomplete authority")
+    target = ReleaseTarget(
+        prompt_release_id=PromptReleaseId(str(row[6])),
+        relevance_release_id=RelevanceReleaseId(str(row[7])),
     )
     return ExecutionAdmitted(
         max_jobs=max_jobs,
-        configuration_revision_id=SearchConfigurationRevisionId(str(row[4])),
+        configuration_revision_id=SearchConfigurationRevisionId(str(row[5])),
         target=target,
-        release_generation=cast(int, row[7]),
-        budget_policy_version=cast(int, row[2]),
-        run_allowance_usd=Decimal(str(row[3])),
+        release_generation=None if row[8] is None else cast(int, row[8]),
+        budget_policy_version=cast(int, row[3]),
+        run_allowance_usd=Decimal(str(row[4])),
         estimate=ExecutionEstimate(
-            search_queries=cast(int, row[8]),
+            search_queries=cast(int, row[9]),
             jobs_per_run=max_jobs,
-            logical_model_calls_per_job=cast(int, row[9]),
-            maximum_provider_attempts=cast(int, row[10]),
+            logical_model_calls_per_job=cast(int, row[10]),
+            maximum_provider_attempts=cast(int, row[11]),
         ),
+    )
+
+
+def _legacy_admission(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    max_jobs: int,
+    budget_policy_version: int,
+    run_allowance_usd: Decimal,
+) -> ExecutionAdmitted:
+    run = connection.execute(
+        """
+        SELECT configuration_revision_id, prompt_release_id, relevance_release_id
+        FROM pipeline_runs
+        WHERE idempotency_key = %s AND kind = 'orchestration'
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if run is None:
+        configuration_revision_id, configuration, target, generation, prompt, relevance = (
+            _load_active_execution(connection)
+        )
+        authority_kind = "pinned"
+    else:
+        configuration_revision_id = SearchConfigurationRevisionId(str(run[0]))
+        configuration = load_search_configuration_revision(
+            connection, configuration_revision_id
+        ).configuration
+        target = ReleaseTarget(
+            prompt_release_id=PromptReleaseId(str(run[1])),
+            relevance_release_id=RelevanceReleaseId(str(run[2])),
+        )
+        prompt, relevance = load_release_target(connection, target)
+        generation = None
+        authority_kind = "adopted"
+    estimate = estimate_execution(
+        configuration,
+        prompt,
+        relevance.policy,
+        max_jobs=max_jobs,
+    )
+    changed = connection.execute(
+        """
+        UPDATE execution_budget_reservations
+        SET authority_kind = %s, configuration_revision_id = %s,
+            prompt_release_id = %s, relevance_release_id = %s,
+            release_generation = %s, search_queries = %s,
+            logical_model_calls_per_job = %s, maximum_provider_attempts = %s
+        WHERE idempotency_key = %s AND authority_kind = 'legacy'
+        """,
+        (
+            authority_kind,
+            configuration_revision_id,
+            target.prompt_release_id,
+            target.relevance_release_id,
+            generation,
+            estimate.search_queries,
+            estimate.logical_model_calls_per_job,
+            estimate.maximum_provider_attempts,
+            idempotency_key,
+        ),
+    ).rowcount
+    if changed != 1:
+        raise RuntimeError("Legacy execution authority could not be adopted")
+    return ExecutionAdmitted(
+        max_jobs=max_jobs,
+        configuration_revision_id=configuration_revision_id,
+        target=target,
+        release_generation=generation,
+        budget_policy_version=budget_policy_version,
+        run_allowance_usd=run_allowance_usd,
+        estimate=estimate,
     )
 
 

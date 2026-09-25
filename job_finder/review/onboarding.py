@@ -25,9 +25,6 @@ def postgres_onboarding_progress_service(
         command: ActivateConfigurationCommand,
     ) -> ActivateConfigurationResult:
         with connect() as connection, connection.transaction():
-            result = activate_search_configuration(connection, command)
-            if not isinstance(result, ConfigurationActivated):
-                return result
             row = connection.execute(
                 """
                 SELECT stage
@@ -39,6 +36,9 @@ def postgres_onboarding_progress_service(
             if row is None:
                 raise RuntimeError("Owner onboarding state is missing")
             stage = OnboardingStage(str(row[0]))
+            result = activate_search_configuration(connection, command)
+            if not isinstance(result, ConfigurationActivated):
+                return result
             if stage is OnboardingStage.PREFERENCES:
                 _ = connection.execute(
                     """

@@ -476,7 +476,7 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
     budget = postgres_budget_setup_service(lambda: _connection(authority_schema))
     budget_result = budget.save(
         0,
-        Decimal("3"),
+        Decimal("4"),
         Decimal("2"),
         10,
         "owner",
@@ -492,6 +492,48 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
             WHERE singleton_id = 1
             """
         )
+
+        _ = connection.execute(
+            """
+            INSERT INTO execution_budget_reservations (
+              idempotency_key, policy_version, period_start, reserved_usd,
+              status, max_jobs, authority_kind, created_at
+            ) VALUES (
+              'legacy-in-flight', 1, DATE '2026-09-01', 0.5,
+              'reserved', 3, 'legacy', %s
+            )
+            """,
+            (datetime(2026, 9, 22, tzinfo=UTC),),
+        )
+        legacy = admit_scheduled_execution(
+            connection,
+            idempotency_key="legacy-in-flight",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        )
+        replayed_legacy = admit_scheduled_execution(
+            connection,
+            idempotency_key="legacy-in-flight",
+            requested_at=datetime(2026, 9, 22, tzinfo=UTC),
+        )
+        legacy_row = connection.execute(
+            """
+            SELECT authority_kind, configuration_revision_id,
+                   prompt_release_id, relevance_release_id
+            FROM execution_budget_reservations
+            WHERE idempotency_key = 'legacy-in-flight'
+            """
+        ).fetchone()
+
+    assert isinstance(legacy, ExecutionAdmitted)
+    assert replayed_legacy == legacy
+    assert legacy.max_jobs == 3
+    assert legacy.estimate.jobs_per_run == 3
+    assert legacy_row == (
+        "pinned",
+        legacy.configuration_revision_id,
+        legacy.target.prompt_release_id,
+        legacy.target.relevance_release_id,
+    )
 
     barrier = Barrier(2)
 
@@ -513,15 +555,17 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
     with _connection(authority_schema) as connection:
         reservation_row = connection.execute(
             """
-            SELECT idempotency_key, configuration_revision_id, prompt_release_id,
+            SELECT idempotency_key, authority_kind, configuration_revision_id, prompt_release_id,
                    relevance_release_id, release_generation, search_queries,
                    logical_model_calls_per_job, maximum_provider_attempts
             FROM execution_budget_reservations
+            WHERE authority_kind = 'pinned'
             """
         ).fetchone()
         assert reservation_row is not None
         reservation_key = cast(str, reservation_row[0])
         assert reservation_row[1:] == (
+            "pinned",
             admitted.configuration_revision_id,
             admitted.target.prompt_release_id,
             admitted.target.relevance_release_id,
@@ -567,7 +611,7 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
         prompt_release = load_prompt_release(connection, active.target.prompt_release_id)
         candidate_relevance = store_relevance_release(
             connection,
-            build_relevance_release(build_jev_faithful_policy(prompt_release)),
+            build_relevance_release(build_gemini_policy(prompt_release)),
             created_at=now,
             created_by="contract",
         )
@@ -631,6 +675,8 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
             actor="owner",
             timestamp=now + timedelta(minutes=1),
         )
+        budget = postgres_budget_setup_service(lambda: _connection(authority_schema))
+        estimate_before_activation = budget.inspect(10).estimate
         source_artifact_identity = relevance_releases_module.source_artifact_identity
 
         def drifted_source_artifact_identity(
@@ -656,6 +702,7 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
                 )
         assert get_active_release_target(connection) == active
         activated = activate_release_target(connection, command)
+        estimate_after_activation = budget.inspect(10).estimate
         replayed = activate_release_target(connection, command)
         with monkeypatch.context() as patch:
             patch.setattr(
@@ -688,6 +735,8 @@ def test_approved_release_target_activation_is_exact_cas_and_replay_safe(
         assert activated.replayed is False
         assert activated.active.target == candidate_target
         assert activated.active.generation == active.generation + 1
+        assert estimate_before_activation.maximum_provider_attempts == 400
+        assert estimate_after_activation.maximum_provider_attempts == 640
         assert isinstance(replayed, ReleaseTargetActivated)
         assert replayed.replayed is True
         assert replayed.active == activated.active
