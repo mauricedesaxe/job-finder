@@ -337,6 +337,7 @@ EXPECTED_MIGRATIONS = (
     "0041_qualification_evidence.sql",
     "0042_qualification_prompt_compilations.sql",
     "0043_qualification_provider_attempts.sql",
+    "0044_qualification_promotion_authority.sql",
 )
 
 
@@ -606,6 +607,59 @@ def test_split_policy_state_seeds_without_changing_legacy_authority(
             _ = connection.execute(
                 "UPDATE active_acquisition_policy SET generation = generation + 1"
             )
+
+
+def test_composite_promotion_authority_starts_unactivated_and_is_immutable(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        assert connection.execute(
+            "SELECT target_id, generation, activated_at, activated_by FROM active_qualification_target WHERE singleton_id = 1"
+        ).fetchone() == (None, 0, None, None)
+        artifact, components, baseline = _store_default_qualification_target(connection, now)
+        alternate_input = components[0].model_copy(
+            update={"ats_sources": components[0].ats_sources[:-1]}
+        )
+        _ = store_component_release(connection, alternate_input, created_at=now, created_by="owner")
+        candidate = build_qualification_target(alternate_input, *components[1:])
+        _ = store_qualification_target(connection, candidate, created_at=now, created_by="owner")
+        assert artifact.id == baseline.artifact_id == candidate.artifact_id
+        values = (
+            "e" * 64,
+            "rejected-case",
+            qualification_target_id(baseline),
+            qualification_target_id(candidate),
+            "rejected",
+            "Missing evidence",
+            "owner",
+            now,
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                """INSERT INTO qualification_promotion_decisions (
+                  id, idempotency_key, baseline_target_id, candidate_target_id,
+                  decision, reason, actor, created_at
+                ) VALUES (%s, %s, %s, %s, 'approved', %s, %s, %s)""",
+                values[:4] + values[5:],
+            )
+        _ = connection.execute(
+            """INSERT INTO qualification_promotion_decisions (
+              id, idempotency_key, baseline_target_id, candidate_target_id,
+              decision, reason, actor, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            values,
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute(
+                "UPDATE qualification_promotion_decisions SET reason = 'changed'"
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _ = connection.execute("UPDATE active_qualification_target SET generation = 1")
+        assert connection.execute("SELECT count(*) FROM prompt_promotion_decisions").fetchone() == (
+            0,
+        )
 
 
 def _store_default_qualification_target(
