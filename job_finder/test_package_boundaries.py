@@ -15,7 +15,41 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/review/app.py", "starlette"),
     ("job_finder/review/configuration_editor.py", "fasthtml"),
     ("job_finder/review/configuration_editor.py", "starlette"),
-    ("job_finder/review/shell.py", "fasthtml"),
+    ("job_finder/web/app.py", "fasthtml"),
+    ("job_finder/web/app.py", "starlette"),
+    ("job_finder/web/security.py", "starlette"),
+    ("job_finder/web/shell.py", "fasthtml"),
+    ("job_finder/web/shell.py", "starlette"),
+}
+_WEB_PUBLIC_SYMBOLS = {
+    "app.py": frozenset({"ReadinessProbe", "RequestGuard", "create_web_app", "static_url"}),
+    "security.py": frozenset(
+        {
+            "SecurityHeadersMiddleware",
+            "authenticate_session",
+            "csrf_token",
+            "ensure_csrf_token",
+            "form_text",
+            "valid_csrf",
+            "verified_control_csrf_token",
+            "verified_csrf_token",
+        }
+    ),
+    "shell.py": frozenset(
+        {
+            "OperationsPage",
+            "ShellSection",
+            "absolute_time",
+            "document",
+            "operations_sidebar_page",
+            "operations_sub_sidebar",
+            "relative_time",
+            "sidebar",
+            "sidebar_page",
+            "state_response",
+            "timestamp",
+        }
+    ),
 }
 _BENCHMARK_PUBLIC_SYMBOLS = {
     "manifests.py": frozenset(
@@ -126,6 +160,7 @@ _PACKAGE_ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _PACKAGE_ROOT.parent
 _OLD_MANIFEST_MODULE = "job_finder.evaluation.manifests"
 _OLD_LANGFUSE_MODULE = "job_finder.evaluation.langfuse"
+_OLD_REVIEW_SHELL_MODULE = "job_finder.review.shell"
 
 
 def _parse(path: Path) -> ast.Module:
@@ -227,6 +262,30 @@ def test_framework_sdks_stay_in_adapter_modules() -> None:
             observed.update((relative_path, root) for root in roots & _FRAMEWORK_ROOTS)
 
     assert observed == _ALLOWED_FRAMEWORK_IMPORTS
+
+
+def test_web_modules_own_shared_http_adapters() -> None:
+    web_root = _PACKAGE_ROOT / "web"
+    assert (web_root / "__init__.py").read_text() == ""
+    assert not (_PACKAGE_ROOT / "review" / "shell.py").exists()
+    assert not (_PACKAGE_ROOT / "review" / "static").exists()
+
+    source_roots = (_PACKAGE_ROOT, _REPOSITORY_ROOT / "contracts", _REPOSITORY_ROOT / "scripts")
+    stale_imports = {
+        path.relative_to(_REPOSITORY_ROOT).as_posix()
+        for source_root in source_roots
+        for path in source_root.rglob("*.py")
+        if _OLD_REVIEW_SHELL_MODULE in _imported_modules(path)
+    }
+    assert not stale_imports
+
+    for filename, expected_symbols in _WEB_PUBLIC_SYMBOLS.items():
+        path = web_root / filename
+        assert _public_definitions(path) == expected_symbols
+        assert not any(
+            module == "job_finder.review" or module.startswith("job_finder.review.")
+            for module in _direct_imported_modules(path)
+        )
 
 
 def test_benchmark_modules_own_their_public_symbols() -> None:

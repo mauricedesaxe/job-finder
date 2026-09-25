@@ -11,6 +11,7 @@ from uuid import UUID
 import psycopg
 import pytest
 from pydantic import SecretStr
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -117,6 +118,7 @@ from job_finder.review.owner_access import (
     OwnerBootstrapped,
     OwnerBootstrapConflict,
 )
+from job_finder.web.security import SecurityHeadersMiddleware
 
 TODAY = date(2026, 9, 10)
 YESTERDAY = date(2026, 9, 9)
@@ -195,16 +197,13 @@ def test_http_route_manifest_stays_stable() -> None:
         [(method, path) for path in get_paths for method in ("GET", "HEAD")]
         + [("POST", path) for path in post_paths]
     )
-    assert all(isinstance(route, Route) and route.methods is not None for route in app.routes)
-    actual = sorted(
-        (method, route.path)
-        for route in app.routes
-        if isinstance(route, Route)
-        for method in route.methods or ()
-    )
+    routes = [route for route in app.routes if isinstance(route, Route)]
+    assert len(routes) == len(app.routes)
+    assert all(route.methods is not None for route in routes)
+    actual = sorted((method, route.path) for route in routes for method in route.methods or ())
 
     assert actual == expected
-    assert [(route.path, route.name) for route in app.routes] == [
+    assert [(route.path, route.name) for route in routes] == [
         ("/healthz", "create_review_app_healthz"),
         ("/readyz", "create_review_app_readyz"),
         ("/favicon.ico", "create_review_app_favicon"),
@@ -261,9 +260,9 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
     )
     client = TestClient(app, base_url="https://testserver")
 
-    assert [middleware.cls.__name__ for middleware in app.user_middleware] == [
-        "SecurityHeadersMiddleware",
-        "SessionMiddleware",
+    assert [middleware.cls for middleware in app.user_middleware] == [
+        SecurityHeadersMiddleware,
+        SessionMiddleware,
     ]
 
     health = client.get("/healthz")

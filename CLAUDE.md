@@ -60,7 +60,8 @@ Langfuse             ← retryable projections (never a decision input)
   - `benchmarks/` — immutable manifests, scoring, executions, comparisons, promotions.
   - `projections/` — projection outbox, Langfuse delivery, rebuild, and live smoke operations.
   - `pipeline/` — orchestration runs, claiming, leases.
-  - `review/` — FastHTML app, decision-time review queue, feedback events.
+  - `web/` — shared FastHTML infrastructure, security helpers, static assets, and document shell.
+  - `review/` — review policy, feature routes, decision-time review queue, feedback events.
   - `ats/` — Greenhouse/Lever/Ashby/Workable adapters.
   - `migrations/` — ordered SQL migrations applied by `job_finder.database`.
 - `contracts/` — tests that pin the PostgreSQL authority contract and Dagster
