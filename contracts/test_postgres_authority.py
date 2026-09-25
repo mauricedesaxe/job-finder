@@ -51,6 +51,12 @@ from job_finder.benchmarks.manifests import (
     preview_manifest,
 )
 from job_finder.benchmarks.promotions import record_prompt_promotion_decision
+from job_finder.benchmarks.qualification_activation import (
+    ActivateQualificationTargetCommand,
+    QualificationActivationError,
+    activate_qualification_target,
+    get_active_qualification_target,
+)
 from job_finder.benchmarks.qualification_promotions import (
     PromotionEvidenceSelection,
     preview_qualification_promotion,
@@ -818,6 +824,36 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                 idempotency_key="approved-composite-preview",
             )
             assert approved.decision == "approved"
+            initial = get_active_qualification_target(connection)
+            assert initial.target_id is None and initial.generation == 0
+            activation = ActivateQualificationTargetCommand(
+                idempotency_key="activate-composite-preview",
+                promotion_decision_id=approved.id,
+                expected_target_id=None,
+                expected_generation=0,
+                actor="owner",
+                timestamp=now,
+            )
+            activated = activate_qualification_target(connection, activation, artifact_path)
+            assert activated.outcome == "activated"
+            assert activated.observed == initial
+            assert activated.resulting_generation == 1
+            assert get_active_qualification_target(connection).target_id == candidate_id
+            assert activate_qualification_target(connection, activation, artifact_path).replayed
+            with pytest.raises(QualificationActivationError, match="another activation request"):
+                _ = activate_qualification_target(
+                    connection,
+                    activation.model_copy(update={"actor": "different"}),
+                    artifact_path,
+                )
+            stale = activate_qualification_target(
+                connection,
+                activation.model_copy(update={"idempotency_key": "stale-composite-preview"}),
+                artifact_path,
+            )
+            assert stale.outcome == "active_changed"
+            assert stale.observed.target_id == candidate_id
+            assert stale.resulting_generation == 1
             assert (
                 record_qualification_promotion_decision(
                     connection,
@@ -968,6 +1004,54 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                 idempotency_key="rejected-composite-preview",
             )
             assert rejected.decision == "rejected"
+            with pytest.raises(
+                QualificationActivationError, match="Approved qualification promotion"
+            ):
+                _ = activate_qualification_target(
+                    connection,
+                    activation.model_copy(
+                        update={
+                            "idempotency_key": "activate-rejected-composite-preview",
+                            "promotion_decision_id": rejected.id,
+                            "expected_target_id": candidate_id,
+                            "expected_generation": 1,
+                        }
+                    ),
+                    artifact_path,
+                )
+            forged_decision_id = "f" * 64
+            _ = connection.execute(
+                """
+                INSERT INTO qualification_promotion_decisions (
+                  id, idempotency_key, baseline_target_id, candidate_target_id,
+                  composition_evidence_id, decision, reason, actor, created_at
+                ) VALUES (%s, %s, %s, %s, %s, 'approved', %s, %s, %s)
+                """,
+                (
+                    forged_decision_id,
+                    "direct-sql-approved",
+                    candidate_id,
+                    relevance_candidate_id,
+                    synthetic_id,
+                    "Unverified evidence",
+                    "owner",
+                    now,
+                ),
+            )
+            with pytest.raises(QualificationActivationError, match="evidence is incomplete"):
+                _ = activate_qualification_target(
+                    connection,
+                    activation.model_copy(
+                        update={
+                            "idempotency_key": "activate-direct-sql-composite-preview",
+                            "promotion_decision_id": forged_decision_id,
+                            "expected_target_id": candidate_id,
+                            "expected_generation": 1,
+                        }
+                    ),
+                    artifact_path,
+                )
+            assert get_active_qualification_target(connection).target_id == candidate_id
 
 
 def _store_default_qualification_target(
