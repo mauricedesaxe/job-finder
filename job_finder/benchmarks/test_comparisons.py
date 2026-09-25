@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from job_finder.benchmarks.comparisons import compare_runs
+from job_finder.benchmarks.comparisons import compare_runs, promotion_eligibility_failures
 from job_finder.benchmarks.executions import EvaluationRun
 from job_finder.benchmarks.manifests import (
     EvaluationCaseInput,
@@ -12,7 +12,11 @@ from job_finder.benchmarks.manifests import (
     EvaluationManifestCase,
     ManifestPolicy,
 )
-from job_finder.benchmarks.scoring import EvaluationTrialResult, score_results
+from job_finder.benchmarks.scoring import (
+    EvaluationMetrics,
+    EvaluationTrialResult,
+    score_results,
+)
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -104,6 +108,113 @@ def test_a_candidate_under_the_absolute_threshold_can_still_regress_against_base
     assert comparison.eligibility_failures == (
         "Candidate regresses against baseline false positives",
     )
+
+
+def test_counts_a_trial_that_swaps_failure_kinds_as_changed_failure() -> None:
+    manifest = _manifest()
+    baseline_results = (
+        _result(0, 0, "rejected", "qualified", "false_positive"),
+        _result(0, 1, "rejected", "rejected", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(1, 0, "qualified", "qualified", None),
+        _result(2, 0, "qualified", "qualified", None),
+    )
+    candidate_results = (
+        _result(0, 0, "rejected", None, "operational"),
+        _result(0, 1, "rejected", "rejected", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(1, 0, "qualified", "qualified", None),
+        _result(2, 0, "qualified", "qualified", None),
+    )
+
+    comparison = compare_runs(
+        manifest,
+        _run("b" * 64, "c" * 64, manifest, baseline_results),
+        _run("d" * 64, "e" * 64, manifest, candidate_results),
+    )
+
+    assert comparison.cases[0].trials[0].transition == "changed_failure"
+    assert comparison.improvement_count == 0
+    assert comparison.regression_count == 0
+
+
+def _metrics(
+    *,
+    operational_failure_count: int = 0,
+    critical_false_positive_count: int = 0,
+    false_positive_rate: Decimal = Decimal(0),
+    false_negative_rate: Decimal = Decimal(0),
+) -> EvaluationMetrics:
+    return EvaluationMetrics(
+        result_count=0,
+        false_positive_count=0,
+        false_negative_count=0,
+        operational_failure_count=operational_failure_count,
+        critical_false_positive_count=critical_false_positive_count,
+        false_positive_rate=false_positive_rate,
+        false_negative_rate=false_negative_rate,
+    )
+
+
+@pytest.mark.parametrize(
+    ("baseline", "candidate", "expected"),
+    (
+        (
+            _metrics(operational_failure_count=1),
+            _metrics(),
+            ("Baseline has operational failures",),
+        ),
+        (
+            _metrics(),
+            _metrics(operational_failure_count=1),
+            ("Candidate has operational failures",),
+        ),
+        (
+            _metrics(),
+            _metrics(critical_false_positive_count=1),
+            ("Candidate qualified a critical expected-negative trial",),
+        ),
+        (
+            _metrics(false_positive_rate=Decimal("0.5")),
+            _metrics(false_positive_rate=Decimal("0.5")),
+            ("Candidate exceeds the false-positive threshold",),
+        ),
+        (
+            _metrics(false_negative_rate=Decimal("0.5")),
+            _metrics(false_negative_rate=Decimal("0.5")),
+            ("Candidate exceeds the false-negative threshold",),
+        ),
+        (
+            _metrics(),
+            _metrics(false_positive_rate=Decimal("0.04")),
+            ("Candidate regresses against baseline false positives",),
+        ),
+        (
+            _metrics(),
+            _metrics(false_negative_rate=Decimal("0.04")),
+            ("Candidate regresses against baseline false negatives",),
+        ),
+        (
+            _metrics(),
+            _metrics(),
+            (),
+        ),
+    ),
+    ids=(
+        "baseline-operational",
+        "candidate-operational",
+        "critical-false-positive",
+        "absolute-false-positive-threshold",
+        "absolute-false-negative-threshold",
+        "false-positive-regression",
+        "false-negative-regression",
+        "passes",
+    ),
+)
+def test_promotion_eligibility_failures_reports_each_branch_alone(
+    baseline: EvaluationMetrics, candidate: EvaluationMetrics, expected: tuple[str, ...]
+) -> None:
+    assert promotion_eligibility_failures(ManifestPolicy(), baseline, candidate) == expected
 
 
 def _manifest() -> EvaluationManifest:

@@ -44,6 +44,34 @@ def test_rejects_results_that_do_not_cover_each_trial_once() -> None:
         score_results(manifest, incomplete)
 
 
+def test_rejects_results_that_duplicate_a_trial() -> None:
+    manifest = _manifest()
+    duplicated = (
+        _result(0, 0, "rejected", "rejected", None),
+        _result(0, 0, "rejected", "rejected", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(1, 0, "qualified", "qualified", None),
+        _result(2, 0, "qualified", "qualified", None),
+    )
+
+    with pytest.raises(ValueError, match="exactly once"):
+        score_results(manifest, duplicated)
+
+
+def test_rejects_results_whose_expectations_diverge_from_the_manifest() -> None:
+    manifest = _manifest()
+    divergent = (
+        _result(0, 0, "rejected", "rejected", None),
+        _result(0, 1, "rejected", "rejected", None),
+        _result(0, 2, "rejected", "rejected", None),
+        _result(1, 0, "rejected", "rejected", None),
+        _result(2, 0, "qualified", "qualified", None),
+    )
+
+    with pytest.raises(ValueError, match="expectations must match"):
+        score_results(manifest, divergent)
+
+
 def _manifest() -> EvaluationManifest:
     return EvaluationManifest(
         id="a" * 64,
