@@ -9,14 +9,31 @@ listings, and OpenRouter to evaluate them.
 
 [Watch the Job Finder demo on YouTube](https://youtu.be/bO7vzA0xbWg).
 
-This README has three setup paths:
+This README has four setup paths:
 
+- [Deploy on Railway for yourself](#deploy-on-railway-for-yourself) if you want
+  Railway to create the connected services for you.
 - [Deploy a hosted instance for an owner](#deploy-a-hosted-instance-for-an-owner)
   if you are onboarding someone yourself.
 - [Run Job Finder for yourself](#run-job-finder-for-yourself) if you want job
   results as soon as possible.
 - [Contribute to Job Finder](#contribute-to-job-finder) if you want a local
   development environment.
+
+## Deploy on Railway for yourself
+
+[Deploy Job Finder on Railway](https://railway.com/deploy/job-finder). The
+template creates the review app, PostgreSQL, and two private Dagster services.
+Wait for all four services to become healthy, then open the public domain on
+`review`. The first visit redirects to `/setup`.
+
+In Railway, open the `review` service's Variables tab and copy the generated
+`JOB_FINDER_BOOTSTRAP_TOKEN`. Use it on `/setup` to create your owner account.
+Enter your Jina and OpenRouter API keys, job preferences, and spend budget in
+the app, then run the bounded test search. Remove the bootstrap token from the
+Railway service after the owner account exists. See the
+[template setup guide](docs/railway-template.md) for the service layout and
+first-run check.
 
 ## Deploy a hosted instance for an owner
 
