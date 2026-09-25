@@ -720,6 +720,19 @@ class WorkAttemptSummary:
     error_summary: str | None
 
 
+JobVerdictOutcome = Literal[
+    "qualified", "rejected", "duplicate", "company_blocked", "company_applied"
+]
+
+
+@dataclass(frozen=True)
+class JobVerdict:
+    outcome: JobVerdictOutcome
+    reason: str
+    matched_profile: str | None
+    decided_at: datetime
+
+
 @dataclass(frozen=True)
 class WorkItemDetail:
     job_id: UUID
@@ -735,6 +748,7 @@ class WorkItemDetail:
     dismissed_at: datetime | None
     dismissed_by: str | None
     attempts: tuple[WorkAttemptSummary, ...]
+    verdict: JobVerdict | None = None
 
 
 def _unavailable_work_detail(_job_id: UUID) -> WorkItemDetail:
@@ -755,6 +769,38 @@ def load_work_item_detail(connection: Connection, job_id: UUID) -> WorkItemDetai
     ).fetchone()
     if row is None:
         raise WorkItemNotFound("Work item does not exist")
+
+    decision = connection.execute(
+        """
+        SELECT decision.outcome, decision.reason, decision.matched_profile,
+               decision.created_at
+        FROM evaluation_decisions decision
+        JOIN job_snapshots snapshot ON snapshot.id = decision.snapshot_id
+        WHERE snapshot.job_id = %s
+        ORDER BY decision.created_at DESC, decision.id DESC
+        LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    verdict = None
+    if decision is not None:
+        outcome = str(decision[0])
+        if outcome not in {
+            "qualified",
+            "rejected",
+            "duplicate",
+            "company_blocked",
+            "company_applied",
+        }:
+            raise RuntimeError("Job verdict outcome is invalid")
+        if not isinstance(decision[1], str) or not isinstance(decision[3], datetime):
+            raise RuntimeError("Job verdict is incomplete")
+        verdict = JobVerdict(
+            outcome=cast(JobVerdictOutcome, outcome),
+            reason=decision[1],
+            matched_profile=cast(str | None, decision[2]),
+            decided_at=decision[3],
+        )
 
     state = str(row[0])
     if state not in {"pending", "leased", "failed", "completed", "terminal_error"}:
@@ -803,6 +849,7 @@ def load_work_item_detail(connection: Connection, job_id: UUID) -> WorkItemDetai
         dismissed_at=cast(datetime | None, row[10]) if dismissal_active else None,
         dismissed_by=str(row[9]) if dismissal_active and row[9] is not None else None,
         attempts=attempts,
+        verdict=verdict,
     )
 
 

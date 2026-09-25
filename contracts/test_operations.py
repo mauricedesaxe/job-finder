@@ -1915,11 +1915,57 @@ def test_work_item_detail_reads_state_dismissal_and_attempt_history(
         assert detail.retry_at == now + timedelta(minutes=10)
         assert detail.dismissed is False
         assert detail.dismissed_at is None
+        assert detail.verdict is None
         assert len(detail.attempts) == 1
         attempt = detail.attempts[0]
         assert attempt.operation_key == "evaluation"
         assert attempt.run_id == run_id
         assert attempt.model_calls == 0
+
+        for index, (outcome, profile, reason) in enumerate(
+            (
+                ("qualified", "Backend engineer", "Matches the required profile."),
+                ("company_blocked", None, "Company is blocked by policy."),
+            )
+        ):
+            snapshot_id = f"{index + 1:064x}"
+            connection.execute(
+                """
+                INSERT INTO job_snapshots (
+                  id, job_id, content_digest, title, company, normalized_company,
+                  normalized_title, source, raw_url, description, location,
+                  keywords, observed_at
+                ) VALUES (%s, %s, %s, 'Backend engineer', 'Acme', 'acme',
+                  'backend engineer', 'test', 'https://example.com/work-detail',
+                  'Build services', 'Remote', '[]'::jsonb, %s)
+                """,
+                (snapshot_id, job_id, f"{index + 10:064x}", now),
+            )
+            connection.execute(
+                """
+                INSERT INTO evaluation_decisions (
+                  id, snapshot_id, pipeline_run_id, prompt_release_id,
+                  policy_version, outcome, matched_profile, reason, created_at
+                ) VALUES (%s, %s, %s, %s, 'work-detail-contract', %s, %s, %s, %s)
+                """,
+                (
+                    f"{index + 20:064x}",
+                    snapshot_id,
+                    run_id,
+                    release.id,
+                    outcome,
+                    profile,
+                    reason,
+                    now - timedelta(minutes=2 - index),
+                ),
+            )
+
+        latest = load_work_item_detail(connection, job_id)
+        assert latest.verdict is not None
+        assert latest.verdict.outcome == "company_blocked"
+        assert latest.verdict.reason == "Company is blocked by policy."
+        assert latest.verdict.matched_profile is None
+        assert latest.verdict.decided_at == now - timedelta(minutes=1)
 
         with pytest.raises(WorkItemNotFound):
             load_work_item_detail(connection, uuid4())
