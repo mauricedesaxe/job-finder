@@ -8,6 +8,14 @@ from typing import ClassVar
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+def _split_execution_environment() -> tuple[bool, Path | None]:
+    enabled = os.environ.get("JOB_FINDER_ENABLE_SPLIT_EXECUTION") == "true"
+    artifact_path = os.environ.get("JOB_FINDER_IMPLEMENTATION_ARTIFACT")
+    if enabled and not artifact_path:
+        raise ValueError("Split execution requires JOB_FINDER_IMPLEMENTATION_ARTIFACT")
+    return enabled, None if artifact_path is None else Path(artifact_path)
+
+
 class DatabaseSettings(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
@@ -26,12 +34,14 @@ class ReviewAppSettings(BaseModel):
     credential_encryption_key: SecretStr | None = None
     session_secret: str = Field(min_length=32)
     cookie_secure: bool = True
+    split_execution_artifact_path: Path | None = None
 
     @classmethod
     def from_environment(cls) -> ReviewAppSettings:
         legacy_password = os.environ.get("JOB_FINDER_REVIEW_PASSWORD") or None
         bootstrap_token = os.environ.get("JOB_FINDER_BOOTSTRAP_TOKEN") or None
         credential_encryption_key = os.environ.get("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY") or None
+        split_enabled, artifact_path = _split_execution_environment()
         return cls.model_validate(
             {
                 "legacy_password": legacy_password,
@@ -40,6 +50,7 @@ class ReviewAppSettings(BaseModel):
                 "session_secret": os.environ.get("JOB_FINDER_REVIEW_SESSION_SECRET"),
                 "cookie_secure": os.environ.get("JOB_FINDER_REVIEW_COOKIE_SECURE", "true")
                 == "true",
+                "split_execution_artifact_path": artifact_path if split_enabled else None,
             }
         )
 
@@ -185,10 +196,7 @@ class OrchestrationSettings(BaseModel):
 
     @classmethod
     def from_environment(cls) -> OrchestrationSettings:
-        split_enabled = os.environ.get("JOB_FINDER_ENABLE_SPLIT_EXECUTION") == "true"
-        artifact_path = os.environ.get("JOB_FINDER_IMPLEMENTATION_ARTIFACT")
-        if split_enabled and not artifact_path:
-            raise ValueError("Split execution requires JOB_FINDER_IMPLEMENTATION_ARTIFACT")
+        split_enabled, artifact_path = _split_execution_environment()
         return cls.model_validate(
             {
                 "postgres_dsn": os.environ.get("JOB_FINDER_POSTGRES_DSN"),

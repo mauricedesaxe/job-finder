@@ -41,6 +41,7 @@ from job_finder.jobs.decision_pipeline import job_id_for_url
 from job_finder.onboarding_test_search import (
     CreateOnboardingTestSearch,
     OnboardingTestSearchAccepted,
+    OnboardingTestSearchRequest,
     OnboardingProviderAttemptLimit,
     OnboardingProviderOutcomeUnknown,
     claim_next_onboarding_test_search,
@@ -186,6 +187,7 @@ def test_onboarding_work_cannot_enter_the_production_claim_queue(authority_schem
         )
         assert isinstance(created, OnboardingTestSearchAccepted)
         request = created.request
+        assert isinstance(request, OnboardingTestSearchRequest)
         onboarding_run = prepare_onboarding_run(
             connection,
             run_id=request.run_id,
@@ -407,6 +409,7 @@ def test_worker_processes_only_its_scoped_job(authority_schema: str) -> None:
             CreateOnboardingTestSearch(idempotency_key="owner-setup", actor="owner", timestamp=now),
         )
         assert isinstance(created, OnboardingTestSearchAccepted)
+        assert isinstance(created.request, OnboardingTestSearchRequest)
         production_run = prepare_orchestration_run(
             connection,
             idempotency_key="dagster:production-backlog",
@@ -753,6 +756,7 @@ def test_worker_recovers_without_repeating_a_reserved_search_query(
         )
         assert isinstance(created, OnboardingTestSearchAccepted)
         request = created.request
+        assert isinstance(request, OnboardingTestSearchRequest)
         first_owner = uuid4()
         claimed = claim_next_onboarding_test_search(
             connection,
@@ -823,6 +827,7 @@ def test_query_registration_obeys_job_and_url_limits(
         )
         assert isinstance(created, OnboardingTestSearchAccepted)
         request = created.request
+        assert isinstance(request, OnboardingTestSearchRequest)
         claimed = claim_next_onboarding_test_search(
             connection, owner_token=owner_token, claimed_at=now, lease_for=timedelta(minutes=5)
         )
@@ -898,6 +903,7 @@ def test_replay_keeps_pinned_provenance_after_active_config_changes(
         assert isinstance(created, OnboardingTestSearchAccepted)
         assert created.replayed is False
         original = created.request
+        assert isinstance(original, OnboardingTestSearchRequest)
         assert original.limits.max_queries == 128
         assert original.limits.max_urls == 40
         assert original.limits.max_jobs == 10
@@ -924,6 +930,7 @@ def test_replay_keeps_pinned_provenance_after_active_config_changes(
         replayed = create_onboarding_test_search(connection, command)
 
     assert isinstance(replayed, OnboardingTestSearchAccepted)
+    assert isinstance(replayed.request, OnboardingTestSearchRequest)
     assert replayed.replayed is True
     assert replayed.request.run_id == original.run_id
     assert replayed.request.configuration_revision_id == original.configuration_revision_id
@@ -991,6 +998,7 @@ def test_request_uses_acquisition_queries_and_release_target_model_bounds(
             ),
         )
         assert isinstance(created, OnboardingTestSearchAccepted)
+        assert isinstance(created.request, OnboardingTestSearchRequest)
         reservation = connection.execute(
             """
             SELECT configuration_revision_id, prompt_release_id, relevance_release_id,

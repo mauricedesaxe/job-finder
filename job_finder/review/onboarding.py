@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
 from job_finder.configuration_service import (
@@ -17,7 +18,7 @@ from job_finder.onboarding_test_search import (
     CreateOnboardingTestSearch,
     CreateOnboardingTestSearchResult,
     OnboardingTestSearchAccepted,
-    OnboardingTestSearchRequest,
+    OnboardingRequest,
     create_onboarding_test_search,
     load_onboarding_test_search,
 )
@@ -38,7 +39,7 @@ class OnboardingSearchJob:
 
 @dataclass(frozen=True)
 class OnboardingSearchProgress:
-    request: OnboardingTestSearchRequest | None
+    request: OnboardingRequest | None
     queries_completed: int = 0
     urls_checked: int = 0
     jobs_found: int = 0
@@ -51,7 +52,9 @@ class OnboardingSearchService:
     launch: Callable[[str, datetime], CreateOnboardingTestSearchResult]
 
 
-def postgres_test_search_service(connect: ConnectionFactory) -> OnboardingSearchService:
+def postgres_test_search_service(
+    connect: ConnectionFactory, *, artifact_path: Path | None = None
+) -> OnboardingSearchService:
     def inspect() -> OnboardingSearchProgress:
         with connect() as connection:
             row = connection.execute(
@@ -130,6 +133,7 @@ def postgres_test_search_service(connect: ConnectionFactory) -> OnboardingSearch
                     actor=actor,
                     timestamp=timestamp,
                 ),
+                artifact_path=artifact_path,
             )
 
     return OnboardingSearchService(inspect=inspect, launch=launch)

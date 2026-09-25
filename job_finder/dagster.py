@@ -237,6 +237,7 @@ def onboarding_test_search_cycle(
             retry_after=timedelta(seconds=settings.work_retry_seconds),
             enable_ats_enrichment=settings.enable_ats_enrichment,
             fetch_rates=lambda: _fetch_rates(datetime.now(UTC)),
+            artifact_path=settings.implementation_artifact_path,
         )
     metadata: dict[str, object] = {
         "state": result.state,

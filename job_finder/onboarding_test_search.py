@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, ClassVar, Literal, TypeAlias, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
+from job_finder.acquisition_policy import AcquisitionPolicyRevisionId
 from job_finder.evaluation.models import PromptReleaseId, RelevanceReleaseId
+from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.execution_budget import (
     ExecutionAdmitted,
     ExecutionBlocked,
     ExecutionEstimate,
+    SplitExecutionAdmitted,
     admit_onboarding_test_execution,
     settle_execution_budget,
 )
@@ -62,16 +66,10 @@ class CreateOnboardingTestSearch(OnboardingTestSearchModel):
     timestamp: datetime
 
 
-class OnboardingTestSearchRequest(OnboardingTestSearchModel):
+class _RequestFields(OnboardingTestSearchModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     run_id: UUID
     state: Literal["pending", "leased", "completed", "failed"]
-    configuration_revision_id: Annotated[
-        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
-    ]
-    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
-    relevance_release_id: Annotated[RelevanceReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
-    release_generation: int = Field(ge=0)
     budget_policy_version: int = Field(ge=1)
     budget_reservation_key: str = Field(min_length=1)
     limits: OnboardingTestSearchLimits
@@ -86,10 +84,33 @@ class OnboardingTestSearchRequest(OnboardingTestSearchModel):
     completed_at: datetime | None
 
 
+class OnboardingTestSearchRequest(_RequestFields):
+    execution_authority_kind: Literal["legacy"] = "legacy"
+    configuration_revision_id: Annotated[
+        SearchConfigurationRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    relevance_release_id: Annotated[RelevanceReleaseId, Field(pattern=r"^[0-9a-f]{64}$")]
+    release_generation: int = Field(ge=0)
+
+
+class SplitOnboardingTestSearchRequest(_RequestFields):
+    execution_authority_kind: Literal["split"] = "split"
+    acquisition_policy_revision_id: Annotated[
+        AcquisitionPolicyRevisionId, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    qualification_target_id: Annotated[QualificationTargetId, Field(pattern=r"^[0-9a-f]{64}$")]
+    acquisition_generation: int = Field(ge=0)
+    qualification_generation: int = Field(ge=0)
+
+
+OnboardingRequest: TypeAlias = OnboardingTestSearchRequest | SplitOnboardingTestSearchRequest
+
+
 class OnboardingTestSearchAccepted(OnboardingTestSearchModel):
     kind: Literal["accepted"] = "accepted"
     replayed: bool
-    request: OnboardingTestSearchRequest
+    request: OnboardingRequest
 
 
 CreateOnboardingTestSearchResult: TypeAlias = OnboardingTestSearchAccepted | ExecutionBlocked
@@ -120,7 +141,10 @@ def onboarding_test_search_reservation_key(idempotency_key: str) -> str:
 
 
 def create_onboarding_test_search(
-    connection: Connection, command: CreateOnboardingTestSearch
+    connection: Connection,
+    command: CreateOnboardingTestSearch,
+    *,
+    artifact_path: Path | None = None,
 ) -> CreateOnboardingTestSearchResult:
     _require_autocommit(connection)
     with connection.transaction():
@@ -133,16 +157,37 @@ def create_onboarding_test_search(
             return OnboardingTestSearchAccepted(replayed=True, request=existing)
         reservation_key = onboarding_test_search_reservation_key(command.idempotency_key)
         admission = admit_onboarding_test_execution(
-            connection, idempotency_key=reservation_key, requested_at=command.timestamp
+            connection,
+            idempotency_key=reservation_key,
+            requested_at=command.timestamp,
+            artifact_path=artifact_path,
         )
-        if not isinstance(admission, ExecutionAdmitted):
+        if isinstance(admission, ExecutionBlocked):
             return admission
         limits = OnboardingTestSearchLimits.from_estimate(
             admission.estimate, admission.run_allowance_usd
         )
         run_id = onboarding_test_search_run_id(command.idempotency_key)
-        _ = connection.execute(
-            """
+        if isinstance(admission, SplitExecutionAdmitted):
+            _insert_split_request(connection, command, reservation_key, run_id, admission, limits)
+        else:
+            _insert_legacy_request(connection, command, reservation_key, run_id, admission, limits)
+        stored = _load_request(connection, command.idempotency_key)
+        if stored is None:
+            raise RuntimeError("Created onboarding test search request is missing")
+        return OnboardingTestSearchAccepted(replayed=False, request=stored)
+
+
+def _insert_legacy_request(
+    connection: Connection,
+    command: CreateOnboardingTestSearch,
+    reservation_key: str,
+    run_id: UUID,
+    admission: ExecutionAdmitted,
+    limits: OnboardingTestSearchLimits,
+) -> None:
+    _ = connection.execute(
+        """
             INSERT INTO onboarding_test_search_requests (
               idempotency_key, run_id, state, configuration_revision_id,
               prompt_release_id, relevance_release_id, release_generation,
@@ -153,29 +198,68 @@ def create_onboarding_test_search(
               %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s
             )
             """,
-            (
-                command.idempotency_key,
-                run_id,
-                admission.configuration_revision_id,
-                admission.target.prompt_release_id,
-                admission.target.relevance_release_id,
-                admission.release_generation,
-                admission.budget_policy_version,
-                reservation_key,
-                limits.max_queries,
-                limits.max_urls,
-                admission.max_jobs,
-                limits.max_work_attempts,
-                limits.max_provider_attempts,
-                limits.run_allowance_usd,
-                command.timestamp,
-                command.timestamp,
-            ),
+        (
+            command.idempotency_key,
+            run_id,
+            admission.configuration_revision_id,
+            admission.target.prompt_release_id,
+            admission.target.relevance_release_id,
+            admission.release_generation,
+            admission.budget_policy_version,
+            reservation_key,
+            limits.max_queries,
+            limits.max_urls,
+            admission.max_jobs,
+            limits.max_work_attempts,
+            limits.max_provider_attempts,
+            limits.run_allowance_usd,
+            command.timestamp,
+            command.timestamp,
+        ),
+    )
+
+
+def _insert_split_request(
+    connection: Connection,
+    command: CreateOnboardingTestSearch,
+    reservation_key: str,
+    run_id: UUID,
+    admission: SplitExecutionAdmitted,
+    limits: OnboardingTestSearchLimits,
+) -> None:
+    _ = connection.execute(
+        """
+        INSERT INTO onboarding_test_search_requests (
+          idempotency_key, run_id, state, execution_authority_kind,
+          acquisition_policy_revision_id, qualification_target_id,
+          acquisition_generation, qualification_generation,
+          budget_policy_version, budget_reservation_key, max_queries, max_urls,
+          max_jobs, max_work_attempts, max_provider_attempts, run_allowance_usd,
+          attempt_count, created_at, updated_at
+        ) VALUES (
+          %s, %s, 'pending', 'split', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, 0, %s, %s
         )
-        stored = _load_request(connection, command.idempotency_key)
-        if stored is None:
-            raise RuntimeError("Created onboarding test search request is missing")
-        return OnboardingTestSearchAccepted(replayed=False, request=stored)
+        """,
+        (
+            command.idempotency_key,
+            run_id,
+            admission.acquisition_policy_revision_id,
+            admission.qualification_target_id,
+            admission.acquisition_generation,
+            admission.qualification_generation,
+            admission.budget_policy_version,
+            reservation_key,
+            limits.max_queries,
+            limits.max_urls,
+            admission.max_jobs,
+            limits.max_work_attempts,
+            limits.max_provider_attempts,
+            limits.run_allowance_usd,
+            command.timestamp,
+            command.timestamp,
+        ),
+    )
 
 
 def claim_next_onboarding_test_search(
@@ -184,7 +268,7 @@ def claim_next_onboarding_test_search(
     owner_token: UUID,
     claimed_at: datetime,
     lease_for: timedelta,
-) -> OnboardingTestSearchRequest | None:
+) -> OnboardingRequest | None:
     _require_autocommit(connection)
     if lease_for <= timedelta(0):
         raise ValueError("Onboarding test search lease must be positive")
@@ -264,7 +348,7 @@ def complete_onboarding_test_search(
     run_id: UUID,
     owner_token: UUID,
     completed_at: datetime,
-) -> OnboardingTestSearchRequest | None:
+) -> OnboardingRequest | None:
     return _finish_onboarding_test_search(
         connection,
         run_id=run_id,
@@ -284,7 +368,7 @@ def fail_onboarding_test_search(
     completed_at: datetime,
     error_code: str,
     error_reason: str,
-) -> OnboardingTestSearchRequest | None:
+) -> OnboardingRequest | None:
     return _finish_onboarding_test_search(
         connection,
         run_id=run_id,
@@ -298,7 +382,7 @@ def fail_onboarding_test_search(
 
 def load_onboarding_test_search(
     connection: Connection, idempotency_key: str
-) -> OnboardingTestSearchRequest | None:
+) -> OnboardingRequest | None:
     return _load_request(connection, idempotency_key)
 
 
@@ -329,7 +413,7 @@ def renew_onboarding_test_search_lease(
 def reserve_onboarding_search_query(
     connection: Connection,
     *,
-    request: OnboardingTestSearchRequest,
+    request: OnboardingRequest,
     owner_token: UUID,
     ordinal: int,
     query: SearchQuery,
@@ -377,7 +461,7 @@ def reserve_onboarding_search_query(
 def finish_onboarding_search_query(
     connection: Connection,
     *,
-    request: OnboardingTestSearchRequest,
+    request: OnboardingRequest,
     owner_token: UUID,
     ordinal: int,
     query: SearchQuery,
@@ -577,7 +661,7 @@ def _finish_onboarding_test_search(
     state: Literal["completed", "failed"],
     error_code: str | None,
     error_reason: str | None,
-) -> OnboardingTestSearchRequest | None:
+) -> OnboardingRequest | None:
     _require_autocommit(connection)
     with connection.transaction():
         row = connection.execute(
@@ -613,9 +697,7 @@ def _finish_onboarding_test_search(
     return stored
 
 
-def _load_request(
-    connection: Connection, idempotency_key: str
-) -> OnboardingTestSearchRequest | None:
+def _load_request(connection: Connection, idempotency_key: str) -> OnboardingRequest | None:
     row = connection.execute(
         """
         SELECT idempotency_key, run_id, state, configuration_revision_id,
@@ -623,7 +705,9 @@ def _load_request(
                budget_policy_version, budget_reservation_key, max_queries, max_urls,
                max_jobs, max_work_attempts, max_provider_attempts, run_allowance_usd,
                attempt_count, owner_token, lease_expires_at, error_code, error_reason,
-               created_at, updated_at, completed_at, provider_attempt_count
+               created_at, updated_at, completed_at, provider_attempt_count,
+               execution_authority_kind, acquisition_policy_revision_id,
+               qualification_target_id, acquisition_generation, qualification_generation
         FROM onboarding_test_search_requests
         WHERE idempotency_key = %s
         """,
@@ -631,17 +715,13 @@ def _load_request(
     ).fetchone()
     if row is None:
         return None
-    return OnboardingTestSearchRequest(
-        idempotency_key=str(row[0]),
-        run_id=cast(UUID, row[1]),
-        state=cast(Literal["pending", "leased", "completed", "failed"], str(row[2])),
-        configuration_revision_id=SearchConfigurationRevisionId(str(row[3])),
-        prompt_release_id=PromptReleaseId(str(row[4])),
-        relevance_release_id=RelevanceReleaseId(str(row[5])),
-        release_generation=cast(int, row[6]),
-        budget_policy_version=cast(int, row[7]),
-        budget_reservation_key=str(row[8]),
-        limits=OnboardingTestSearchLimits(
+    common: dict[str, object] = {
+        "idempotency_key": str(row[0]),
+        "run_id": row[1],
+        "state": str(row[2]),
+        "budget_policy_version": row[7],
+        "budget_reservation_key": str(row[8]),
+        "limits": OnboardingTestSearchLimits(
             max_queries=cast(int, row[9]),
             max_urls=cast(int, row[10]),
             max_jobs=cast(int, row[11]),
@@ -649,15 +729,36 @@ def _load_request(
             max_provider_attempts=cast(int, row[13]),
             run_allowance_usd=Decimal(str(row[14])),
         ),
-        attempt_count=cast(int, row[15]),
-        provider_attempt_count=cast(int, row[23]),
-        owner_token=cast(UUID | None, row[16]),
-        lease_expires_at=cast(datetime | None, row[17]),
-        error_code=None if row[18] is None else str(row[18]),
-        error_reason=None if row[19] is None else str(row[19]),
-        created_at=cast(datetime, row[20]),
-        updated_at=cast(datetime, row[21]),
-        completed_at=cast(datetime | None, row[22]),
+        "attempt_count": row[15],
+        "provider_attempt_count": row[23],
+        "owner_token": row[16],
+        "lease_expires_at": row[17],
+        "error_code": row[18],
+        "error_reason": row[19],
+        "created_at": row[20],
+        "updated_at": row[21],
+        "completed_at": row[22],
+    }
+    if str(row[24]) == "split":
+        return SplitOnboardingTestSearchRequest.model_validate(
+            {
+                **common,
+                "acquisition_policy_revision_id": row[25],
+                "qualification_target_id": row[26],
+                "acquisition_generation": row[27],
+                "qualification_generation": row[28],
+            }
+        )
+    if str(row[24]) != "legacy":
+        raise RuntimeError("Onboarding request has unknown execution authority")
+    return OnboardingTestSearchRequest.model_validate(
+        {
+            **common,
+            "configuration_revision_id": row[3],
+            "prompt_release_id": row[4],
+            "relevance_release_id": row[5],
+            "release_generation": row[6],
+        }
     )
 
 

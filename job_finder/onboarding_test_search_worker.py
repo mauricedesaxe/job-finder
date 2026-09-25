@@ -5,15 +5,20 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Callable, Literal
 from uuid import UUID
 
 import requests
 
+from job_finder.acquisition_policy_service import load_acquisition_policy_revision
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import JinaUnavailable
 from job_finder.evaluation.jev import JevHttpResponse, send_system_one
 from job_finder.evaluation.models import ReleaseTarget
+from job_finder.evaluation.qualification_prompt_compilations import (
+    load_compiled_qualification_target,
+)
 from job_finder.evaluation.openrouter import (
     RETRYABLE_GENERATION_HTTP_STATUSES,
     RETRYABLE_HTTP_STATUSES,
@@ -23,7 +28,8 @@ from job_finder.evaluation.openrouter import (
 )
 from job_finder.execution_budget import settle_execution_budget
 from job_finder.onboarding_test_search import (
-    OnboardingTestSearchRequest,
+    OnboardingRequest,
+    SplitOnboardingTestSearchRequest,
     OnboardingProviderAttemptLimit,
     OnboardingProviderOutcomeUnknown,
     claim_next_onboarding_test_search,
@@ -42,6 +48,7 @@ from job_finder.pipeline.runs import (
     complete_orchestration_run,
     fail_orchestration_run,
     prepare_onboarding_run,
+    prepare_split_onboarding_run,
 )
 from job_finder.search_configuration import (
     build_search_queries,
@@ -80,6 +87,7 @@ def execute_next_onboarding_test_search(
     retry_after: timedelta,
     enable_ats_enrichment: bool,
     fetch_rates: RateSnapshotFactory,
+    artifact_path: Path | None = None,
     now: Now = lambda: datetime.now(UTC),
 ) -> OnboardingSearchWorkerResult:
     request = claim_next_onboarding_test_search(
@@ -87,27 +95,48 @@ def execute_next_onboarding_test_search(
     )
     if request is None:
         return OnboardingSearchWorkerResult(request_key=None, state="idle")
-    run = prepare_onboarding_run(
-        connection,
-        run_id=request.run_id,
-        request_key=request.idempotency_key,
-        implementation_ref=implementation_ref,
-        configuration_revision_id=request.configuration_revision_id,
-        target=ReleaseTarget(
-            prompt_release_id=request.prompt_release_id,
-            relevance_release_id=request.relevance_release_id,
-        ),
-        started_at=now(),
-        fetch_rates=fetch_rates,
-    )
+    if isinstance(request, SplitOnboardingTestSearchRequest):
+        if artifact_path is None:
+            raise RuntimeError("Split onboarding request requires an implementation artifact")
+        _ = load_compiled_qualification_target(
+            connection, request.qualification_target_id, artifact_path
+        )
+        run = prepare_split_onboarding_run(
+            connection,
+            run_id=request.run_id,
+            request_key=request.idempotency_key,
+            implementation_ref=implementation_ref,
+            acquisition_policy_revision_id=request.acquisition_policy_revision_id,
+            qualification_target_id=request.qualification_target_id,
+            artifact_path=artifact_path,
+            started_at=now(),
+            fetch_rates=fetch_rates,
+        )
+        policy = load_acquisition_policy_revision(
+            connection, request.acquisition_policy_revision_id
+        ).policy
+    else:
+        run = prepare_onboarding_run(
+            connection,
+            run_id=request.run_id,
+            request_key=request.idempotency_key,
+            implementation_ref=implementation_ref,
+            configuration_revision_id=request.configuration_revision_id,
+            target=ReleaseTarget(
+                prompt_release_id=request.prompt_release_id,
+                relevance_release_id=request.relevance_release_id,
+            ),
+            started_at=now(),
+            fetch_rates=fetch_rates,
+        )
+        policy = load_search_configuration_revision(
+            connection, request.configuration_revision_id
+        ).configuration
     if run.status == "completed":
         _finish_request(connection, request, owner_token, now())
         return _result(connection, request, "completed")
     try:
-        configuration = load_search_configuration_revision(
-            connection, request.configuration_revision_id
-        ).configuration
-        queries = build_search_queries(configuration)
+        queries = build_search_queries(policy)
         if len(queries) > request.limits.max_queries:
             raise OnboardingSearchLimitReached("Pinned search exceeds its query limit")
         for ordinal, query in enumerate(queries):
@@ -231,7 +260,7 @@ def execute_next_onboarding_test_search(
 
 def _finish_request(
     connection: Connection,
-    request: OnboardingTestSearchRequest,
+    request: OnboardingRequest,
     owner_token: UUID,
     finished_at: datetime,
 ) -> None:
@@ -265,7 +294,7 @@ def _finish_request(
 
 def _renew(
     connection: Connection,
-    request: OnboardingTestSearchRequest,
+    request: OnboardingRequest,
     owner_token: UUID,
     renewed_at: datetime,
     lease_for: timedelta,
@@ -283,7 +312,7 @@ def _renew(
 def guard_onboarding_provider_boundaries(
     connection: Connection,
     boundaries: PipelineBoundaries,
-    request: OnboardingTestSearchRequest,
+    request: OnboardingRequest,
     owner_token: UUID,
     now: Now,
 ) -> tuple[PipelineBoundaries, Callable[[JobWorkClaim], None]]:
@@ -462,7 +491,7 @@ def guard_onboarding_provider_boundaries(
 
 
 def _result(
-    connection: Connection, request: OnboardingTestSearchRequest, state: str
+    connection: Connection, request: OnboardingRequest, state: str
 ) -> OnboardingSearchWorkerResult:
     row = connection.execute(
         """
