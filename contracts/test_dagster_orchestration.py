@@ -44,7 +44,7 @@ from job_finder.pipeline.work_items import (
 )
 from job_finder.pipeline.runs import fail_orchestration_run, prepare_orchestration_run
 from job_finder.pipeline.discoveries import register_discoveries
-from job_finder.review.operations import (
+from job_finder.pipeline.reevaluations import (
     JobReevaluationAccepted,
     JobReevaluationCommand,
     JobReevaluationUnsupported,

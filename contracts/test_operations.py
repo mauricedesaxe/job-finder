@@ -42,15 +42,18 @@ from job_finder.pipeline.work_recoveries import (
     WorkRecoveryStaleState,
     recover_work,
 )
+from job_finder.pipeline.reevaluations import (
+    JobReevaluationAccepted,
+    JobReevaluationActiveWork,
+    JobReevaluationCommand,
+    JobReevaluationKeyConflict,
+    request_job_reevaluation,
+)
 from job_finder.review.operations import (
     ActivityPage,
     ActivityQuery,
     ActivityRun,
     WorkItemNotFound,
-    JobReevaluationAccepted,
-    JobReevaluationActiveWork,
-    JobReevaluationCommand,
-    JobReevaluationKeyConflict,
     OperationsHealth,
     RunNotFound,
     load_activity_page,
@@ -58,7 +61,6 @@ from job_finder.review.operations import (
     load_work_item_detail,
     load_pipeline_runs,
     load_run_detail,
-    request_job_reevaluation,
 )
 
 
