@@ -11,6 +11,7 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/mcp_tools/acquisition.py", "fastmcp"),
     ("job_finder/mcp_tools/qualification.py", "fastmcp"),
     ("job_finder/mcp_tools/qualification_definitions.py", "fastmcp"),
+    ("job_finder/mcp_tools/qualification_evidence.py", "fastmcp"),
     ("job_finder/mcp_tools/benchmarks.py", "fastmcp"),
     ("job_finder/mcp_tools/common.py", "mcp"),
     ("job_finder/mcp_tools/configuration.py", "fastmcp"),
