@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TypedDict, cast
 from uuid import uuid4
 
 import psycopg
@@ -20,6 +22,7 @@ from job_finder.acquisition_policy_service import load_acquisition_policy_revisi
 from job_finder.ats.models import AtsNotApplicable
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
+from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import JinaUnavailable, SearchSucceeded
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
 from job_finder.evaluation.qualification_components import (
@@ -29,8 +32,22 @@ from job_finder.evaluation.qualification_components import (
 from job_finder.evaluation.qualification_prompt_compilations import (
     bind_qualification_prompt_release,
 )
-from job_finder.pipeline.runs import SplitOrchestrationRun, load_run_by_id
 from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
+from job_finder.pipeline.runs import (
+    SplitOrchestrationRun,
+    fail_orchestration_run,
+    load_run_by_id,
+    prepare_split_orchestration_run,
+)
+
+
+class _SplitRunArgs(TypedDict):
+    idempotency_key: str
+    implementation_ref: str
+    acquisition_policy_revision_id: AcquisitionPolicyRevisionId
+    qualification_target_id: QualificationTargetId
+    artifact_path: Path
+    started_at: datetime
 
 
 @contextmanager
@@ -251,3 +268,76 @@ def test_split_reservation_pins_matching_orchestration_run() -> None:
                 """,
                 (key,),
             )
+
+
+def test_split_run_creation_and_retry_keep_reserved_authority() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _, _, target = _store_default_qualification_target(connection, now)
+        qualification_id = qualification_target_id(target)
+        _ = _compiled_release(connection, qualification_id, now)
+        active = connection.execute(
+            "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
+        ).fetchone()
+        assert active is not None
+        acquisition_id = AcquisitionPolicyRevisionId(cast(str, active[0]))
+        key = f"split-run-{uuid4()}"
+        _ = connection.execute(
+            """
+            INSERT INTO execution_budget_reservations (
+                idempotency_key, policy_version, period_start, reserved_usd,
+                status, max_jobs, authority_kind, acquisition_policy_revision_id,
+                qualification_target_id, acquisition_generation, qualification_generation,
+                search_queries, logical_model_calls_per_job,
+                maximum_provider_attempts, created_at
+            ) VALUES (%s, 1, %s, 1, 'reserved', 1, 'split', %s, %s, %s, 1,
+                      1, 1, 1, %s)
+            """,
+            (key, now.date(), acquisition_id, qualification_id, active[1], now),
+        )
+        root = Path(__file__).resolve().parents[1]
+        with NamedTemporaryFile(
+            dir=root, prefix=".qualification-artifact-", suffix=".json"
+        ) as temporary:
+            artifact_path = Path(temporary.name)
+            _ = write_implementation_artifact(root, artifact_path)
+            arguments: _SplitRunArgs = {
+                "idempotency_key": key,
+                "implementation_ref": "build",
+                "acquisition_policy_revision_id": acquisition_id,
+                "qualification_target_id": qualification_id,
+                "artifact_path": artifact_path,
+                "started_at": now,
+            }
+            first = prepare_split_orchestration_run(
+                connection,
+                **arguments,
+                fetch_rates=lambda: ExchangeRateSnapshot(
+                    rates={"USD": Decimal("1")}, source="fallback", observed_at=now
+                ),
+            )
+            assert first.acquisition_policy_revision_id == acquisition_id
+            assert first.qualification_target_id == qualification_id
+            with pytest.raises(ValueError, match="another execution authority"):
+                _ = prepare_split_orchestration_run(
+                    connection,
+                    idempotency_key=key,
+                    implementation_ref="build",
+                    acquisition_policy_revision_id=AcquisitionPolicyRevisionId("a" * 64),
+                    qualification_target_id=qualification_id,
+                    artifact_path=artifact_path,
+                    started_at=now,
+                    fetch_rates=lambda: pytest.fail("Rates should remain pinned"),
+                )
+            fail_orchestration_run(
+                connection, first.id, completed_at=now, error_code="retry", reason="retry"
+            )
+            resumed = prepare_split_orchestration_run(
+                connection,
+                **arguments,
+                fetch_rates=lambda: pytest.fail("Rates should remain pinned"),
+            )
+            assert resumed.id == first.id and resumed.status == "running"
+            assert resumed.acquisition_policy_revision_id == acquisition_id
+            assert resumed.qualification_target_id == qualification_id

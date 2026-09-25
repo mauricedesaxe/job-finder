@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, ClassVar, Literal, TypeAlias
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -15,6 +16,9 @@ from job_finder.acquisition_policy import AcquisitionPolicyRevisionId
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import PromptReleaseId, ReleaseTarget, RelevanceReleaseId
 from job_finder.evaluation.qualification_components import QualificationTargetId
+from job_finder.evaluation.qualification_prompt_compilations import (
+    load_compiled_qualification_target,
+)
 from job_finder.pipeline.connection import Connection, require_autocommit
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
@@ -138,6 +142,94 @@ def prepare_orchestration_run(
     if isinstance(stored, SplitOrchestrationRun):
         raise ValueError("Run idempotency key belongs to another execution authority")
     if stored.configuration_revision_id != configuration_revision_id or stored.target != target:
+        raise ValueError("Run idempotency key belongs to another execution authority")
+    return stored
+
+
+def prepare_split_orchestration_run(
+    connection: Connection,
+    *,
+    idempotency_key: str,
+    implementation_ref: str,
+    acquisition_policy_revision_id: AcquisitionPolicyRevisionId,
+    qualification_target_id: QualificationTargetId,
+    artifact_path: Path,
+    started_at: datetime,
+    fetch_rates: RateSnapshotFactory,
+) -> SplitOrchestrationRun:
+    require_autocommit(connection)
+    existing = load_orchestration_run(connection, idempotency_key)
+    if existing is not None:
+        if not isinstance(existing, SplitOrchestrationRun) or (
+            existing.implementation_ref != implementation_ref
+            or existing.acquisition_policy_revision_id != acquisition_policy_revision_id
+            or existing.qualification_target_id != qualification_target_id
+        ):
+            raise ValueError("Run idempotency key belongs to another execution authority")
+        if existing.status == "failed":
+            with connection.transaction():
+                _ = connection.execute(
+                    """
+                    UPDATE pipeline_runs
+                    SET status = 'running', completed_at = NULL, error = NULL
+                    WHERE id = %s AND status = 'failed'
+                    """,
+                    (existing.id,),
+                )
+            resumed = load_run_by_id(connection, existing.id)
+            if not isinstance(resumed, SplitOrchestrationRun):
+                raise RuntimeError("Split run changed authority while resuming")
+            return resumed
+        return existing
+    compiled = load_compiled_qualification_target(
+        connection, qualification_target_id, artifact_path
+    )
+    target = ReleaseTarget(
+        prompt_release_id=compiled.prompt_release.id,
+        relevance_release_id=compiled.target.relevance.relevance_release_id,
+    )
+    rates = fetch_rates()
+    run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
+    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    with connection.transaction():
+        inserted = connection.execute(
+            """
+            INSERT INTO pipeline_runs (
+              id, idempotency_key, kind, implementation_ref,
+              execution_authority_kind, acquisition_policy_revision_id,
+              qualification_target_id, prompt_release_id, relevance_release_id,
+              parameters, status, started_at
+            ) VALUES (%s, %s, 'orchestration', %s, 'split', %s, %s, %s, %s,
+                      '{}'::jsonb, 'running', %s)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            (
+                run_id,
+                idempotency_key,
+                implementation_ref,
+                acquisition_policy_revision_id,
+                qualification_target_id,
+                target.prompt_release_id,
+                target.relevance_release_id,
+                started_at,
+            ),
+        ).fetchone()
+        if inserted is not None:
+            _ = connection.execute(
+                """
+                INSERT INTO run_exchange_rate_snapshots (
+                  pipeline_run_id, content_digest, rates, source, observed_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                """,
+                (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
+            )
+    stored = load_orchestration_run(connection, idempotency_key)
+    if not isinstance(stored, SplitOrchestrationRun) or (
+        stored.implementation_ref != implementation_ref
+        or stored.acquisition_policy_revision_id != acquisition_policy_revision_id
+        or stored.qualification_target_id != qualification_target_id
+    ):
         raise ValueError("Run idempotency key belongs to another execution authority")
     return stored
 
