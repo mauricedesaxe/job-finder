@@ -15,6 +15,8 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/review/app.py", "starlette"),
     ("job_finder/review/configuration_editor.py", "fasthtml"),
     ("job_finder/review/configuration_editor.py", "starlette"),
+    ("job_finder/review/workbench.py", "fasthtml"),
+    ("job_finder/review/workbench.py", "starlette"),
     ("job_finder/web/app.py", "fasthtml"),
     ("job_finder/web/app.py", "starlette"),
     ("job_finder/web/security.py", "starlette"),
@@ -286,6 +288,18 @@ def test_web_modules_own_shared_http_adapters() -> None:
             module == "job_finder.review" or module.startswith("job_finder.review.")
             for module in _direct_imported_modules(path)
         )
+
+
+def test_review_workbench_owns_only_the_review_web_adapter() -> None:
+    path = _PACKAGE_ROOT / "review" / "workbench.py"
+    assert _public_definitions(path) == {"ReviewWorkbench"}
+    assert not {
+        module
+        for module in _imported_modules(path)
+        if module == "job_finder.database"
+        or module.rpartition(".")[2] in {"load_review_queue", "record_review"}
+        or module.rpartition(".")[2].startswith("postgres_review_")
+    }
 
 
 def test_benchmark_modules_own_their_public_symbols() -> None:
