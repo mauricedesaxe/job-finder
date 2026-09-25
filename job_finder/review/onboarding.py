@@ -23,6 +23,10 @@ from job_finder.onboarding_test_search import (
     load_onboarding_test_search,
 )
 from job_finder.review.owner_access import OnboardingStage
+from job_finder.qualification_target_service import (
+    CreateCurrentQualificationCandidateCommand,
+    create_current_qualification_candidate,
+)
 
 
 @dataclass(frozen=True)
@@ -126,12 +130,21 @@ def postgres_test_search_service(
                     return OnboardingTestSearchAccepted(replayed=True, request=existing)
             if stage is not OnboardingStage.TEST_SEARCH:
                 return ExecutionBlocked(reason="onboarding_incomplete")
+            candidate_target_id = None
+            if artifact_path is not None:
+                candidate = create_current_qualification_candidate(
+                    connection,
+                    CreateCurrentQualificationCandidateCommand(actor=actor, timestamp=timestamp),
+                    artifact_path,
+                )
+                candidate_target_id = candidate.id
             return create_onboarding_test_search(
                 connection,
                 CreateOnboardingTestSearch(
                     idempotency_key=f"owner-setup:{uuid4().hex}",
                     actor=actor,
                     timestamp=timestamp,
+                    candidate_target_id=candidate_target_id,
                 ),
                 artifact_path=artifact_path,
             )
