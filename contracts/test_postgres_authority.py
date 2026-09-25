@@ -100,6 +100,7 @@ from job_finder.evaluation.implementation_artifacts import (
     build_implementation_artifact,
     implementation_artifact_id,
     store_implementation_artifact,
+    write_implementation_artifact,
 )
 from job_finder.evaluation.qualification_components import (
     DeduplicationContent,
@@ -112,6 +113,10 @@ from job_finder.evaluation.qualification_components import (
     qualification_target_id,
     store_component_release,
     store_qualification_target,
+)
+from job_finder.evaluation.qualification_prompt_compilations import (
+    bind_qualification_prompt_release,
+    load_compiled_qualification_target,
 )
 from job_finder.policy_projection import project_legacy_search_configuration
 from job_finder.qualification_definition import (
@@ -316,6 +321,7 @@ EXPECTED_MIGRATIONS = (
     "0039_policy_lifecycle_state.sql",
     "0040_qualification_components.sql",
     "0041_qualification_evidence.sql",
+    "0042_qualification_prompt_compilations.sql",
 )
 
 
@@ -703,6 +709,84 @@ def test_qualification_target_requires_four_components_from_one_artifact(
             _ = connection.execute(
                 "UPDATE qualification_component_releases SET created_by = 'changed'"
             )
+
+
+def test_qualification_prompt_compilation_requires_exact_published_release(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        artifact, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            release_id = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
+            assert compiled.target.id == target_id
+            assert compiled.prompt_release.id == release_id
+            assert (
+                bind_qualification_prompt_release(
+                    connection, target_id, artifact_path, created_at=now, created_by="owner"
+                )
+                == release_id
+            )
+            partial_versions = compiled.prompt_release.versions[:-1]
+            partial_digest = hashlib.sha256(
+                json.dumps(
+                    [[version.definition.name, version.id] for version in partial_versions],
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode()
+            ).hexdigest()
+            partial_release = PromptRelease(
+                id=PromptReleaseId(partial_digest),
+                name=f"partial-{partial_digest}",
+                content_digest=partial_digest,
+                versions=partial_versions,
+            )
+            _ = store_prompt_release(
+                connection, partial_release, created_at=now, created_by="owner"
+            )
+            with pytest.raises(psycopg.errors.CheckViolation, match="exact ordered"):
+                _ = connection.execute(
+                    """
+                    INSERT INTO qualification_prompt_compilations (
+                      target_id, artifact_id, qualification_definition_revision_id,
+                      prompt_release_id, created_at, created_by
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_id,
+                        artifact.id,
+                        target.qualification_definition_revision_id,
+                        partial_release.id,
+                        now,
+                        "owner",
+                    ),
+                )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _ = connection.execute(
+                    """
+                    INSERT INTO qualification_prompt_compilations (
+                      target_id, artifact_id, qualification_definition_revision_id,
+                      prompt_release_id, created_at, created_by
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        target_id,
+                        "0" * 64,
+                        target.qualification_definition_revision_id,
+                        release_id,
+                        now,
+                        "owner",
+                    ),
+                )
+        finally:
+            artifact_path.unlink(missing_ok=True)
 
 
 def test_qualification_evidence_pins_target_components_and_experiment_inputs(
