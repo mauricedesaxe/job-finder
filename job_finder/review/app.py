@@ -99,6 +99,15 @@ from job_finder.pipeline.work_dismissals import (
     WorkDismissalNotFound,
     WorkDismissalStaleState,
 )
+from job_finder.pipeline.work_recoveries import (
+    RecoveryAction,
+    WorkRecoveryActiveLease,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryKeyConflict,
+    WorkRecoveryNotFound,
+    WorkRecoveryStaleState,
+)
 from job_finder.review.operations import (
     ACTIVITY_STATUSES,
     ActivityEntry,
@@ -116,16 +125,9 @@ from job_finder.review.operations import (
     JobReevaluationUnsupported,
     OperationsService,
     OperationsUnavailable,
-    RecoveryAction,
     RunDetail,
     RunNotFound,
     RunsService,
-    WorkRecoveryActiveLease,
-    WorkRecoveryApplied,
-    WorkRecoveryCommand,
-    WorkRecoveryKeyConflict,
-    WorkRecoveryNotFound,
-    WorkRecoveryStaleState,
     WorkAttemptSummary,
     WorkItemDetail,
     WorkItemNotFound,

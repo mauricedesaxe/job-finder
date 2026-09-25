@@ -32,6 +32,16 @@ from job_finder.pipeline.work_dismissals import (
     WorkDismissalStaleState,
     dismiss_work,
 )
+from job_finder.pipeline.work_recoveries import (
+    RecoveryAction,
+    WorkRecoveryActiveLease,
+    WorkRecoveryApplied,
+    WorkRecoveryCommand,
+    WorkRecoveryKeyConflict,
+    WorkRecoveryResult,
+    WorkRecoveryStaleState,
+    recover_work,
+)
 from job_finder.review.operations import (
     ActivityPage,
     ActivityQuery,
@@ -42,20 +52,12 @@ from job_finder.review.operations import (
     JobReevaluationCommand,
     JobReevaluationKeyConflict,
     OperationsHealth,
-    RecoveryAction,
     RunNotFound,
-    WorkRecoveryActiveLease,
-    WorkRecoveryApplied,
-    WorkRecoveryCommand,
-    WorkRecoveryKeyConflict,
-    WorkRecoveryResult,
-    WorkRecoveryStaleState,
     load_activity_page,
     load_operations_snapshot,
     load_work_item_detail,
     load_pipeline_runs,
     load_run_detail,
-    recover_work,
     request_job_reevaluation,
 )
 
