@@ -103,6 +103,15 @@ def load_implementation_artifact(path: Path) -> ImplementationArtifact:
     return ImplementationArtifact.model_validate_json(path.read_text())
 
 
+def verify_implementation_artifact(path: Path) -> ImplementationArtifact:
+    """Verify a build-generated manifest against the files executing beside it."""
+    recorded = load_implementation_artifact(path)
+    actual = build_implementation_artifact(path.parent)
+    if recorded != actual:
+        raise ValueError("Executing implementation differs from its build artifact")
+    return recorded
+
+
 def store_implementation_artifact(
     connection: psycopg.Connection[tuple[object, ...]],
     artifact: ImplementationArtifact,
