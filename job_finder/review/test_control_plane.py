@@ -9,7 +9,7 @@ import pytest
 import requests
 
 from job_finder.config import DagsterControlSettings
-from job_finder.review.control_plane import (
+from job_finder.operations.control_plane import (
     CONTROL_DEFINITIONS,
     ControlConflict,
     ControlPlaneUnavailable,

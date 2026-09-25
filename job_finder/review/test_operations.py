@@ -14,26 +14,26 @@ from job_finder.pipeline.work_recoveries import (
 from job_finder.pipeline.reevaluations import (
     JobReevaluationCommand,
 )
-from job_finder.review.operations import (
-    ActionableWork,
+from job_finder.operations._common import OperationsUnavailable, PipelineRunStatus, WorkItemState
+from job_finder.operations.activity import (
     ActivityEntry,
     ActivityQuery,
     ActivityRun,
     ActivityWork,
-    RunListItem,
+    decode_activity_cursor,
+    encode_activity_cursor,
+)
+from job_finder.operations.health import (
+    ActionableWork,
     OperationsHealth,
     OperationsSnapshot,
-    OperationsUnavailable,
-    PipelineRunStatus,
     PipelineRunSummary,
     QueueCounts,
     SpendSummary,
-    WorkItemState,
-    decode_activity_cursor,
-    encode_activity_cursor,
     operations_health,
-    unknown_operations_service,
 )
+from job_finder.operations.run_history import RunListItem
+from job_finder.operations.service import unknown_operations_service
 
 NOW = datetime(2026, 9, 21, 12, tzinfo=UTC)
 

@@ -22,7 +22,7 @@ from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.configuration_service import load_published_active_search_configuration
 from job_finder.pipeline.work_items import claim_next_job
 from job_finder.pipeline.runs import prepare_orchestration_run
-from job_finder.review.analytics import load_spend_analytics
+from job_finder.operations.spend import load_spend_analytics
 from job_finder.pipeline.work_dismissals import (
     DismissalAction,
     WorkDismissalApplied,
@@ -50,19 +50,15 @@ from job_finder.pipeline.reevaluations import (
     JobReevaluationKeyConflict,
     request_job_reevaluation,
 )
-from job_finder.review.operations import (
+from job_finder.operations.activity import (
     ActivityPage,
     ActivityQuery,
     ActivityRun,
-    WorkItemNotFound,
-    OperationsHealth,
-    RunNotFound,
     load_activity_page,
-    load_operations_snapshot,
-    load_work_item_detail,
-    load_pipeline_runs,
-    load_run_detail,
 )
+from job_finder.operations.health import OperationsHealth, load_operations_snapshot
+from job_finder.operations.run_history import RunNotFound, load_pipeline_runs, load_run_detail
+from job_finder.operations.work_history import WorkItemNotFound, load_work_item_detail
 
 
 @pytest.fixture

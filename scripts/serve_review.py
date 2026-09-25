@@ -14,14 +14,12 @@ from job_finder.provider_credentials import (
 )
 from job_finder.review.app import create_review_app
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
-from job_finder.review.control_plane import dagster_control_plane_service
+from job_finder.operations.control_plane import dagster_control_plane_service
 from job_finder.review.feedback import postgres_review_feedback_service
-from job_finder.review.analytics import postgres_analytics_service
-from job_finder.review.operations import (
-    postgres_activity_service,
-    postgres_operations_service,
-    postgres_runs_service,
-)
+from job_finder.operations.spend import postgres_analytics_service
+from job_finder.operations.activity import postgres_activity_service
+from job_finder.operations.run_history import postgres_runs_service
+from job_finder.operations.service import postgres_operations_service
 from job_finder.review.onboarding import (
     postgres_onboarding_progress_service,
     postgres_test_search_service,

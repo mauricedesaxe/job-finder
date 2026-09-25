@@ -6,7 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from job_finder.database import Connection, ConnectionFactory
-from job_finder.review.operations import OperationsUnavailable
+from job_finder.operations._common import OperationsUnavailable
 
 SPEND_DAY_LIMIT = 30
 SPEND_MODEL_LIMIT = 10

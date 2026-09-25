@@ -17,7 +17,7 @@ import pytest
 import requests
 
 from job_finder.config import DagsterControlSettings
-from job_finder.review.control_plane import (
+from job_finder.operations.control_plane import (
     OWNER_HOME_ACTOR_TAG,
     OWNER_HOME_CORRELATION_TAG,
     OWNER_HOME_SOURCE_TAG,

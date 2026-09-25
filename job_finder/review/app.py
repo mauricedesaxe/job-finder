@@ -71,13 +71,13 @@ from job_finder.web.shell import (
     state_response,
     timestamp,
 )
-from job_finder.review.analytics import (
+from job_finder.operations.spend import (
     AnalyticsService,
     DaySpend,
     ModelSpend,
     SpendAnalytics,
 )
-from job_finder.review.control_plane import (
+from job_finder.operations.control_plane import (
     CONTROL_DEFINITIONS,
     ControlConflict,
     ControlPlaneService,
@@ -122,7 +122,8 @@ from job_finder.pipeline.reevaluations import (
     JobReevaluationSourceChanged,
     JobReevaluationUnsupported,
 )
-from job_finder.review.operations import (
+from job_finder.operations._common import OperationsUnavailable
+from job_finder.operations.activity import (
     ACTIVITY_STATUSES,
     ActivityEntry,
     ActivityPage,
@@ -130,17 +131,15 @@ from job_finder.review.operations import (
     ActivityRun,
     ActivityService,
     ActivityWork,
+)
+from job_finder.operations.run_history import RunDetail, RunNotFound, RunsService
+from job_finder.operations.service import OperationsService, unknown_operations_service
+from job_finder.operations.work_history import (
     ModelCallDetail,
-    OperationsService,
-    OperationsUnavailable,
-    RunDetail,
-    RunNotFound,
-    RunsService,
     WorkAttemptSummary,
     JobVerdict,
     WorkItemDetail,
     WorkItemNotFound,
-    unknown_operations_service,
 )
 from job_finder.review.onboarding import (
     OnboardingProgressService,
