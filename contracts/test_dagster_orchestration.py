@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 from typing import cast
 from uuid import uuid4
 
@@ -53,6 +55,7 @@ from job_finder.pipeline.reevaluations import (
 from job_finder.review.owner_access import postgres_owner_access_service
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
+    SearchConfigurationRevisionId,
     SupportedSearchSource,
     build_search_configuration_revision,
     store_search_configuration_revision,
@@ -120,6 +123,56 @@ def test_run_retry_reuses_frozen_configuration_pair_and_exchange_rates(
     assert second.prompt_release_id == first.prompt_release_id
     assert second.target == first.target
     assert second.exchange_rates == rates
+
+
+def test_concurrent_run_creation_rejects_the_losing_execution_authority(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(
+        rates={"EUR": Decimal("1.11")}, source="frankfurter", observed_at=now
+    )
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        active = load_published_active_search_configuration(connection)
+        target = get_active_release_target(connection).target
+        changed = store_search_configuration_revision(
+            connection,
+            build_search_configuration_revision(
+                DEFAULT_SEARCH_CONFIGURATION.model_copy(
+                    update={"search_keywords": ("concurrent authority",)}
+                ),
+                created_at=now,
+                created_by="test",
+            ),
+        )
+    barrier = Barrier(2)
+
+    def prepare(configuration_revision_id: SearchConfigurationRevisionId) -> object:
+        with _connection(authority_schema) as connection:
+            try:
+                return prepare_orchestration_run(
+                    connection,
+                    idempotency_key="dagster:concurrent-authority",
+                    implementation_ref="commit-1",
+                    configuration_revision_id=configuration_revision_id,
+                    target=target,
+                    started_at=now,
+                    fetch_rates=lambda: (barrier.wait(), rates)[1],
+                )
+            except ValueError as error:
+                return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(
+            executor.map(
+                prepare,
+                (active.publication.revision_id, changed.id),
+            )
+        )
+
+    assert sum(isinstance(outcome, ValueError) for outcome in outcomes) == 1
+    assert sum(not isinstance(outcome, ValueError) for outcome in outcomes) == 1
 
 
 def test_configuration_activation_only_changes_new_orchestration_run_configuration(
