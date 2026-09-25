@@ -26,6 +26,8 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/review/configuration.py", "starlette"),
     ("job_finder/review/qualification_targets.py", "fasthtml"),
     ("job_finder/review/qualification_targets.py", "starlette"),
+    ("job_finder/review/qualification_promotions_web.py", "fasthtml"),
+    ("job_finder/review/qualification_promotions_web.py", "starlette"),
     ("job_finder/review/split_configuration.py", "fasthtml"),
     ("job_finder/review/split_configuration.py", "starlette"),
     ("job_finder/review/workbench.py", "fasthtml"),

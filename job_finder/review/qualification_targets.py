@@ -100,6 +100,7 @@ def _page(
             H2("Recent candidates"),
             Ul(*(Li(str(row[0])) for row in rows)) if rows else P("No candidates yet."),
             A("Back to search setup", href="/configuration"),
+            A("Review qualification evidence", href="/configuration/qualification-promotion"),
             cls="review-shell configuration-shell",
         ),
     )
