@@ -14,6 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from secrets import token_hex
 from threading import Barrier, Event
+from tempfile import NamedTemporaryFile
 from typing import LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -50,6 +51,10 @@ from job_finder.benchmarks.manifests import (
     preview_manifest,
 )
 from job_finder.benchmarks.promotions import record_prompt_promotion_decision
+from job_finder.benchmarks.qualification_promotions import (
+    PromotionEvidenceSelection,
+    preview_qualification_promotion,
+)
 from job_finder.benchmarks.qualification_evidence import (
     FixtureCase,
     PhaseFixtureSet,
@@ -660,6 +665,227 @@ def test_composite_promotion_authority_starts_unactivated_and_is_immutable(
         assert connection.execute("SELECT count(*) FROM prompt_promotion_decisions").fetchone() == (
             0,
         )
+
+
+def test_composite_promotion_preview_requires_exact_canonical_evidence(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(
+        dir=root, prefix=".qualification-preview-", suffix=".json"
+    ) as temporary:
+        artifact_path = Path(temporary.name)
+        with _connection(authority_schema) as connection:
+            _ = apply_migrations(connection)
+            artifact, components, baseline = _store_default_qualification_target(connection, now)
+            alternate_input = components[0].model_copy(
+                update={"ats_sources": components[0].ats_sources[:-1]}
+            )
+            _ = store_component_release(
+                connection, alternate_input, created_at=now, created_by="owner"
+            )
+            candidate = build_qualification_target(
+                alternate_input, components[1], components[2], components[3]
+            )
+            candidate_id = store_qualification_target(
+                connection, candidate, created_at=now, created_by="owner"
+            )
+            baseline_id = qualification_target_id(baseline)
+            fixture_case = FixtureCase(input={}, expected={}, input_path="direct")
+            input_fixture_id = store_fixture_set(
+                connection,
+                PhaseFixtureSet(phase="input_preparation", cases=(fixture_case,)),
+                created_at=now,
+                created_by="owner",
+            )
+            composition_fixture_id = store_fixture_set(
+                connection,
+                PhaseFixtureSet(phase="composition", cases=(fixture_case,)),
+                created_at=now,
+                created_by="owner",
+            )
+            result: dict[str, JsonValue] = {
+                "case_count": 1,
+                "passed_count": 1,
+                "cases": [{"passed": True, "observed": {}, "expected": {}}],
+            }
+            input_evidence = QualificationEvidence(
+                target_id=candidate_id,
+                phase="input_preparation",
+                component_release_id=candidate.input_preparation_release_id,
+                fixture_set_id=input_fixture_id,
+                executor_artifact_id=artifact.id,
+                origin="canonical",
+                outcome="passed",
+                result=result,
+                completed_at=now,
+            )
+            input_evidence_id = store_qualification_evidence(
+                connection, input_evidence, created_at=now, created_by="owner"
+            )
+            assert write_implementation_artifact(root, artifact_path) == artifact
+            release_id = bind_qualification_prompt_release(
+                connection, candidate_id, artifact_path, created_at=now, created_by="owner"
+            )
+            prompt = load_prompt_release(connection, release_id).version("job-finder-enrichment")
+            attempt = ModelCallAttempt(
+                id=uuid4(),
+                context=ModelCallContext(
+                    processing_attempt_id=uuid4(),
+                    pipeline_run_id=uuid4(),
+                    prompt_release_id=release_id,
+                    operation_key="enrichment",
+                    input_digest=InputDigest("a" * 64),
+                ),
+                request_id=ModelRequestId("b" * 64),
+                attempt_number=0,
+                prompt_name=prompt.definition.name,
+                prompt_version_id=prompt.id,
+                requested_model="google/gemini-2.5-flash-001",
+                response_model="google/gemini-2.5-flash-001",
+                provider_response_id="response-1",
+                status="accepted",
+                parsed_output={"title": "Backend Engineer"},
+                raw_response={"id": "response-1"},
+                input_tokens=12,
+                output_tokens=4,
+                cost_usd=Decimal("0.00012"),
+                latency_ms=2,
+                error=None,
+                observed_at=now,
+                request_messages=({"role": "user", "content": "source listing"},),
+            )
+            composition_evidence = QualificationEvidence(
+                target_id=candidate_id,
+                phase="composition",
+                fixture_set_id=composition_fixture_id,
+                executor_artifact_id=artifact.id,
+                origin="canonical",
+                outcome="passed",
+                result=TypeAdapter(dict[str, JsonValue]).validate_python(
+                    result
+                    | {
+                        "coverage": dict.fromkeys(
+                            (
+                                "direct",
+                                "ats",
+                                "qualified",
+                                "rejected",
+                                "retry",
+                                "relevance",
+                                "enrichment",
+                                "deduplication",
+                            ),
+                            True,
+                        )
+                    }
+                ),
+                attempts=(provider_attempt_evidence(attempt),),
+                completed_at=now,
+            )
+            composition_evidence_id = store_qualification_evidence(
+                connection, composition_evidence, created_at=now, created_by="owner"
+            )
+            store_provider_attempts(
+                connection,
+                composition_evidence,
+                (attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            selected = PromotionEvidenceSelection(
+                input_preparation_evidence_id=input_evidence_id,
+                composition_evidence_id=composition_evidence_id,
+            )
+            preview = preview_qualification_promotion(
+                connection, baseline_id, candidate_id, selected, artifact_path
+            )
+            assert preview.eligible and preview.failures == ()
+            missing = preview_qualification_promotion(
+                connection,
+                baseline_id,
+                candidate_id,
+                selected.model_copy(update={"input_preparation_evidence_id": None}),
+                artifact_path,
+            )
+            assert not missing.eligible
+            assert "Changed input_preparation component has no evidence" in missing.failures
+            synthetic = composition_evidence.model_copy(update={"origin": "synthetic"})
+            synthetic_id = store_qualification_evidence(
+                connection, synthetic, created_at=now, created_by="owner"
+            )
+            untrusted = preview_qualification_promotion(
+                connection,
+                baseline_id,
+                candidate_id,
+                selected.model_copy(update={"composition_evidence_id": synthetic_id}),
+                artifact_path,
+            )
+            assert not untrusted.eligible
+            assert "Composition evidence does not prove the candidate target" in untrusted.failures
+            incomplete = composition_evidence.model_copy(
+                update={
+                    "result": result | {"coverage": {"direct": True}},
+                    "completed_at": now + timedelta(seconds=1),
+                }
+            )
+            incomplete_id = store_qualification_evidence(
+                connection, incomplete, created_at=now, created_by="owner"
+            )
+            incomplete_preview = preview_qualification_promotion(
+                connection,
+                baseline_id,
+                candidate_id,
+                selected.model_copy(update={"composition_evidence_id": incomplete_id}),
+                artifact_path,
+            )
+            assert not incomplete_preview.eligible
+            assert (
+                "Composition evidence lacks full production path coverage"
+                in incomplete_preview.failures
+            )
+            missing_attempts = composition_evidence.model_copy(
+                update={"completed_at": now + timedelta(seconds=2)}
+            )
+            missing_attempts_id = store_qualification_evidence(
+                connection, missing_attempts, created_at=now, created_by="owner"
+            )
+            absent = preview_qualification_promotion(
+                connection,
+                baseline_id,
+                candidate_id,
+                selected.model_copy(update={"composition_evidence_id": missing_attempts_id}),
+                artifact_path,
+            )
+            assert not absent.eligible
+            assert "composition provider attempts are missing or differ" in absent.failures
+            alternative_relevance = store_relevance_release(
+                connection,
+                build_relevance_release(
+                    build_jev_faithful_policy(load_prompt_release(connection, release_id))
+                ),
+                created_at=now,
+                created_by="owner",
+            )
+            changed_relevance = components[1].model_copy(
+                update={"relevance_release_id": alternative_relevance.id}
+            )
+            _ = store_component_release(
+                connection, changed_relevance, created_at=now, created_by="owner"
+            )
+            relevance_candidate = build_qualification_target(
+                components[0], changed_relevance, components[2], components[3]
+            )
+            relevance_candidate_id = store_qualification_target(
+                connection, relevance_candidate, created_at=now, created_by="owner"
+            )
+            incomparable = preview_qualification_promotion(
+                connection, baseline_id, relevance_candidate_id, selected, artifact_path
+            )
+            assert not incomparable.eligible
+            assert "Changed relevance requires a frozen comparison" in incomparable.failures
 
 
 def _store_default_qualification_target(
