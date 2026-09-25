@@ -17,6 +17,8 @@ _ALLOWED_FRAMEWORK_IMPORTS = {
     ("job_finder/projections/smoke.py", "langfuse"),
     ("job_finder/operations/web.py", "fasthtml"),
     ("job_finder/operations/web.py", "starlette"),
+    ("job_finder/review/access_web.py", "fasthtml"),
+    ("job_finder/review/access_web.py", "starlette"),
     ("job_finder/review/app.py", "fasthtml"),
     ("job_finder/review/app.py", "starlette"),
     ("job_finder/review/configuration.py", "fasthtml"),
