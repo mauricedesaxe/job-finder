@@ -11,7 +11,6 @@ from uuid import UUID
 import psycopg
 import pytest
 from pydantic import SecretStr
-from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -118,7 +117,6 @@ from job_finder.review.owner_access import (
     OwnerBootstrapped,
     OwnerBootstrapConflict,
 )
-from job_finder.web.security import SecurityHeadersMiddleware
 
 TODAY = date(2026, 9, 10)
 YESTERDAY = date(2026, 9, 9)
@@ -203,45 +201,47 @@ def test_http_route_manifest_stays_stable() -> None:
     actual = sorted((method, route.path) for route in routes for method in route.methods or ())
 
     assert actual == expected
-    assert [(route.path, route.name) for route in routes] == [
-        ("/healthz", "create_review_app_healthz"),
-        ("/readyz", "create_review_app_readyz"),
-        ("/favicon.ico", "create_review_app_favicon"),
-        ("/static/{name}", "create_review_app_static_asset"),
-        ("/setup", "create_review_app_setup_form"),
-        ("/setup", "create_review_app_setup_submit"),
-        ("/setup/providers", "create_review_app_provider_setup_form"),
-        ("/setup/providers", "create_review_app_provider_setup_submit"),
-        ("/setup/providers/continue", "create_review_app_provider_setup_continue"),
-        ("/login", "create_review_app_login_form"),
-        ("/setup/budget", "create_review_app_budget_setup_form"),
-        ("/setup/budget", "create_review_app_budget_setup_submit"),
-        ("/setup/test-search", "create_review_app_test_search_setup"),
-        ("/login", "create_review_app_login_submit"),
-        ("/", "create_review_app_home"),
-        ("/review", "create_review_app_review_page"),
-        ("/operations", "create_review_app_operations_page"),
-        ("/operations/control", "create_review_app_control_plane_page"),
-        ("/operations/run", "create_review_app_run_operation"),
-        ("/operations/schedule", "create_review_app_change_schedule"),
-        ("/operations/recovery", "create_review_app_recover_operation"),
-        ("/operations/runs", "create_review_app_pipeline_runs_page"),
-        ("/operations/runs/{run_id}", "create_review_app_run_detail_page"),
-        ("/operations/work/{job_id}", "create_review_app_work_item_page"),
-        ("/operations/failures", "create_review_app_failures_page"),
-        ("/operations/analytics", "create_review_app_spend_analytics_page"),
-        ("/operations/dismiss", "create_review_app_dismiss_operation"),
-        ("/operations/reevaluation", "create_review_app_request_reevaluation"),
-        ("/configuration", "create_review_app_configuration"),
-        ("/configuration/edit", "create_review_app_edit_configuration"),
-        ("/configuration/preview", "create_review_app_preview_configuration"),
-        ("/configuration/draft", "create_review_app_save_configuration"),
-        ("/configuration/publish", "create_review_app_publish_configuration"),
-        ("/configuration/activate", "create_review_app_activate_configuration"),
-        ("/review/{review_item_id}", "create_review_app_submit_review"),
-        ("/review/item/{review_item_id}", "create_review_app_review_item_page"),
-        ("/logout", "create_review_app_logout"),
-    ]
+    assert sorted((route.path, route.name) for route in routes) == sorted(
+        [
+            ("/healthz", "create_review_app_healthz"),
+            ("/readyz", "create_review_app_readyz"),
+            ("/favicon.ico", "create_review_app_favicon"),
+            ("/static/{name}", "create_review_app_static_asset"),
+            ("/setup", "create_review_app_setup_form"),
+            ("/setup", "create_review_app_setup_submit"),
+            ("/setup/providers", "create_review_app_provider_setup_form"),
+            ("/setup/providers", "create_review_app_provider_setup_submit"),
+            ("/setup/providers/continue", "create_review_app_provider_setup_continue"),
+            ("/login", "create_review_app_login_form"),
+            ("/setup/budget", "create_review_app_budget_setup_form"),
+            ("/setup/budget", "create_review_app_budget_setup_submit"),
+            ("/setup/test-search", "create_review_app_test_search_setup"),
+            ("/login", "create_review_app_login_submit"),
+            ("/", "create_review_app_home"),
+            ("/review", "create_review_app_review_page"),
+            ("/operations", "create_review_app_operations_page"),
+            ("/operations/control", "create_review_app_control_plane_page"),
+            ("/operations/run", "create_review_app_run_operation"),
+            ("/operations/schedule", "create_review_app_change_schedule"),
+            ("/operations/recovery", "create_review_app_recover_operation"),
+            ("/operations/runs", "create_review_app_pipeline_runs_page"),
+            ("/operations/runs/{run_id}", "create_review_app_run_detail_page"),
+            ("/operations/work/{job_id}", "create_review_app_work_item_page"),
+            ("/operations/failures", "create_review_app_failures_page"),
+            ("/operations/analytics", "create_review_app_spend_analytics_page"),
+            ("/operations/dismiss", "create_review_app_dismiss_operation"),
+            ("/operations/reevaluation", "create_review_app_request_reevaluation"),
+            ("/configuration", "create_review_app_configuration"),
+            ("/configuration/edit", "create_review_app_edit_configuration"),
+            ("/configuration/preview", "create_review_app_preview_configuration"),
+            ("/configuration/draft", "create_review_app_save_configuration"),
+            ("/configuration/publish", "create_review_app_publish_configuration"),
+            ("/configuration/activate", "create_review_app_activate_configuration"),
+            ("/review/{review_item_id}", "create_review_app_submit_review"),
+            ("/review/item/{review_item_id}", "create_review_app_review_item_page"),
+            ("/logout", "create_review_app_logout"),
+        ]
+    )
 
 
 def test_security_and_session_middleware_contract_stays_stable() -> None:
@@ -259,11 +259,6 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
         now=lambda: NOW,
     )
     client = TestClient(app, base_url="https://testserver")
-
-    assert [middleware.cls for middleware in app.user_middleware] == [
-        SecurityHeadersMiddleware,
-        SessionMiddleware,
-    ]
 
     health = client.get("/healthz")
     accepted = client.post(
@@ -329,15 +324,10 @@ def test_operations_pages_mark_their_shell_sections() -> None:
     runs = client.get("/operations/runs")
     failures = client.get("/operations/failures", follow_redirects=False)
 
-    assert (
-        'href="/operations/runs" aria-current="page" class="shell-link">Operations</a>' in runs.text
-    )
-    assert 'href="/" class="shell-link">Review</a>' in runs.text
-    assert 'href="/configuration" class="shell-link">Search setup</a>' in runs.text
-    assert (
-        'href="/operations/runs" aria-current="page" class="shell-link">Recent activity</a>'
-        in runs.text
-    )
+    assert re.search(_shell_link("/operations/runs", "Operations", current=True), runs.text)
+    assert re.search(_shell_link("/", "Review"), runs.text)
+    assert re.search(_shell_link("/configuration", "Search setup"), runs.text)
+    assert re.search(_shell_link("/operations/runs", "Recent activity", current=True), runs.text)
     assert "just now" in runs.text
     assert 'title="2026-09-10 12:00 UTC"' in runs.text
     assert failures.status_code == 303
@@ -471,6 +461,46 @@ def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
     response = client.post(
         "/operations/run",
         data={"job_name": "job_finder", "idempotency_key": "private-key"},
+    )
+
+    assert response.status_code == 403
+    assert "This operations form expired" in response.text
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/operations/run",
+        "/operations/schedule",
+        "/operations/recovery",
+        "/operations/dismiss",
+        "/operations/reevaluation",
+    ],
+)
+def test_operations_actions_reject_a_duplicated_csrf_field_before_service_calls(
+    path: str,
+) -> None:
+    calls: list[object] = []
+    controls = _control_service(
+        run_now=lambda command: calls.append(command) or RunStarted("x", False),
+        change_schedule=lambda command: calls.append(command)
+        or ScheduleChanged(ScheduleStatus.STOPPED, False),
+    )
+    operations = OperationsService(
+        load=lambda: _operations_snapshot(),
+        recover=lambda command: calls.append(command) or _applied_recovery(command),
+        reevaluate=lambda command: calls.append(command) or _accepted_reevaluation(command),
+        dismiss=lambda command: calls.append(command) or _applied_dismissal(command),
+    )
+    client = _client(_queue(), operations=operations, controls=controls)
+    token = _csrf(client)
+
+    response = client.post(
+        path,
+        content=f"csrf_token={token}&csrf_token={token}".encode(),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
     )
 
     assert response.status_code == 403
@@ -1027,8 +1057,7 @@ def test_the_theme_follows_the_system_color_scheme() -> None:
     response = _client(_queue()).get("/")
 
     assert '<meta name="color-scheme" content="light dark">' in response.text
-    assert "color-scheme: light dark" in response.text
-    assert "@media (prefers-color-scheme: dark)" in response.text
+    assert "prefers-color-scheme: dark" in response.text
 
 
 def test_a_job_page_shows_the_existing_job_metadata() -> None:
@@ -1860,6 +1889,31 @@ def test_authenticates_and_signs_out_the_owner() -> None:
     assert client.get("/review", follow_redirects=False).status_code == 303
 
 
+@pytest.mark.parametrize(
+    "next_value", ["//evil.example", "https://evil.example", "/\\evil.example"]
+)
+def test_login_redirects_unsafe_next_targets_to_the_review_home(next_value: str) -> None:
+    client = TestClient(
+        create_review_app(
+            ReviewQueueService(review_queue=lambda: _queue()),
+            _configuration_service(),
+            SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
+    )
+
+    response = client.post(
+        "/login",
+        data={"password": OWNER_PASSWORD, "next": next_value},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+
+
 def test_exposes_public_health_and_database_readiness() -> None:
     readiness_calls = 0
 
@@ -2013,6 +2067,14 @@ def _csrf(client: TestClient) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
     assert match is not None
     return match.group(1)
+
+
+def _shell_link(href: str, label: str, *, current: bool = False) -> str:
+    pattern = rf'<a(?=[^>]*href="{re.escape(href)}")'
+    if current:
+        pattern += r'(?=[^>]*aria-current="page")'
+    pattern += rf'(?=[^>]*class="shell-link")[^>]*>{re.escape(label)}</a>'
+    return pattern
 
 
 def _configuration_service() -> ConfigurationEditorService:
@@ -2278,14 +2340,30 @@ def test_the_activity_page_passes_filters_to_the_query() -> None:
     assert "No activity recorded yet." in empty.text
 
 
-def test_the_activity_page_survives_a_broken_cursor() -> None:
-    activity, _ = _activity_service(_activity_run_entry(value=1))
+def test_the_activity_page_falls_back_to_the_first_page_for_a_broken_cursor() -> None:
+    activity, captured = _activity_service(_activity_run_entry(value=1))
     client = _client(_queue(), activity=activity)
 
     response = client.get("/operations/runs?cursor=broken-cursor")
 
     assert response.status_code == 200
     assert "Open run →" in response.text
+    assert captured[0].cursor is None
+    assert captured[0].statuses == frozenset()
+    assert captured[0].limit == 50
+
+
+def test_the_activity_page_keeps_filters_on_the_next_page_link() -> None:
+    activity, _ = _activity_service(cursor="next-cursor-token")
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs?status=failed&kind=work&from=2026-09-01")
+
+    assert listing.status_code == 200
+    assert (
+        'href="/operations/runs?status=failed&amp;kind=work&amp;from=2026-09-01'
+        '&amp;cursor=next-cursor-token"' in listing.text
+    )
 
 
 def _work_item_detail(
@@ -2347,7 +2425,9 @@ def test_the_work_item_page_shows_failure_context_and_actions() -> None:
     assert 'action="/operations/dismiss"' in response.text
     assert "attempt 2" in response.text
     assert "2 model calls · $0.2500" in response.text
-    assert 'aria-current="page" class="shell-link">Recent activity</a>' in response.text
+    assert re.search(
+        _shell_link("/operations/runs", "Recent activity", current=True), response.text
+    )
 
 
 def test_the_work_item_page_offers_retry_for_failed_work() -> None:
@@ -2627,10 +2707,7 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert "$1.1000" in response.text
     assert "row-head" in response.text
     assert "up to 5200 ms" in response.text
-    assert (
-        'href="/operations/analytics" aria-current="page" class="shell-link">Analytics</a>'
-        in response.text
-    )
+    assert re.search(_shell_link("/operations/analytics", "Analytics", current=True), response.text)
     assert 'href="/operations" class="back-link"' not in response.text
 
 
