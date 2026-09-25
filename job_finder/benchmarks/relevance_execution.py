@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import assert_never
+from typing import Literal, assert_never
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
 from pydantic import TypeAdapter
 
 from job_finder.ats.models import AtsAvailable, AtsEvidence
+from job_finder.ats.policy import format_ats_block
 from job_finder.benchmarks.identity import canonical_digest
 from job_finder.benchmarks.manifests import (
     EvaluationManifest,
@@ -69,7 +70,7 @@ _INT: TypeAdapter[int] = TypeAdapter(int)
 _ATS: TypeAdapter[AtsEvidence] = TypeAdapter(AtsEvidence)
 
 
-def execute_direct_relevance_experiment(
+def execute_relevance_experiment(
     connection: psycopg.Connection[tuple[object, ...]],
     target_id: QualificationTargetId,
     input_id: ExperimentInputId,
@@ -82,9 +83,9 @@ def execute_direct_relevance_experiment(
     jev_sender: JevSender | None = None,
 ) -> QualificationEvidenceId:
     compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
-    frozen = _load_direct_input(connection, input_id)
+    frozen = _load_frozen_input(connection, input_id)
     manifest = load_manifest(connection, frozen.manifest_id)
-    _require_direct_manifest_sources(connection, manifest)
+    _require_manifest_sources(connection, manifest, frozen.input_path)
     release = load_relevance_release(connection, compiled.target.relevance.relevance_release_id)
     _require_provider_settings(compiled, frozen, release.policy)
     provider = frozen.provider_settings.provider
@@ -152,7 +153,7 @@ def execute_direct_relevance_experiment(
     return evidence_id
 
 
-def _load_direct_input(
+def _load_frozen_input(
     connection: psycopg.Connection[tuple[object, ...]], input_id: ExperimentInputId
 ) -> RelevanceExperimentInput:
     row = connection.execute(
@@ -163,13 +164,13 @@ def _load_direct_input(
     frozen = RelevanceExperimentInput.model_validate(row[0])
     if experiment_input_id(frozen) != input_id:
         raise ValueError("Frozen relevance experiment has invalid identity")
-    if frozen.input_path != "direct":
-        raise ValueError("Direct relevance execution requires direct inputs")
     return frozen
 
 
-def _require_direct_manifest_sources(
-    connection: psycopg.Connection[tuple[object, ...]], manifest: EvaluationManifest
+def _require_manifest_sources(
+    connection: psycopg.Connection[tuple[object, ...]],
+    manifest: EvaluationManifest,
+    input_path: Literal["direct", "ats"],
 ) -> None:
     rows = connection.execute(
         """
@@ -188,9 +189,15 @@ def _require_direct_manifest_sources(
         case.position for case in manifest.cases
     ):
         raise ValueError("Relevance manifest source snapshots are incomplete")
-    for _, evidence in rows:
-        if evidence is not None and isinstance(_ATS.validate_python(evidence), AtsAvailable):
+    for case, (_, raw_evidence) in zip(manifest.cases, rows, strict=True):
+        evidence = None if raw_evidence is None else _ATS.validate_python(raw_evidence)
+        if input_path == "direct" and isinstance(evidence, AtsAvailable):
             raise ValueError("Direct relevance manifest contains ATS-prepared input")
+        if input_path == "ats":
+            if not isinstance(evidence, AtsAvailable):
+                raise ValueError("ATS relevance manifest requires ATS-available source evidence")
+            if not case.input.description.startswith(format_ats_block(evidence)):
+                raise ValueError("ATS relevance manifest lacks the prepared ATS description")
 
 
 def _require_matching_sender(

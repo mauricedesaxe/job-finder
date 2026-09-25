@@ -29,6 +29,7 @@ import job_finder.evaluation.manifest_execution as manifest_execution_module
 import job_finder.evaluation.relevance_releases as relevance_releases_module
 from job_finder.acquisition_policy import AcquisitionPolicy, acquisition_policy_revision_id
 from job_finder.ats.models import AtsAvailable, AtsNotApplicable, CompensationObservation
+from job_finder.ats.policy import format_ats_description
 from job_finder.benchmarks.comparisons import preview_run_comparison
 from job_finder.benchmarks.executions import (
     CompletedEvaluationExecution,
@@ -68,7 +69,7 @@ from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
     store_provider_attempts,
 )
-from job_finder.benchmarks.relevance_execution import execute_direct_relevance_experiment
+from job_finder.benchmarks.relevance_execution import execute_relevance_experiment
 from job_finder.config import PostgresContractSettings
 from job_finder.configuration_service import (
     ActivationTargetUnpublished,
@@ -1087,7 +1088,7 @@ def test_direct_relevance_experiment_resolves_target_and_marks_injected_sender_s
             _ = bind_qualification_prompt_release(
                 connection, target_id, artifact_path, created_at=now, created_by="owner"
             )
-            evidence_id = execute_direct_relevance_experiment(
+            evidence_id = execute_relevance_experiment(
                 connection,
                 target_id,
                 input_id,
@@ -1117,8 +1118,8 @@ def test_direct_relevance_experiment_resolves_target_and_marks_injected_sender_s
                 created_at=now,
                 created_by="owner",
             )
-            with pytest.raises(ValueError, match="requires direct inputs"):
-                _ = execute_direct_relevance_experiment(
+            with pytest.raises(ValueError, match="ATS-available source evidence"):
+                _ = execute_relevance_experiment(
                     connection,
                     target_id,
                     ats_input_id,
@@ -1139,7 +1140,7 @@ def test_direct_relevance_experiment_resolves_target_and_marks_injected_sender_s
                 connection, wrong_settings, created_at=now, created_by="owner"
             )
             with pytest.raises(ValueError, match="Frozen temperature"):
-                _ = execute_direct_relevance_experiment(
+                _ = execute_relevance_experiment(
                     connection,
                     target_id,
                     wrong_input_id,
@@ -1148,6 +1149,161 @@ def test_direct_relevance_experiment_resolves_target_and_marks_injected_sender_s
                     completed_at=now,
                     created_by="owner",
                     openrouter_sender=send,
+                )
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_ats_relevance_experiment_requires_prepared_source_evidence(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    ats_evidence = AtsAvailable(
+        source="lever",
+        location="Berlin",
+        locations=("Berlin",),
+        workplace_type="Remote",
+        country="DE",
+        description="Build useful tools from anywhere in Europe.",
+    )
+    with _connection(authority_schema) as connection:
+        manifest_id, legacy_target, rates = _seed_evaluation_execution_context(
+            connection, now, ats_evidence=ats_evidence
+        )
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=legacy_target.relevance_release_id
+        )
+        target_id = qualification_target_id(target)
+        frozen = RelevanceExperimentInput(
+            manifest_id=manifest_id,
+            exchange_rates=rates,
+            provider_settings=ProviderExperimentSettings(
+                provider="openrouter", temperature=0, retry_limit=0
+            ),
+            input_path="ats",
+        )
+        input_id = store_relevance_experiment_input(
+            connection, frozen, created_at=now, created_by="owner"
+        )
+        sent = 0
+
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal sent
+            sent += 1
+            return HttpResponse(
+                status_code=200,
+                body=json.dumps(
+                    {
+                        "id": f"ats-generation-{sent}",
+                        "model": "google/gemini-2.5-flash-001",
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "type": "function",
+                                            "function": {
+                                                "name": "evaluate_job",
+                                                "arguments": json.dumps(
+                                                    {"pass": True, "reason": "matched"}
+                                                ),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                    }
+                ),
+            )
+
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_relevance_experiment(
+                connection,
+                target_id,
+                input_id,
+                artifact_path,
+                api_key="fixture-key",
+                completed_at=now,
+                created_by="owner",
+                openrouter_sender=send,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.origin == "synthetic"
+            assert evidence.outcome == "passed"
+            assert evidence.experiment_input_id == input_id
+            assert len(evidence.attempts) == sent > 0
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_ats_relevance_rejects_snapshot_without_prepared_description(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    ats_evidence = AtsAvailable(
+        source="lever",
+        location="Berlin",
+        locations=("Berlin",),
+        workplace_type="Remote",
+        country="DE",
+        description="ATS description",
+    )
+    with _connection(authority_schema) as connection:
+        manifest_id, legacy_target, rates = _seed_evaluation_execution_context(
+            connection,
+            now,
+            ats_evidence=ats_evidence,
+            prepare_ats_description=False,
+        )
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=legacy_target.relevance_release_id
+        )
+        target_id = qualification_target_id(target)
+        input_id = store_relevance_experiment_input(
+            connection,
+            RelevanceExperimentInput(
+                manifest_id=manifest_id,
+                exchange_rates=rates,
+                provider_settings=ProviderExperimentSettings(
+                    provider="openrouter", temperature=0, retry_limit=0
+                ),
+                input_path="ats",
+            ),
+            created_at=now,
+            created_by="owner",
+        )
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            with pytest.raises(ValueError, match="lacks the prepared ATS description"):
+                _ = execute_relevance_experiment(
+                    connection,
+                    target_id,
+                    input_id,
+                    artifact_path,
+                    api_key="fixture-key",
+                    completed_at=now,
+                    created_by="owner",
                 )
         finally:
             artifact_path.unlink(missing_ok=True)
@@ -6429,13 +6585,23 @@ def test_pages_review_feedback_across_the_default_limit(authority_schema: str) -
 def _seed_evaluation_execution_context(
     connection: psycopg.Connection[tuple[object, ...]],
     now: datetime,
+    *,
+    ats_evidence: AtsAvailable | None = None,
+    prepare_ats_description: bool = True,
 ) -> tuple[str, ReleaseTarget, ExchangeRateSnapshot]:
     apply_migrations(connection)
     prompt_release = bootstrap_prompt_release(connection)
     pipeline_run_id = uuid4()
     _insert_prompt_run(connection, pipeline_run_id, prompt_release.id, now)
     decision_id = _insert_review_decision(
-        connection, pipeline_run_id, prompt_release.id, now, 91, "qualified"
+        connection,
+        pipeline_run_id,
+        prompt_release.id,
+        now,
+        91,
+        "qualified",
+        ats_evidence=ats_evidence,
+        prepare_ats_description=prepare_ats_description,
     )
     assert enqueue_qualified_review_item(connection, decision_id, now.date())
     review_item = load_review_queue(connection).items[0]
@@ -6579,11 +6745,25 @@ def _insert_review_decision(
     now: datetime,
     value: int,
     outcome: str,
+    *,
+    ats_evidence: AtsAvailable | None = None,
+    prepare_ats_description: bool = True,
 ) -> str:
     job_id = UUID(int=value)
     snapshot_id = f"{value + 100:064x}"
     evaluation_id = f"{value + 1000:064x}"
-    raw_url = f"https://example.com/jobs/review-{value}"
+    raw_url = (
+        f"https://jobs.lever.co/acme/review-{value}"
+        if ats_evidence is not None
+        else f"https://example.com/jobs/review-{value}"
+    )
+    source = "lever" if ats_evidence is not None else "other"
+    description = (
+        format_ats_description(ats_evidence, ats_evidence.description or "Build useful tools.")
+        if ats_evidence is not None and prepare_ats_description
+        else "Build useful tools."
+    )
+    location = ats_evidence.location if ats_evidence is not None else "Remote"
     connection.execute(
         """
         INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
@@ -6596,9 +6776,9 @@ def _insert_review_decision(
         INSERT INTO job_snapshots (
           id, job_id, content_digest, title, company, normalized_company,
           normalized_title, source, raw_url, description, location, keywords,
-          date_posted, observed_at
-        ) VALUES (%s, %s, %s, %s, 'Acme', 'acme', %s, 'other', %s,
-          'Build useful tools.', 'Remote', '["python"]'::jsonb, %s, %s)
+          date_posted, observed_at, ats_evidence
+        ) VALUES (%s, %s, %s, %s, 'Acme', 'acme', %s, %s, %s,
+          %s, %s, '["python"]'::jsonb, %s, %s, %s)
         """,
         (
             snapshot_id,
@@ -6606,9 +6786,13 @@ def _insert_review_decision(
             f"{value + 200:064x}",
             f"Engineer {value}",
             f"engineer {value}",
+            source,
             raw_url,
+            description,
+            location,
             now.date(),
             now,
+            Jsonb(ats_evidence.model_dump(mode="json")) if ats_evidence is not None else None,
         ),
     )
     connection.execute(
