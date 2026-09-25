@@ -679,6 +679,13 @@ def _resolve_claim_ats(
         if enable_ats_enrichment
         else AtsNotApplicable()
     )
+    listing, evidence_json, body = prepare_listing_with_ats(listing, evidence)
+    return listing, evidence, evidence_json, body
+
+
+def prepare_listing_with_ats(
+    listing: JobListing, evidence: AtsEvidence
+) -> tuple[JobListing, JsonValue, str]:
     evidence_json = _JSON.validate_python(evidence.model_dump(mode="json"))
     ats_description = evidence.description if isinstance(evidence, AtsAvailable) else None
     body = ats_description if ats_description is not None else listing.description
@@ -689,7 +696,7 @@ def _resolve_claim_ats(
                 "location": evidence.location,
             }
         )
-    return listing, evidence, evidence_json, body
+    return listing, evidence_json, body
 
 
 def _load_reevaluation_listing(
