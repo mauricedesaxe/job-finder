@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
+from job_finder.mcp_tools.acquisition import register_acquisition_tools
 from job_finder.mcp_tools.benchmarks import register_benchmark_tools
 from job_finder.mcp_tools.common import McpDependencies as McpDependencies
 from job_finder.mcp_tools.configuration import register_configuration_tools
@@ -23,6 +24,7 @@ def create_mcp_server(dependencies: McpDependencies) -> FastMCP:
         on_duplicate="error",
     )
     register_configuration_tools(mcp, dependencies)
+    register_acquisition_tools(mcp, dependencies)
     register_feedback_tools(mcp, dependencies)
     register_benchmark_tools(mcp, dependencies)
     register_release_tools(mcp, dependencies)
