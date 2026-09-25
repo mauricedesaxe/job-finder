@@ -86,7 +86,7 @@ def prepare_orchestration_run(
               configuration_revision_id, prompt_release_id, relevance_release_id,
               parameters, status, started_at
             ) VALUES (%s, %s, 'orchestration', %s, %s, %s, %s, '{}'::jsonb, 'running', %s)
-            ON CONFLICT (idempotency_key) DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING id
             """,
             (
