@@ -42,6 +42,7 @@ from job_finder.pipeline.runs import (
     SplitOrchestrationRun,
     fail_orchestration_run,
     load_run_by_id,
+    prepare_split_onboarding_run,
     prepare_split_orchestration_run,
 )
 
@@ -275,6 +276,71 @@ def test_split_onboarding_request_matches_immutable_reservation() -> None:
                 WHERE idempotency_key = 'split-onboarding'
                 """
             )
+
+
+def test_split_onboarding_run_retries_with_pinned_authority_and_rates() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.12")}, source="fallback", observed_at=now)
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _, _, target = _store_default_qualification_target(connection, now)
+        target_id = qualification_target_id(target)
+        acquisition_id = _store_alternate_acquisition_policy(connection, now)
+        root = Path(__file__).resolve().parents[1]
+        with NamedTemporaryFile(dir=root, suffix=".json") as temporary:
+            artifact_path = Path(temporary.name)
+            _ = write_implementation_artifact(root, artifact_path)
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            run_id = uuid4()
+            first = prepare_split_onboarding_run(
+                connection,
+                run_id=run_id,
+                request_key="split-onboarding-run",
+                implementation_ref="build",
+                acquisition_policy_revision_id=acquisition_id,
+                qualification_target_id=target_id,
+                artifact_path=artifact_path,
+                started_at=now,
+                fetch_rates=lambda: rates,
+            )
+            assert first.id == run_id
+            assert first.acquisition_policy_revision_id == acquisition_id
+            assert first.qualification_target_id == target_id
+            fail_orchestration_run(
+                connection,
+                run_id,
+                completed_at=now,
+                error_code="interrupted",
+                reason="retry",
+            )
+            resumed = prepare_split_onboarding_run(
+                connection,
+                run_id=run_id,
+                request_key="split-onboarding-run",
+                implementation_ref="build",
+                acquisition_policy_revision_id=acquisition_id,
+                qualification_target_id=target_id,
+                artifact_path=artifact_path,
+                started_at=now,
+                fetch_rates=lambda: pytest.fail("rates were refetched"),
+            )
+            assert resumed.id == first.id
+            assert resumed.status == "running"
+            assert resumed.exchange_rates == rates
+            with pytest.raises(ValueError, match="provenance"):
+                _ = prepare_split_onboarding_run(
+                    connection,
+                    run_id=run_id,
+                    request_key="split-onboarding-run",
+                    implementation_ref="build",
+                    acquisition_policy_revision_id=AcquisitionPolicyRevisionId("a" * 64),
+                    qualification_target_id=target_id,
+                    artifact_path=artifact_path,
+                    started_at=now,
+                    fetch_rates=lambda: pytest.fail("rates were refetched"),
+                )
 
 
 def test_split_run_keeps_independent_authority_and_legacy_columns_separate() -> None:
