@@ -316,6 +316,7 @@ def _page(
                 method="post",
             ),
             A("Operations", href="/operations"),
+            A("Qualification targets", href="/configuration/qualification-targets"),
             cls="review-shell configuration-shell split-setup",
         ),
     )
