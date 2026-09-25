@@ -359,7 +359,22 @@ def test_the_review_queue_is_the_landing_page() -> None:
 
 
 def test_the_old_review_url_redirects_to_the_landing_page() -> None:
-    response = _client(_queue()).get("/review", follow_redirects=False)
+    def unexpected_queue_load() -> Never:
+        raise AssertionError("legacy redirect must not load the review queue")
+
+    client = TestClient(
+        create_review_app(
+            ReviewQueueService(review_queue=unexpected_queue_load),
+            _configuration_service(),
+            SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
+            owner_access_service=OWNER_ACCESS,
+            now=lambda: NOW,
+        )
+    )
+    _authenticate(client)
+
+    response = client.get("/review", follow_redirects=False)
 
     assert response.status_code == 303
     assert response.headers["location"] == "/"
@@ -1097,6 +1112,11 @@ def test_a_job_page_renders_the_decision_form_for_a_queued_item() -> None:
     response = _client(_queue(item)).get(f"/review/item/{item.id}")
 
     assert response.status_code == 200
+    assert (
+        f'<form enctype="multipart/form-data" action="/review/{item.id}" method="post">'
+        in response.text
+    )
+    assert re.search(r'name="csrf_token" value="[^"]+"', response.text) is not None
     assert 'name="evaluation_id" value="0000' in response.text
     assert 'name="snapshot_id" value="0000' in response.text
     assert 'name="note"' in response.text
@@ -1377,6 +1397,22 @@ def test_rejects_a_review_without_the_signed_session_csrf_token() -> None:
     assert submissions == []
 
 
+def test_rejects_an_invalid_review_decision_without_calling_the_service() -> None:
+    submissions: list[ReviewSubmission] = []
+    item = _item(TODAY, "qualified")
+    client = _client(
+        _queue(item),
+        submit=lambda review: submissions.append(review)
+        or ReviewSaved(review_event_id=UUID(int=9)),
+    )
+
+    response = client.post(f"/review/{item.id}", data=_form(item, client) | {"decision": "later"})
+
+    assert response.status_code == 409
+    assert "This review form is invalid" in response.text
+    assert submissions == []
+
+
 def test_renders_a_domain_conflict_as_an_explicit_conflict() -> None:
     item = _item(TODAY, "qualified")
     client = _client(
@@ -1407,7 +1443,8 @@ def test_renders_submit_database_failure_as_retryable_unavailable() -> None:
     assert "Retry" in response.text
 
 
-def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
+@pytest.mark.parametrize("path", ["/", f"/review/item/{UUID(int=1)}"])
+def test_review_pages_render_queue_database_failure_as_retryable_unavailable(path: str) -> None:
     def unavailable() -> ReviewQueue:
         raise psycopg.OperationalError("database down")
 
@@ -1422,7 +1459,7 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
     client = TestClient(app)
     _authenticate(client)
 
-    response = client.get("/review")
+    response = client.get(path)
 
     assert response.status_code == 503
     assert "Review is unavailable" in response.text
@@ -1430,22 +1467,41 @@ def test_renders_queue_database_failure_as_retryable_unavailable() -> None:
     assert "previous decisions are unchanged" in response.text
 
 
-def test_requires_a_signed_session_for_review_routes() -> None:
+@pytest.mark.parametrize(
+    ("method", "path", "location"),
+    [
+        ("GET", "/review", "/login?next=%2Freview"),
+        (
+            "GET",
+            f"/review/item/{UUID(int=1)}",
+            f"/login?next=%2Freview%2Fitem%2F{UUID(int=1)}",
+        ),
+        (
+            "POST",
+            f"/review/{UUID(int=1)}",
+            f"/login?next=%2Freview%2F{UUID(int=1)}",
+        ),
+    ],
+)
+def test_requires_a_signed_session_for_review_routes(method: str, path: str, location: str) -> None:
+    def unused(*_args: object) -> Never:
+        raise AssertionError("review services must not run before authentication")
+
     client = TestClient(
         create_review_app(
-            ReviewQueueService(review_queue=lambda: _queue()),
+            ReviewQueueService(review_queue=unused),
             _configuration_service(),
             SETTINGS,
-            feedback_service=DEFAULT_FEEDBACK_SERVICE,
+            feedback_service=ReviewFeedbackService(submit=unused),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
     )
 
-    response = client.get("/review", follow_redirects=False)
+    response = client.request(method, path, follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/login?next=%2Freview"
+    assert response.headers["location"] == location
 
 
 def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
