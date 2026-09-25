@@ -200,7 +200,7 @@ profiles, frozen fixtures — enforces decisions; the LLM only informs them.
   `job_finder/dagster.py` or `job_finder/pipeline/` — must update the page in
   the same change: `CONTROL_DEFINITIONS` in
   `job_finder/operations/control_plane.py`, plus `_CONTROL_DESCRIPTIONS` and the
-  pipeline explainer in `job_finder/review/app.py` (update
+  pipeline explainer in `job_finder/operations/web.py` (update
   `job_finder/review/test_app.py` to match). A change that alters the DAG
   without updating the control plane is incomplete.
 
