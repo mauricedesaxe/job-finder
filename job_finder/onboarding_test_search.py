@@ -457,6 +457,7 @@ def prepare_onboarding_provider_dispatch(
     body_digest: str,
     attempted_at: datetime,
     retryable_statuses: frozenset[int] = _DEFAULT_PROVIDER_RETRYABLE_STATUSES,
+    retry_reserved: bool = False,
 ) -> OnboardingProviderDispatch:
     _require_autocommit(connection)
     with connection.transaction():
@@ -473,11 +474,11 @@ def prepare_onboarding_provider_dispatch(
             (request_key, job_id, operation_key, provider, body_digest),
         ).fetchone()
         if prior is not None:
-            if str(prior[1]) == "reserved":
+            if str(prior[1]) == "reserved" and not retry_reserved:
                 raise OnboardingProviderOutcomeUnknown(
                     "A previous provider request has no recorded response"
                 )
-            if cast(int, prior[2]) not in retryable_statuses:
+            if str(prior[1]) == "responded" and cast(int, prior[2]) not in retryable_statuses:
                 return OnboardingProviderDispatch(
                     attempt_number=cast(int, prior[0]),
                     cached_status_code=cast(int, prior[2]),

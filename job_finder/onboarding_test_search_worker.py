@@ -282,6 +282,7 @@ def guard_onboarding_provider_boundaries(
     jev_sender = boundaries.jev_sender or send_system_one
     current_job_id: UUID | None = None
     current_operation_key: str | None = None
+    seen_chat_dispatches: set[tuple[UUID, str, str]] = set()
 
     def select_claim(claim: JobWorkClaim) -> None:
         nonlocal current_job_id, current_operation_key
@@ -296,12 +297,20 @@ def guard_onboarding_provider_boundaries(
         body: dict[str, object],
         provider: Literal["openrouter", "typesafe"],
         retryable_statuses: frozenset[int],
+        *,
+        retry_reserved: bool = False,
+        retry_prior_success: bool = False,
     ) -> tuple[UUID, str, str, int, int | None, str | None, str | None, float | None]:
         if current_job_id is None or current_operation_key is None:
             raise RuntimeError("Provider request has no claimed onboarding operation")
         digest = hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        if retry_prior_success:
+            identity = (current_job_id, current_operation_key, digest)
+            if identity in seen_chat_dispatches:
+                retryable_statuses = retryable_statuses | {200}
+            seen_chat_dispatches.add(identity)
         reservation = prepare_onboarding_provider_dispatch(
             connection,
             request_key=request.idempotency_key,
@@ -312,6 +321,7 @@ def guard_onboarding_provider_boundaries(
             body_digest=digest,
             attempted_at=now(),
             retryable_statuses=retryable_statuses,
+            retry_reserved=retry_reserved,
         )
         return (
             current_job_id,
@@ -328,7 +338,7 @@ def guard_onboarding_provider_boundaries(
         url: str, headers: Mapping[str, str], body: dict[str, object], timeout: float
     ) -> HttpResponse:
         job_id, operation_key, digest, attempt, cached_status, cached_body, _, _ = dispatch(
-            body, "openrouter", RETRYABLE_HTTP_STATUSES
+            body, "openrouter", RETRYABLE_HTTP_STATUSES, retry_prior_success=True
         )
         if cached_status is not None and cached_body is not None:
             return HttpResponse(status_code=cached_status, body=cached_body)
@@ -397,7 +407,7 @@ def guard_onboarding_provider_boundaries(
     ) -> HttpResponse:
         body: dict[str, object] = {"generation_id": provider_response_id}
         job_id, operation_key, digest, attempt, cached_status, cached_body, _, _ = dispatch(
-            body, "openrouter", _GENERATION_RETRYABLE_HTTP_STATUSES
+            body, "openrouter", _GENERATION_RETRYABLE_HTTP_STATUSES, retry_reserved=True
         )
         if cached_status is not None and cached_body is not None:
             return HttpResponse(status_code=cached_status, body=cached_body)

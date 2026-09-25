@@ -424,6 +424,20 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
             (job_id, raw_url, now, now),
         )
         generation_calls = 0
+        chat_calls = 0
+
+        def send_chat(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            nonlocal chat_calls
+            chat_calls += 1
+            return HttpResponse(
+                status_code=200,
+                body='{"choices":[]}' if chat_calls == 1 else '{"choices":[{"message":{}}]}',
+            )
 
         def get_generation(
             _url: str,
@@ -446,6 +460,7 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
                 search=lambda _keyword, _domain: pytest.fail("search was called"),
                 scrape=lambda _url: pytest.fail("scrape was called"),
                 fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
+                model_sender=send_chat,
                 generation_sender=get_generation,
             ),
             claimed,
@@ -470,6 +485,37 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
         generation_response = guarded.generation_sender(
             "https://openrouter.test", {}, "generation-1", 30
         )
+        assert guarded.model_sender is not None
+        malformed = guarded.model_sender("https://openrouter.test", {}, {"model": "test"}, 30)
+        recovered, recovered_claim = guard_onboarding_provider_boundaries(
+            connection,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: pytest.fail("search was called"),
+                scrape=lambda _url: pytest.fail("scrape was called"),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS was called"),
+                model_sender=send_chat,
+            ),
+            claimed,
+            owner_token,
+            lambda: now,
+        )
+        recovered_claim(
+            JobWorkClaim(
+                job_id=job_id,
+                raw_url=raw_url,
+                keyword="provider receipt",
+                owner_token=owner_token,
+                attempt_count=1,
+                lease_expires_at=now + timedelta(minutes=5),
+            )
+        )
+        assert recovered.model_call_started is not None
+        assert recovered.model_sender is not None
+        recovered.model_call_started("evaluation:criterion")
+        replayed_malformed = recovered.model_sender(
+            "https://openrouter.test", {}, {"model": "test"}, 30
+        )
+        retried_chat = recovered.model_sender("https://openrouter.test", {}, {"model": "test"}, 30)
         first = prepare_onboarding_provider_dispatch(
             connection,
             request_key=claimed.idempotency_key,
@@ -554,6 +600,28 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
             attempted_at=now,
             retryable_statuses=frozenset({404, 429}),
         )
+        _ = prepare_onboarding_provider_dispatch(
+            connection,
+            request_key=claimed.idempotency_key,
+            owner_token=owner_token,
+            job_id=job_id,
+            operation_key="evaluation:criterion",
+            provider="openrouter",
+            body_digest="e" * 64,
+            attempted_at=now,
+            retry_reserved=True,
+        )
+        generation_after_crash = prepare_onboarding_provider_dispatch(
+            connection,
+            request_key=claimed.idempotency_key,
+            owner_token=owner_token,
+            job_id=job_id,
+            operation_key="evaluation:criterion",
+            provider="openrouter",
+            body_digest="e" * 64,
+            attempted_at=now,
+            retry_reserved=True,
+        )
         with pytest.raises(OnboardingProviderOutcomeUnknown):
             _ = prepare_onboarding_provider_dispatch(
                 connection,
@@ -587,12 +655,16 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
 
     assert first.cached_status_code is None
     assert generation_calls == 2
+    assert chat_calls == 2
+    assert malformed == replayed_malformed
+    assert retried_chat.body != malformed.body
     assert generation_response.status_code == 200
     assert replay.cached_status_code == 200
     assert replay.cached_body == '{"id":"accepted"}'
     assert distinct_operation.cached_status_code is None
     assert generation_retry.attempt_number == 2
     assert generation_retry.cached_status_code is None
+    assert generation_after_crash.attempt_number == 2
 
 
 def test_worker_recovers_without_repeating_a_reserved_search_query(
