@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from http.cookies import SimpleCookie
 import re
-from typing import Never, cast
+from typing import Literal, Never, cast
 from uuid import UUID
 
 import psycopg
@@ -15,12 +15,23 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from job_finder.config import ReviewAppSettings
+from job_finder.evaluation.models import PromptReleaseId, RelevanceReleaseId
 from job_finder.execution_budget import (
     BudgetSaved,
     BudgetSetupService,
     BudgetSetupState,
     ExecutionBudgetPolicy,
     ExecutionEstimate,
+)
+from job_finder.onboarding_test_search import (
+    OnboardingTestSearchAccepted,
+    OnboardingTestSearchLimits,
+    OnboardingTestSearchRequest,
+)
+from job_finder.review.onboarding import (
+    OnboardingSearchProgress,
+    OnboardingSearchService,
+    OnboardingSearchJob,
 )
 from job_finder.provider_credentials import (
     ProviderCapability,
@@ -125,6 +136,7 @@ from job_finder.review.owner_access import (
     OwnerBootstrapped,
     OwnerBootstrapConflict,
 )
+from job_finder.search_configuration import SearchConfigurationRevisionId
 
 TODAY = date(2026, 9, 10)
 YESTERDAY = date(2026, 9, 9)
@@ -198,6 +210,7 @@ def test_http_route_manifest_stays_stable() -> None:
         "/setup/budget",
         "/setup/providers",
         "/setup/providers/continue",
+        "/setup/test-search",
     }
     expected = sorted(
         [(method, path) for path in get_paths for method in ("GET", "HEAD")]
@@ -224,6 +237,7 @@ def test_http_route_manifest_stays_stable() -> None:
             ("/setup/budget", "create_review_app_budget_setup_form"),
             ("/setup/budget", "create_review_app_budget_setup_submit"),
             ("/setup/test-search", "create_review_app_test_search_setup"),
+            ("/setup/test-search", "create_review_app_test_search_submit"),
             ("/login", "create_review_app_login_submit"),
             ("/", "create_review_app_home"),
             ("/review", "create_review_app_review_page"),
@@ -1773,6 +1787,10 @@ def test_budget_setup_shows_bounds_and_advances_to_test_search() -> None:
             feedback_service=DEFAULT_FEEDBACK_SERVICE,
             owner_access_service=owner,
             budget_setup_service=budget,
+            test_search_service=OnboardingSearchService(
+                inspect=lambda: OnboardingSearchProgress(request=None),
+                launch=lambda _actor, _now: pytest.fail("search was unexpectedly launched"),
+            ),
             now=lambda: NOW,
         )
     )
@@ -1797,6 +1815,140 @@ def test_budget_setup_shows_bounds_and_advances_to_test_search() -> None:
     assert completed.status_code == 303
     assert completed.headers["location"] == "/setup/test-search"
     assert "Ready for a bounded test search" in client.get("/setup/test-search").text
+
+
+def _test_search_request(
+    state: Literal["pending", "leased", "completed", "failed"],
+) -> OnboardingTestSearchRequest:
+    return OnboardingTestSearchRequest(
+        idempotency_key="owner-setup:test",
+        run_id=UUID(int=41),
+        state=state,
+        configuration_revision_id=SearchConfigurationRevisionId("a" * 64),
+        prompt_release_id=PromptReleaseId("b" * 64),
+        relevance_release_id=RelevanceReleaseId("c" * 64),
+        release_generation=1,
+        budget_policy_version=1,
+        budget_reservation_key="onboarding-test-search:owner-setup:test",
+        limits=OnboardingTestSearchLimits(
+            max_queries=3,
+            max_urls=10,
+            max_jobs=2,
+            max_work_attempts=3,
+            max_provider_attempts=20,
+            run_allowance_usd=Decimal("2"),
+        ),
+        attempt_count=1,
+        provider_attempt_count=2,
+        owner_token=None,
+        lease_expires_at=None,
+        error_code="provider_outage" if state == "failed" else None,
+        error_reason="The provider did not respond" if state == "failed" else None,
+        created_at=NOW,
+        updated_at=NOW,
+        completed_at=NOW if state in {"completed", "failed"} else None,
+    )
+
+
+def _test_search_client() -> (
+    tuple[
+        TestClient,
+        list[OwnerAccessState],
+        list[OnboardingSearchProgress],
+        list[tuple[str, datetime]],
+    ]
+):
+    owner_state = [OwnerAccessState(stage=OnboardingStage.TEST_SEARCH, has_password=True)]
+    progress = [OnboardingSearchProgress(request=None)]
+    launches: list[tuple[str, datetime]] = []
+
+    def launch(actor: str, timestamp: datetime) -> OnboardingTestSearchAccepted:
+        launches.append((actor, timestamp))
+        request = _test_search_request("pending")
+        progress[0] = OnboardingSearchProgress(request=request)
+        return OnboardingTestSearchAccepted(replayed=False, request=request)
+
+    owner = OwnerAccessService(
+        load_state=lambda: owner_state[0],
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            ReviewQueueService(review_queue=lambda: _queue()),
+            _configuration_service(),
+            SETTINGS,
+            feedback_service=DEFAULT_FEEDBACK_SERVICE,
+            owner_access_service=owner,
+            test_search_service=OnboardingSearchService(inspect=lambda: progress[0], launch=launch),
+            now=lambda: NOW,
+        )
+    )
+    _authenticate(client)
+    return client, owner_state, progress, launches
+
+
+def test_test_search_launch_requires_csrf_and_polls_durable_progress() -> None:
+    client, _, progress, launches = _test_search_client()
+    ready = client.get("/setup/test-search")
+    assert "Start test search" in ready.text
+    assert client.post("/setup/test-search", data={"csrf_token": "wrong"}).status_code == 403
+    assert launches == []
+
+    started = client.post(
+        "/setup/test-search",
+        data={"csrf_token": _csrf(client)},
+        follow_redirects=False,
+    )
+    assert started.status_code == 303
+    assert started.headers["location"] == "/setup/test-search"
+    assert launches == [("owner", NOW)]
+    queued = client.get("/setup/test-search")
+    assert "Test search queued" in queued.text
+    assert 'http-equiv="refresh" content="5;url=/setup/test-search"' in queued.text
+
+    progress[0] = OnboardingSearchProgress(
+        request=_test_search_request("leased"),
+        queries_completed=2,
+        urls_checked=5,
+        jobs_found=1,
+        jobs=(OnboardingSearchJob("Engineer", "Acme", "https://example.com/job"),),
+    )
+    running = client.get("/setup/test-search")
+    assert "Test search running" in running.text
+    assert "2 of 3 searches completed" in running.text
+    assert "Engineer" in running.text
+    assert "Acme" in running.text
+
+
+def test_test_search_failure_can_retry_and_completed_results_remain_visible() -> None:
+    client, owner_state, progress, launches = _test_search_client()
+    progress[0] = OnboardingSearchProgress(request=_test_search_request("failed"))
+    failed = client.get("/setup/test-search")
+    assert "The provider did not respond" in failed.text
+    assert "Retry test search" in failed.text
+    assert 'http-equiv="refresh"' not in failed.text
+    retried = client.post(
+        "/setup/test-search",
+        data={"csrf_token": _csrf(client)},
+        follow_redirects=False,
+    )
+    assert retried.status_code == 303
+    assert len(launches) == 1
+
+    progress[0] = OnboardingSearchProgress(
+        request=_test_search_request("completed"),
+        queries_completed=3,
+        urls_checked=8,
+        jobs_found=1,
+        jobs=(OnboardingSearchJob("Engineer", "Acme", "https://example.com/job"),),
+    )
+    owner_state[0] = OwnerAccessState(stage=OnboardingStage.COMPLETE, has_password=True)
+    done = client.get("/setup/test-search")
+    assert "Test search complete" in done.text
+    assert "Open review queue" in done.text
+    assert "Engineer" in done.text
+    assert 'http-equiv="refresh"' not in done.text
 
 
 def test_completed_upgrade_without_a_budget_is_routed_to_budget_setup() -> None:

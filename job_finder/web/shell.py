@@ -138,7 +138,11 @@ def timestamp(value: datetime, *, now: datetime) -> object:
 
 
 def document(
-    content: object, *, title: str = "Daily job review", scripts: tuple[object, ...] = ()
+    content: object,
+    *,
+    title: str = "Daily job review",
+    scripts: tuple[object, ...] = (),
+    refresh: tuple[int, str] | None = None,
 ) -> str:
     return str(
         to_xml(
@@ -147,6 +151,9 @@ def document(
                     Meta(charset="utf-8"),
                     Meta(name="viewport", content="width=device-width, initial-scale=1"),
                     Meta(name="color-scheme", content="light dark"),
+                    Meta(http_equiv="refresh", content=f"{refresh[0]};url={refresh[1]}")
+                    if refresh is not None
+                    else None,
                     Title(title),
                     Style(_CSS),
                 ),

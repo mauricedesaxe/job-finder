@@ -51,7 +51,9 @@ from job_finder.execution_budget import (
     BudgetChanged,
     BudgetSetupService,
     BudgetSetupState,
+    ExecutionBlocked,
 )
+from job_finder.onboarding_test_search import OnboardingTestSearchAccepted
 from job_finder.review.configuration import register_configuration_routes
 from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.web.app import ReadinessProbe, create_web_app, static_url
@@ -140,7 +142,11 @@ from job_finder.review.operations import (
     WorkItemNotFound,
     unknown_operations_service,
 )
-from job_finder.review.onboarding import OnboardingProgressService
+from job_finder.review.onboarding import (
+    OnboardingProgressService,
+    OnboardingSearchProgress,
+    OnboardingSearchService,
+)
 from job_finder.review.owner_access import (
     MAXIMUM_PASSWORD_INPUT_LENGTH,
     MAXIMUM_PASSWORD_LENGTH,
@@ -192,6 +198,7 @@ def create_review_app(
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
     onboarding_progress_service: OnboardingProgressService | None = None,
+    test_search_service: OnboardingSearchService | None = None,
     budget_setup_service: BudgetSetupService | None = None,
     readiness: ReadinessProbe = lambda: None,
     operations_service: OperationsService | None = None,
@@ -503,12 +510,57 @@ def create_review_app(
         return RedirectResponse("/setup/test-search", status_code=303)
 
     @app.route("/setup/test-search", methods=["GET"])
-    def test_search_setup() -> HTMLResponse:
-        return state_response(
-            "Ready for a bounded test search",
-            "Provider credentials, preferences, and budget are active. The test search is next.",
-            status_code=200,
+    def test_search_setup(request: Request) -> HTMLResponse:
+        if test_search_service is None:
+            return state_response(
+                "Test search is unavailable", "Reload after the service recovers.", status_code=503
+            )
+        try:
+            progress = test_search_service.inspect()
+        except (psycopg.Error, RuntimeError):
+            return state_response(
+                "Test search is unavailable", "Reload after the database recovers.", status_code=503
+            )
+        refresh = (
+            (5, "/setup/test-search")
+            if progress.request is not None and progress.request.state in {"pending", "leased"}
+            else None
         )
+        return HTMLResponse(
+            document(
+                _test_search_content(progress, ensure_csrf_token(request)),
+                title="Test search",
+                refresh=refresh,
+            )
+        )
+
+    @app.route("/setup/test-search", methods=["POST"])
+    async def test_search_submit(request: Request) -> HTMLResponse | RedirectResponse:
+        if test_search_service is None:
+            return state_response(
+                "Test search is unavailable", "Reload after the service recovers.", status_code=503
+            )
+        form = await request.form()
+        if not valid_csrf(request, form_text(form, "csrf_token")):
+            return state_response(
+                "Test search was not started", "Reload the page and try again.", status_code=403
+            )
+        try:
+            result = test_search_service.launch(actor, now())
+        except (psycopg.Error, RuntimeError):
+            return state_response(
+                "Test search is unavailable",
+                "No new search was started. Reload and try again.",
+                status_code=503,
+            )
+        if isinstance(result, ExecutionBlocked):
+            return state_response(
+                "Test search could not start",
+                _TEST_SEARCH_BLOCKED_REASONS[result.reason],
+                status_code=409,
+            )
+        assert isinstance(result, OnboardingTestSearchAccepted)
+        return RedirectResponse("/setup/test-search", status_code=303)
 
     @app.route("/login", methods=["POST"])
     async def login_submit(request: Request) -> HTMLResponse | RedirectResponse:
@@ -1244,6 +1296,82 @@ def _budget_setup_content(
             method="post",
             cls="editor-section",
         ),
+        cls="configuration-shell",
+    )
+
+
+_TEST_SEARCH_BLOCKED_REASONS = {
+    "onboarding_incomplete": "Finish the earlier setup steps, then try again.",
+    "budget_not_configured": "Set a monthly budget before starting the test search.",
+    "configuration_exceeds_policy": "The current search exceeds its budget limits. Review the budget and search settings.",
+    "monthly_budget_exhausted": "The monthly budget is exhausted. Increase it before retrying.",
+    "already_consumed": "This test search has already used its allowance. Reload to see its result.",
+}
+
+
+def _test_search_content(progress: OnboardingSearchProgress, csrf_token: str) -> object:
+    request = progress.request
+    if request is None:
+        title = "Ready for a bounded test search"
+        explanation = "Run a small search with the preferences and budget you just set."
+    elif request.state == "pending":
+        title = "Test search queued"
+        explanation = "Your search is waiting to start. This page updates automatically."
+    elif request.state == "leased":
+        title = "Test search running"
+        explanation = "Jobs are being found and checked. You can leave this page and return."
+    elif request.state == "failed":
+        title = "Test search stopped"
+        explanation = "The search did not finish. Review the reason below, then retry when ready."
+    else:
+        title = "Test search complete"
+        explanation = "Setup is complete. You can review the jobs found so far."
+    start_form = (
+        Form(
+            Input(type="hidden", name="csrf_token", value=csrf_token),
+            Button(
+                "Retry test search" if request is not None else "Start test search", type="submit"
+            ),
+            action="/setup/test-search",
+            method="post",
+        )
+        if request is None or request.state == "failed"
+        else None
+    )
+    return Main(
+        Div(
+            Small("JF / FIRST RUN", cls="eyebrow"),
+            H1(title),
+            P(explanation, cls="login-intro"),
+            cls="review-header",
+        ),
+        Section(
+            H2("Progress"),
+            P(
+                f"{progress.queries_completed} of {request.limits.max_queries} searches completed · "
+                + f"{progress.urls_checked} of {request.limits.max_urls} URLs checked · "
+                + f"{progress.jobs_found} of {request.limits.max_jobs} jobs added"
+            )
+            if request is not None
+            else P("The search will stay within the budget and job limits you set."),
+            P(request.error_reason[:500], role="alert")
+            if request is not None and request.state == "failed" and request.error_reason
+            else None,
+            start_form,
+            A("Open review queue →", href="/review")
+            if request is not None and request.state == "completed"
+            else None,
+            cls="editor-section",
+        ),
+        Section(
+            H2("Jobs found"),
+            Ul(*(Li(Strong(job.title), P(job.company), Small(job.url)) for job in progress.jobs))
+            if progress.jobs
+            else P("No jobs to show yet."),
+            cls="editor-section",
+        )
+        if request is not None
+        else None,
         cls="configuration-shell",
     )
 

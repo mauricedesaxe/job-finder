@@ -22,7 +22,10 @@ from job_finder.review.operations import (
     postgres_operations_service,
     postgres_runs_service,
 )
-from job_finder.review.onboarding import postgres_onboarding_progress_service
+from job_finder.review.onboarding import (
+    postgres_onboarding_progress_service,
+    postgres_test_search_service,
+)
 from job_finder.review.owner_access import (
     OnboardingStage,
     import_legacy_owner_password,
@@ -83,6 +86,7 @@ def create_app() -> FastHTML:
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
         onboarding_progress_service=postgres_onboarding_progress_service(connect),
+        test_search_service=postgres_test_search_service(connect),
         budget_setup_service=postgres_budget_setup_service(connect),
         readiness=readiness,
         operations_service=postgres_operations_service(connect),

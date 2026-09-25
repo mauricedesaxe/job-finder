@@ -244,6 +244,16 @@ def _finish_request(
         )
         if finished is None:
             raise RuntimeError("Onboarding test search lease was lost")
+        advanced = connection.execute(
+            """
+            UPDATE owner_onboarding
+            SET stage = 'complete', updated_at = %s
+            WHERE singleton_id = 1 AND stage = 'test_search'
+            """,
+            (finished_at,),
+        ).rowcount
+        if advanced != 1:
+            raise RuntimeError("Owner onboarding stage changed before test search completed")
         settle_execution_budget(
             connection,
             idempotency_key=request.budget_reservation_key,
