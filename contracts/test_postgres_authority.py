@@ -87,10 +87,14 @@ from job_finder.projections.outbox import (
     LangfuseUnavailable,
     ProjectionDelivered,
     ProjectionFailed,
+    ProjectionIdle,
+    ProjectionLeaseLost,
     deliver_next_projection,
     load_projection_queue_status,
 )
+from job_finder.projections.rebuild import rebuild_langfuse_projections
 from job_finder.evaluation.prompt_releases import (
+    PromptRelease,
     bootstrap_prompt_release,
     load_prompt_release,
 )
@@ -114,6 +118,9 @@ from job_finder.evaluation.release_targets import (
 from job_finder.evaluation.models import (
     CriterionAccepted,
     EvaluationResult,
+    InputDigest,
+    ModelCallAttempt,
+    ModelRequestId,
     RetryableOperationalError,
     TerminalOperationalError,
     ModelCallContext,
@@ -175,6 +182,7 @@ from job_finder.search_configuration import (
 from job_finder.evaluation.openrouter import (
     HttpResponse,
     RetryPolicy,
+    enqueue_model_call_projection,
     evaluate_prompt,
     postgres_model_call_persistence,
     prompt_input_digest,
@@ -5060,6 +5068,280 @@ def test_runs_trials_rejects_operational_failures_and_retries_projection(
         ).fetchone() == (2,)
 
 
+def test_rebuilds_langfuse_projections_idempotently(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        manifest_id, target, rates = _seed_evaluation_execution_context(connection, now)
+        prompt_release = load_prompt_release(connection, target.prompt_release_id)
+        faithful_release = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_faithful_policy(prompt_release)),
+            created_at=now,
+            created_by="contract",
+        )
+        candidate_target = ReleaseTarget(
+            prompt_release_id=target.prompt_release_id,
+            relevance_release_id=faithful_release.id,
+        )
+
+        def evaluator(
+            case: EvaluationManifestCase,
+            case_target: ReleaseTarget,
+            trial: int,
+        ) -> EvaluationResult:
+            if case.expected_outcome == "qualified":
+                return Qualified(reason="Expected positive.", profile_name="profile")
+            return Rejected(reason="Expected negative.")
+
+        def execute(
+            idempotency_key: str, run_target: ReleaseTarget, implementation_ref: str
+        ) -> str:
+            execution = run_manifest(
+                connection,
+                command=EvaluateManifestCommand(
+                    manifest_id=manifest_id,
+                    target=run_target,
+                    implementation_ref=implementation_ref,
+                    idempotency_key=idempotency_key,
+                ),
+                create_exchange_rates=lambda: rates,
+                create_evaluator=lambda _rates, _record: evaluator,
+                now=lambda: now,
+            )
+            assert isinstance(execution, CompletedEvaluationExecution)
+            return execution.run.id
+
+        baseline_run_id = execute("evaluation:baseline", target, "rebuild-baseline")
+        candidate_run_id = execute("evaluation:candidate", candidate_target, "rebuild-candidate")
+        comparison = preview_run_comparison(connection, baseline_run_id, candidate_run_id)
+        promotion = record_prompt_promotion_decision(
+            connection,
+            baseline_run_id=baseline_run_id,
+            candidate_run_id=candidate_run_id,
+            expected_comparison_id=comparison.id,
+            decision="rejected",
+            reason="Owner declined promotion.",
+            actor="owner",
+            created_at=now,
+            idempotency_key="promotion:rebuild",
+        )
+        assert promotion.decision == "rejected"
+        _insert_accepted_model_call_attempt(connection, prompt_release, now)
+
+        delivered = deliver_next_projection(
+            connection,
+            sender=lambda projection: {"remote_id": f"langfuse-{projection.idempotency_key}"},
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(minutes=5),
+        )
+        assert isinstance(delivered, ProjectionDelivered)
+
+        first_counts = rebuild_langfuse_projections(connection)
+        assert first_counts == {"model calls": 1, "manifests": 1, "runs": 2, "promotions": 1}
+        rows_after_first = connection.execute(
+            "SELECT id, state FROM langfuse_projection_items ORDER BY id"
+        ).fetchall()
+
+        second_counts = rebuild_langfuse_projections(connection)
+        assert second_counts == first_counts
+        assert (
+            connection.execute(
+                "SELECT id, state FROM langfuse_projection_items ORDER BY id"
+            ).fetchall()
+            == rows_after_first
+        )
+        assert connection.execute(
+            """
+            SELECT id, remote_id FROM langfuse_projection_items WHERE state = 'completed'
+            """
+        ).fetchall() == [(delivered.projection_id, f"langfuse-{delivered.projection_id}")]
+
+
+def test_rebuilds_model_call_payloads_matching_live_enqueue(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        attempt = _insert_accepted_model_call_attempt(connection, release, now)
+        enqueue_model_call_projection(connection, attempt)
+        live_payload = connection.execute(
+            """
+            SELECT payload, payload_digest FROM langfuse_projection_items
+            WHERE kind = 'model_call' AND source_id = %s
+            """,
+            (str(attempt.id),),
+        ).fetchone()
+        assert live_payload is not None
+        connection.execute(
+            "DELETE FROM langfuse_projection_items WHERE kind = 'model_call' AND source_id = %s",
+            (str(attempt.id),),
+        )
+
+        counts = rebuild_langfuse_projections(connection)
+        assert counts["model calls"] == 1
+        rebuilt_payload = connection.execute(
+            """
+            SELECT payload, payload_digest FROM langfuse_projection_items
+            WHERE kind = 'model_call' AND source_id = %s
+            """,
+            (str(attempt.id),),
+        ).fetchone()
+        assert rebuilt_payload == live_payload
+
+
+def test_reclaims_expired_projection_leases_and_reports_loss(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        _seed_evaluation_execution_context(connection, now)
+        stealing_owner = uuid4()
+
+        def stealing_sender(projection: LangfuseProjection) -> object:
+            connection.execute(
+                """
+                UPDATE langfuse_projection_items
+                SET owner_token = %s, lease_expires_at = %s
+                WHERE id = %s
+                """,
+                (stealing_owner, now + timedelta(minutes=5), projection.id),
+            )
+            return {"remote_id": "stolen-delivery"}
+
+        lost = deliver_next_projection(
+            connection,
+            sender=stealing_sender,
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(minutes=5),
+        )
+        assert isinstance(lost, ProjectionLeaseLost)
+        assert connection.execute(
+            """
+            SELECT state, owner_token, attempt_count, remote_id, completed_at
+            FROM langfuse_projection_items WHERE id = %s
+            """,
+            (lost.projection_id,),
+        ).fetchone() == ("leased", stealing_owner, 1, None, None)
+
+        connection.execute(
+            "UPDATE langfuse_projection_items SET lease_expires_at = %s WHERE id = %s",
+            (now - timedelta(seconds=1), lost.projection_id),
+        )
+        reclaimed = deliver_next_projection(
+            connection,
+            sender=lambda projection: {"remote_id": f"langfuse-{projection.idempotency_key}"},
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(minutes=5),
+        )
+        assert isinstance(reclaimed, ProjectionDelivered)
+        assert reclaimed.projection_id == lost.projection_id
+        assert connection.execute(
+            """
+            SELECT state, attempt_count, remote_id FROM langfuse_projection_items
+            WHERE id = %s
+            """,
+            (lost.projection_id,),
+        ).fetchone() == (
+            "completed",
+            2,
+            f"langfuse-{lost.projection_id}",
+        )
+
+
+def test_records_invalid_projection_responses_and_reports_idle_queue(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    with _connection(authority_schema) as connection:
+        _seed_evaluation_execution_context(connection, now)
+
+        def empty_sender(_projection: LangfuseProjection) -> object:
+            return {}
+
+        failed = deliver_next_projection(
+            connection,
+            sender=empty_sender,
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(hours=1),
+        )
+        assert isinstance(failed, ProjectionFailed)
+        assert failed.error_code == "invalid_response"
+        status = load_projection_queue_status(connection)
+        assert status.pending_count == 0
+        assert status.failed_count == 1
+        assert [summary.error_code for summary in status.failures] == ["invalid_response"]
+        reason = connection.execute(
+            "SELECT last_error ->> 'reason' FROM langfuse_projection_items WHERE id = %s",
+            (failed.projection_id,),
+        ).fetchone()
+        assert reason is not None
+        assert "remote_id" in str(reason[0])
+        assert "Field required" in str(reason[0])
+
+        idle = deliver_next_projection(
+            connection,
+            sender=empty_sender,
+            owner_token=uuid4(),
+            now=now,
+            lease_for=timedelta(minutes=1),
+            retry_after=timedelta(hours=1),
+        )
+        assert isinstance(idle, ProjectionIdle)
+
+
+def test_pages_review_feedback_across_the_default_limit(authority_schema: str) -> None:
+    now = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    run_id = uuid4()
+    feedback_count = 55
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        moments: list[datetime] = []
+        for index in range(feedback_count):
+            evaluation_id = _insert_review_decision(
+                connection, run_id, release.id, now, 400 + index, "qualified"
+            )
+            assert enqueue_qualified_review_item(connection, evaluation_id, now.date())
+            review_item = connection.execute(
+                "SELECT id FROM review_items WHERE evaluation_id = %s", (evaluation_id,)
+            ).fetchone()
+            assert review_item is not None
+            moment = now + timedelta(seconds=index)
+            feedback = record_review(
+                connection,
+                ReviewSubmission(
+                    review_item_id=UUID(str(review_item[0])),
+                    evaluation_id=evaluation_id,
+                    snapshot_id=f"{500 + index:064x}",
+                    decision="pursue",
+                    target_profile="applied-ai-product-engineer",
+                    primary_reason="technology-fit",
+                    actor="owner",
+                    created_at=moment,
+                ),
+            )
+            assert isinstance(feedback, ReviewSaved)
+            moments.append(moment)
+        newest_first = sorted(moments, reverse=True)
+
+        first_page = list_review_feedback(connection)
+        assert len(first_page.items) == 50
+        assert first_page.next_offset == 50
+        assert [item.created_at for item in first_page.items] == newest_first[:50]
+
+        second_page = list_review_feedback(connection, offset=50)
+        assert len(second_page.items) == feedback_count - 50
+        assert second_page.next_offset is None
+        assert [item.created_at for item in second_page.items] == newest_first[50:]
+
+
 def _seed_evaluation_execution_context(
     connection: psycopg.Connection[tuple[object, ...]],
     now: datetime,
@@ -5115,6 +5397,95 @@ def _seed_evaluation_execution_context(
     )
     rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now)
     return manifest.id, target, rates
+
+
+def _insert_accepted_model_call_attempt(
+    connection: psycopg.Connection[tuple[object, ...]],
+    release: PromptRelease,
+    now: datetime,
+) -> ModelCallAttempt:
+    version = release.versions[0]
+    model_run_id = uuid4()
+    processing_attempt_id = uuid4()
+    attempt_id = uuid4()
+    request_id = token_hex(32)
+    input_digest = token_hex(32)
+    connection.execute(
+        """
+        INSERT INTO pipeline_runs (
+          id, idempotency_key, kind, implementation_ref, prompt_release_id, parameters,
+          status, started_at, completed_at
+        ) VALUES (%s, %s, 'evaluation', 'rebuild-ref', %s, '{}'::jsonb,
+          'completed', %s, %s)
+        """,
+        (model_run_id, f"model-call:{model_run_id}", release.id, now, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO processing_attempts (
+          id, pipeline_run_id, operation_key, attempt_number, input_digest,
+          status, started_at, completed_at
+        ) VALUES (%s, %s, 'rebuild_contract', 0, %s, 'completed', %s, %s)
+        """,
+        (processing_attempt_id, model_run_id, input_digest, now, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO model_call_attempts (
+          id, processing_attempt_id, pipeline_run_id, prompt_release_id, request_id,
+          attempt_number, operation_key, prompt_name, prompt_version_id, input_digest,
+          requested_model, provider, provider_response_id, status, parsed_output,
+          raw_response, input_tokens, output_tokens, cost_usd, latency_ms, observed_at,
+          request_messages, response_model, error
+        ) VALUES (
+          %s, %s, %s, %s, %s, 0, 'rebuild_contract', %s, %s, %s,
+          'parity-model', 'typesafe', NULL, 'accepted', %s, %s, 7, 3, %s, 11, %s,
+          %s, 'parity-model', NULL
+        )
+        """,
+        (
+            attempt_id,
+            processing_attempt_id,
+            model_run_id,
+            release.id,
+            request_id,
+            version.definition.name,
+            version.id,
+            input_digest,
+            Jsonb({"pass": True}),
+            Jsonb({"choices": []}),
+            Decimal("0.00000001"),
+            now,
+            Jsonb([{"role": "user", "content": "parity"}]),
+        ),
+    )
+    return ModelCallAttempt(
+        id=attempt_id,
+        context=ModelCallContext(
+            processing_attempt_id=processing_attempt_id,
+            pipeline_run_id=model_run_id,
+            prompt_release_id=release.id,
+            operation_key="rebuild_contract",
+            input_digest=InputDigest(input_digest),
+        ),
+        request_id=ModelRequestId(request_id),
+        attempt_number=0,
+        prompt_name=version.definition.name,
+        prompt_version_id=version.id,
+        requested_model="parity-model",
+        response_model="parity-model",
+        provider_response_id=None,
+        status="accepted",
+        parsed_output={"pass": True},
+        raw_response={"choices": []},
+        input_tokens=7,
+        output_tokens=3,
+        cost_usd=Decimal("0.00000001"),
+        latency_ms=11,
+        error=None,
+        observed_at=now,
+        request_messages=({"role": "user", "content": "parity"},),
+    )
 
 
 def _insert_review_decision(
