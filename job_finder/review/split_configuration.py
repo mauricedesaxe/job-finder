@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from collections.abc import Callable
 from datetime import datetime
@@ -63,6 +64,8 @@ from job_finder.qualification_definition_service import (
 )
 from job_finder.web.security import csrf_token, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
+
+_logger = logging.getLogger(__name__)
 
 
 _SPLIT_NOTICES = {
@@ -126,7 +129,8 @@ def register_split_configuration_routes(
                     409,
                     acquisition_input=(raw_keywords, raw_sources),
                 )
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("save acquisition draft", error)
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
             return _page(
@@ -159,7 +163,8 @@ def register_split_configuration_routes(
                 )
             if result.outcome == "draft_changed":
                 return _page(connect, token, "Acquisition draft changed. Reload and retry.", 409)
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("publish acquisition policy", error)
             return _uncertain_action_response(
                 "/configuration/acquisition/publish",
                 token,
@@ -196,7 +201,8 @@ def register_split_configuration_routes(
                 )
             if receipt.outcome == "active_changed":
                 return _page(connect, token, "Active acquisition changed. Reload and retry.", 409)
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("activate acquisition policy", error)
             return _uncertain_action_response(
                 "/configuration/acquisition/activate",
                 token,
@@ -245,7 +251,8 @@ def register_split_configuration_routes(
                     409,
                     qualification_input=(raw_criteria, raw_profiles),
                 )
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("save qualification draft", error)
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
             return _page(
@@ -278,7 +285,8 @@ def register_split_configuration_routes(
                 )
             if receipt.outcome == "draft_changed":
                 return _page(connect, token, "Qualification draft changed. Reload and retry.", 409)
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("publish qualification definition", error)
             return _uncertain_action_response(
                 "/configuration/qualification/publish",
                 token,
@@ -320,7 +328,8 @@ def register_split_configuration_routes(
                     ).rowcount
                     == 1
                 )
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("continue setup", error)
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
@@ -343,7 +352,8 @@ def _page(
             policy = get_acquisition_policy_draft(connection)
             active = get_active_acquisition_policy(connection)
             definition = get_qualification_definition_draft(connection)
-    except psycopg.Error:
+    except psycopg.Error as error:
+        _log_database_failure("load search setup", error)
         return _unavailable_response()
     body = sidebar_page(
         "configuration",
@@ -378,6 +388,10 @@ def _unavailable_response() -> HTMLResponse:
         action=A("Retry", href="/configuration", cls="retry"),
         status_code=503,
     )
+
+
+def _log_database_failure(operation: str, error: psycopg.Error) -> None:
+    _logger.warning("Search setup %s failed (%s)", operation, type(error).__name__)
 
 
 def _uncertain_action_response(

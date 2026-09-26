@@ -404,15 +404,18 @@ def test_stale_acquisition_edit_keeps_submitted_keywords(authority_schema: str) 
 
 def test_search_setup_reports_database_outage_as_retryable(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
     client, _ = _client_for_schema("unused")
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("offline")):
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
         response = client.get("/configuration")
 
     assert response.status_code == 503
     assert "Search setup is unavailable" in response.text
     assert 'href="/configuration"' in response.text
+    assert "load search setup failed (OperationalError)" in caplog.text
+    assert "secret-value" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -543,7 +546,10 @@ def test_every_split_setup_write_checks_csrf_before_database_access(
     ],
 )
 def test_uncertain_split_write_preserves_its_retry_command(
-    authority_schema: str, path: str, fields: dict[str, str]
+    authority_schema: str,
+    path: str,
+    fields: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     client, connect = _client_for_schema(authority_schema)
     with connect() as connection:
@@ -553,7 +559,7 @@ def test_uncertain_split_write_preserves_its_retry_command(
     assert token_match is not None
     token = token_match.group(1)
 
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("offline")):
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
         response = client.post(path, data={"csrf_token": token, **fields})
 
     assert response.status_code == 503
@@ -561,6 +567,9 @@ def test_uncertain_split_write_preserves_its_retry_command(
     assert f'action="{path}"' in response.text
     for key, value in fields.items():
         assert f'name="{key}" value="{value}"' in response.text
+    assert "Search setup" in caplog.text
+    assert "OperationalError" in caplog.text
+    assert "secret-value" not in caplog.text
 
 
 def test_split_pages_do_not_reflect_unknown_notices(authority_schema: str) -> None:
