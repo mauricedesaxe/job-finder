@@ -149,6 +149,40 @@ def test_policies_identify_the_actual_checked_in_execution_sources() -> None:
     }
 
 
+def test_existing_release_survives_the_listing_import_move() -> None:
+    prompt_release = build_prompt_release()
+    policy = build_jev_atomic_policy()
+    old_digest = "b6b24b95a2e705b3bdb73af2bafc434b3554d6b286e7163d441f7bfcc66781b6"
+    assert (
+        source_artifact_identity(
+            "job_finder.evaluation.evaluate:job_message",
+            Path(__file__).with_name("evaluate.py"),
+        ).content_digest
+        == "76ca2bab6774100bfdb5f165fb287a74f009adb9269e4da188b99f55d1c8445a"
+    )
+    legacy_policy = policy.model_copy(
+        update={
+            "input_serialization": policy.input_serialization.model_copy(
+                update={"content_digest": old_digest}
+            ),
+            "decision_composition": (
+                policy.decision_composition[0].model_copy(update={"content_digest": old_digest}),
+                policy.decision_composition[1],
+            ),
+        }
+    )
+    release = build_relevance_release(legacy_policy)
+
+    validate_release_target(
+        ReleaseTarget(
+            prompt_release_id=prompt_release.id,
+            relevance_release_id=release.id,
+        ),
+        prompt_release,
+        release,
+    )
+
+
 def test_source_content_changes_release_identity_without_rewriting_project_sources(
     tmp_path: Path,
 ) -> None:

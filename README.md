@@ -245,6 +245,11 @@ before resuming discovery. Keep the old release and run records unchanged. The
 baseline cannot be rerun under the new code because its source hash no longer
 matches.
 
+The import-only `JobListing` move in `a53daec` has one explicit compatibility
+exception for its two known `evaluate.py` hashes. It keeps the existing active
+release usable without changing its stored identity. A later change to that
+file still requires the release transition above.
+
 #### Roll back a configuration
 
 Configuration revisions and publications are immutable. To roll back, use
