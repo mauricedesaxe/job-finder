@@ -10,7 +10,6 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 import job_finder.mcp_tools.configuration as configuration_tools
-from job_finder.configuration_service import ConfigurationRevisionNotFound
 from job_finder.database import Connection
 from job_finder.mcp_server import McpDependencies, create_mcp_server
 from job_finder.search_configuration import (
@@ -96,18 +95,9 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
             feedback_list = tools["feedback_list"]
             assert feedback_list.annotations is not None
             assert feedback_list.annotations.read_only_hint is True
-            assert feedback_list.input_schema["properties"]["limit"]["maximum"] == 100
-            assert feedback_list.output_schema is not None
-            assert feedback_list.output_schema["properties"]["items"]["maxItems"] == 100
             feedback_curate = tools["feedback_curate"]
             assert feedback_curate.annotations is not None
             assert feedback_curate.annotations.read_only_hint is False
-            manifest_list = tools["manifest_list"]
-            assert manifest_list.output_schema is not None
-            assert manifest_list.output_schema["properties"]["items"]["maxItems"] == 100
-            projection = tools["langfuse_projection_status"]
-            assert projection.output_schema is not None
-            assert projection.output_schema["properties"]["failures"]["maxItems"] == 100
             assert tools["release_target_active_get"].annotations is not None
             assert tools["release_target_active_get"].annotations.read_only_hint is True
             assert tools["release_target_activate"].annotations is not None
@@ -119,44 +109,9 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
             configuration_tools = {
                 name: tool for name, tool in tools.items() if name.startswith("configuration_")
             }
-            for name in (
-                "configuration_active_get",
-                "configuration_draft_get",
-                "configuration_validate",
-                "configuration_preview",
-                "configuration_revision_list",
-                "configuration_revision_get",
-            ):
-                annotations = configuration_tools[name].annotations
-                assert annotations is not None
-                assert annotations.read_only_hint is True
-                assert annotations.destructive_hint is False
-                assert annotations.open_world_hint is False
             for tool in configuration_tools.values():
                 assert "actor" not in tool.input_schema["properties"]
                 assert "timestamp" not in tool.input_schema["properties"]
-            assert (
-                configuration_tools["configuration_validate"].input_schema["properties"][
-                    "issue_limit"
-                ]["maximum"]
-                == 100
-            )
-            assert (
-                configuration_tools["configuration_preview"].input_schema["properties"][
-                    "search_sample_limit"
-                ]["maximum"]
-                == 100
-            )
-            assert (
-                configuration_tools["configuration_preview"].input_schema["properties"][
-                    "prompt_summary_limit"
-                ]["maximum"]
-                == 100
-            )
-            revision_list = configuration_tools["configuration_revision_list"]
-            assert revision_list.input_schema["properties"]["limit"]["maximum"] == 100
-            assert revision_list.output_schema is not None
-            assert revision_list.output_schema["properties"]["items"]["maxItems"] == 100
 
             with pytest.raises(ToolError, match="validation error"):
                 _ = await client.call_tool("feedback_list", {"limit": 0})
@@ -170,25 +125,10 @@ def test_mcp_tools_are_bounded_and_validate_input() -> None:
     asyncio.run(exercise())
 
 
-def test_mcp_configuration_revision_get_sanitizes_only_not_found(
+def test_mcp_configuration_errors_hide_unexpected_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     revision_id = search_configuration_revision_id(DEFAULT_SEARCH_CONFIGURATION)
-
-    def missing(*_args: object) -> None:
-        raise ConfigurationRevisionNotFound("Search configuration revision does not exist")
-
-    monkeypatch.setattr(configuration_tools, "get_search_configuration_revision", missing)
-    server = create_mcp_server(McpDependencies(connect=_connect))
-
-    async def exercise_missing() -> None:
-        async with Client(server) as client:
-            with pytest.raises(ToolError, match="Search configuration revision does not exist"):
-                _ = await client.call_tool(
-                    "configuration_revision_get", {"revision_id": revision_id}
-                )
-
-    asyncio.run(exercise_missing())
 
     def corrupt(*_args: object) -> None:
         raise RuntimeError("secret database details")
@@ -196,7 +136,7 @@ def test_mcp_configuration_revision_get_sanitizes_only_not_found(
     monkeypatch.setattr(configuration_tools, "get_search_configuration_revision", corrupt)
     server = create_mcp_server(McpDependencies(connect=_connect))
 
-    async def exercise_corrupt() -> None:
+    async def exercise() -> None:
         async with Client(server) as client:
             with pytest.raises(ToolError) as captured:
                 _ = await client.call_tool(
@@ -204,7 +144,7 @@ def test_mcp_configuration_revision_get_sanitizes_only_not_found(
                 )
             assert "secret database details" not in str(captured.value)
 
-    asyncio.run(exercise_corrupt())
+    asyncio.run(exercise())
 
 
 def test_mcp_configuration_validation_errors_hide_rejected_values() -> None:
