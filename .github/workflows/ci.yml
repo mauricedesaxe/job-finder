@@ -60,7 +60,7 @@ jobs:
           uv run pytest contracts -k 'not test_existing_installation_requires_and_idempotently_imports_legacy_owner'
           JOB_FINDER_ENABLE_SPLIT_EXECUTION=true \
             JOB_FINDER_IMPLEMENTATION_ARTIFACT=/tmp/job-finder-ci-artifact.json \
-            uv run pytest contracts/test_postgres_authority.py::test_existing_installation_requires_and_idempotently_imports_legacy_owner
+            uv run pytest contracts/test_postgres_authority_04.py::test_existing_installation_requires_and_idempotently_imports_legacy_owner
       - name: Build application image
         run: docker build --tag job-finder-dagster:test .
       - name: Smoke test Compose deployment
