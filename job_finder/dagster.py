@@ -1,6 +1,7 @@
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+import logging
 from uuid import uuid4
 
 import psycopg
@@ -63,6 +64,7 @@ from job_finder.provider_credentials import (
 from job_finder.review.queue import enqueue_rejected_audit_sample
 
 HeartbeatSender = Callable[[str], None]
+_logger = logging.getLogger(__name__)
 
 
 class JobFinderResource(ConfigurableResource["JobFinderResource"]):
@@ -412,12 +414,13 @@ def ping_heartbeat(url: str | None, sender: HeartbeatSender | None = None) -> No
         return
     try:
         _ = (sender or _default_heartbeat_sender)(url)
-    except Exception:
-        pass
+    except Exception as error:
+        _logger.warning("Heartbeat ping failed: %s", type(error).__name__)
 
 
 def _default_heartbeat_sender(url: str) -> None:
-    _ = requests.get(url, timeout=5)
+    response = requests.get(url, timeout=5)
+    response.raise_for_status()
 
 
 def _fetch_rates(observed_at: datetime) -> ExchangeRateSnapshot:
