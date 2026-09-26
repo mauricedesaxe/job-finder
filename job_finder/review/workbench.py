@@ -5,6 +5,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+import logging
 from uuid import UUID
 
 import psycopg
@@ -48,6 +49,8 @@ from job_finder.review.queue import (
 from job_finder.web.security import csrf_token, form_text, valid_csrf
 from job_finder.web.shell import document, sidebar_page, state_response
 
+_logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, kw_only=True)
 class ReviewWorkbench:
@@ -83,7 +86,8 @@ class ReviewWorkbench:
     def _home(self, request: Request) -> HTMLResponse:
         try:
             queue = self.load_queue()
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("load review queue", error)
             return _unavailable_response()
         token = csrf_token(request)
         if token is None:
@@ -106,7 +110,8 @@ class ReviewWorkbench:
             return _item_not_found_response()
         try:
             queue = self.load_queue()
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("load review before submission", error)
             return _unavailable_response()
         item = _find_item(queue, item_id)
         if item is None:
@@ -133,8 +138,9 @@ class ReviewWorkbench:
             return _conflict_response("This review form is invalid. Reload the page and try again.")
         try:
             result = self.submit_review(submission)
-        except psycopg.Error:
-            return _unavailable_response()
+        except psycopg.Error as error:
+            _log_database_failure("submit review", error)
+            return _uncertain_submission_response()
         if isinstance(result, ReviewConflict):
             return _conflict_response(result.reason)
         if item.reviewed:
@@ -145,7 +151,8 @@ class ReviewWorkbench:
     def _review_item_page(self, review_item_id: str, request: Request) -> HTMLResponse:
         try:
             queue = self.load_queue()
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _log_database_failure("load review item", error)
             return _unavailable_response()
         token = csrf_token(request)
         if token is None:
@@ -452,6 +459,19 @@ def _unavailable_response() -> HTMLResponse:
         action=A("Retry", href="/", cls="retry"),
         status_code=503,
     )
+
+
+def _uncertain_submission_response() -> HTMLResponse:
+    return state_response(
+        "Review result is unknown",
+        "The database disconnected while saving. Check the review queue before trying again.",
+        action=A("Check review queue", href="/", cls="retry"),
+        status_code=503,
+    )
+
+
+def _log_database_failure(operation: str, error: psycopg.Error) -> None:
+    _logger.warning("Review %s failed (%s)", operation, type(error).__name__)
 
 
 def _conflict_response(reason: str) -> HTMLResponse:

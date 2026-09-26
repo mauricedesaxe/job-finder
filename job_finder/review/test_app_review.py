@@ -707,25 +707,31 @@ def test_renders_a_domain_conflict_as_an_explicit_conflict() -> None:
     assert "Back to the review" in response.text
 
 
-def test_renders_submit_database_failure_as_retryable_unavailable() -> None:
+def test_renders_submit_database_failure_as_uncertain_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     item = _item(TODAY, "qualified")
 
     def unavailable(_review: ReviewSubmission) -> ReviewSaved:
-        raise psycopg.OperationalError("database down")
+        raise psycopg.OperationalError("password=secret-value")
 
     client = _client(_queue(item), submit=unavailable)
 
     response = client.post(f"/review/{item.id}", data=_form(item, client))
 
     assert response.status_code == 503
-    assert "Review is unavailable" in response.text
-    assert "Retry" in response.text
+    assert "Review result is unknown" in response.text
+    assert "Check review queue" in response.text
+    assert "submit review failed (OperationalError)" in caplog.text
+    assert "secret-value" not in caplog.text
 
 
 @pytest.mark.parametrize("path", ["/", f"/review/item/{UUID(int=1)}"])
-def test_review_pages_render_queue_database_failure_as_retryable_unavailable(path: str) -> None:
+def test_review_pages_render_queue_database_failure_as_retryable_unavailable(
+    path: str, caplog: pytest.LogCaptureFixture
+) -> None:
     def unavailable() -> ReviewQueue:
-        raise psycopg.OperationalError("database down")
+        raise psycopg.OperationalError("password=secret-value")
 
     app = create_review_app(
         unavailable,
@@ -743,3 +749,5 @@ def test_review_pages_render_queue_database_failure_as_retryable_unavailable(pat
     assert "Review is unavailable" in response.text
     assert "Retry" in response.text
     assert "previous decisions are unchanged" in response.text
+    assert "OperationalError" in caplog.text
+    assert "secret-value" not in caplog.text
