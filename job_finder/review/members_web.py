@@ -18,6 +18,7 @@ from fasthtml.common import (
     Input,
     Label,
     Legend,
+    Main,
     Option,
     P,
     Request,
@@ -29,6 +30,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 
 from job_finder.access_policy import Capability, Preset, has_capability, preset_grants
 from job_finder.review.accounts import Account, AccountRole, AccountService, AccountStatus
+from job_finder.review.owner_access import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from job_finder.web.assets import static_url
 from job_finder.web.principal import current_account
 from job_finder.web.security import ensure_csrf_token, form_text, valid_csrf
@@ -368,19 +370,46 @@ def _link_response(request: Request, title: str, url: str, expiry: str) -> HTMLR
 
 def _password_form(request: Request, token: str, title: str, action_name: str) -> HTMLResponse:
     csrf = ensure_csrf_token(request)
-    content = Div(
-        H1(title),
-        Form(
-            Input(type="hidden", name="csrf_token", value=csrf),
-            Label("Password", Input(type="password", name="password", required=True)),
-            Label(
-                "Confirm password",
-                Input(type="password", name="password_confirmation", required=True),
-            ),
-            Button("Continue", type="submit"),
-            action=str(request.url_for(action_name, token=token)),
-            method="post",
+    content = Main(
+        Div(
+            Small("Account access", cls="eyebrow"),
+            H1(title),
+            P("Choose a password for your individual account."),
+            cls="login-editorial",
         ),
-        cls="review-shell",
+        Div(
+            Small("Set password", cls="eyebrow"),
+            H2("Secure your account"),
+            Form(
+                Input(type="hidden", name="csrf_token", value=csrf),
+                Label(
+                    "Password",
+                    Input(
+                        type="password",
+                        name="password",
+                        minlength=str(MINIMUM_PASSWORD_LENGTH),
+                        maxlength=str(MAXIMUM_PASSWORD_LENGTH),
+                        required=True,
+                        autocomplete="new-password",
+                    ),
+                ),
+                Label(
+                    "Confirm password",
+                    Input(
+                        type="password",
+                        name="password_confirmation",
+                        minlength=str(MINIMUM_PASSWORD_LENGTH),
+                        maxlength=str(MAXIMUM_PASSWORD_LENGTH),
+                        required=True,
+                        autocomplete="new-password",
+                    ),
+                ),
+                Button("Continue", type="submit"),
+                action=str(request.url_for(action_name, token=token)),
+                method="post",
+            ),
+            cls="login-card",
+        ),
+        cls="login-shell",
     )
     return HTMLResponse(document(content, title=title))
