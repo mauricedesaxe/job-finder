@@ -32,6 +32,7 @@ from job_finder.review.owner_access import (
     postgres_owner_access_service,
 )
 from job_finder.review.queue import postgres_review_queue_loader
+from job_finder.review.test_app_support import helper_account_service
 from job_finder.qualification_definition_service import get_qualification_definition_draft
 from job_finder.web.app import create_review_app
 
@@ -51,7 +52,10 @@ def authority_schema() -> Iterator[str]:
 
 
 def _client_for_schema(
-    authority_schema: str, *, artifact_path: Path | None = None
+    authority_schema: str,
+    *,
+    artifact_path: Path | None = None,
+    owner_stage: list[OnboardingStage] | None = None,
 ) -> tuple[TestClient, ConnectionFactory]:
     settings = PostgresContractSettings.from_environment()
 
@@ -62,11 +66,15 @@ def _client_for_schema(
         )
         return connection
 
-    owner_state = OwnerAccessState(stage=OnboardingStage.COMPLETE, has_password=True)
+    stage = owner_stage if owner_stage is not None else [OnboardingStage.COMPLETE]
+
+    def owner_state() -> OwnerAccessState:
+        return OwnerAccessState(stage=stage[0], has_password=True)
+
     owner = OwnerAccessService(
-        load_state=lambda: owner_state,
+        load_state=owner_state,
         authenticate=lambda password: password == "owner password for this test",
-        bootstrap=lambda _password: OwnerBootstrapConflict(owner_state),
+        bootstrap=lambda _password: OwnerBootstrapConflict(owner_state()),
     )
     app = create_review_app(
         postgres_review_queue_loader(connect),
@@ -76,14 +84,23 @@ def _client_for_schema(
             split_execution_artifact_path=artifact_path or Path("/unused/artifact.json"),
         ),
         submit_review=postgres_review_submitter(connect),
+        account_service=helper_account_service(password="owner password for this test"),
         owner_access_service=owner,
         split_configuration_connect=connect,
         now=lambda: datetime(2026, 9, 25, tzinfo=UTC),
     )
     client = TestClient(app)
+    login_form = client.get("/login")
+    csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_form.text)
+    assert csrf_match is not None
     login = client.post(
         "/login",
-        data={"password": "owner password for this test", "next": "/configuration"},
+        data={
+            "csrf_token": csrf_match.group(1),
+            "email": "owner@example.com",
+            "password": "owner password for this test",
+            "next": "/configuration",
+        },
         follow_redirects=False,
     )
     assert login.status_code == 303
@@ -254,7 +271,8 @@ def test_owner_promotion_page_previews_evidence_and_rejects_invalid_activation(
 
 
 def test_owner_setup_writes_independent_search_drafts(authority_schema: str) -> None:
-    client, connect = _client_for_schema(authority_schema)
+    stage = [OnboardingStage.COMPLETE]
+    client, connect = _client_for_schema(authority_schema, owner_stage=stage)
     with connect() as connection:
         _ = apply_migrations(connection)
         qualification_before = get_qualification_definition_draft(connection)
@@ -315,6 +333,7 @@ def test_owner_setup_writes_independent_search_drafts(authority_schema: str) -> 
         _ = connection.execute(
             "UPDATE owner_onboarding SET stage = 'preferences' WHERE singleton_id = 1"
         )
+    stage[0] = OnboardingStage.PREFERENCES
 
     _publish_and_continue(
         client, connect, token, acquisition_after.version, qualification_before.version + 1
@@ -520,7 +539,7 @@ def test_every_split_setup_write_checks_csrf_before_database_access(
     with patch("psycopg.connect") as connect:
         response = client.post(path, data={"csrf_token": "invalid"})
 
-    assert response.status_code == 403
+    assert response.status_code == (404 if path == "/configuration/continue" else 403)
     connect.assert_not_called()
 
 

@@ -38,8 +38,9 @@ from fasthtml.common import (
     Ul,
 )
 from starlette.datastructures import FormData, QueryParams
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 
+from job_finder.access_policy import Capability
 from job_finder.operations._common import OperationsUnavailable
 from job_finder.operations.activity import (
     ACTIVITY_STATUSES,
@@ -108,6 +109,7 @@ from job_finder.pipeline.work_recoveries import (
     WorkRecoveryStaleState,
 )
 from job_finder.web.assets import static_url
+from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import (
     csrf_token,
     verified_control_csrf_token,
@@ -158,13 +160,19 @@ def register_operations_routes(
     analytics: AnalyticsService,
     controls: ControlPlaneService,
     dagster_configured: bool,
-    actor: str,
     now: DateTimeClock,
 ) -> None:
     @app.route("/operations", methods=["GET"], name="create_review_app_operations_page")
-    def operations_page(request: Request) -> RedirectResponse:
-        _ = request
-        return RedirectResponse("/operations/runs", status_code=303)
+    def operations_page(request: Request) -> Response:
+        grants = current_account(request).capabilities
+        for capability, path in (
+            (Capability.ACTIVITY_VIEW, "/operations/runs"),
+            (Capability.ANALYTICS_VIEW, "/operations/analytics"),
+            (Capability.CONTROL_VIEW, "/operations/control"),
+        ):
+            if capability in grants:
+                return RedirectResponse(path, status_code=303)
+        return Response(status_code=403)
 
     @app.route("/operations/control", methods=["GET"], name="create_review_app_control_plane_page")
     def control_plane_page(request: Request) -> HTMLResponse:
@@ -188,12 +196,14 @@ def register_operations_routes(
                     _control_page(
                         control_snapshot,
                         token,
+                        grants=current_account(request).capabilities,
                         dagster_configured=dagster_configured,
                         control_error=control_error,
                         run_key=secrets.token_urlsafe(32),
                         notice=notice,
                         now=now(),
                     ),
+                    grants=current_account(request).capabilities,
                 ),
                 title="Control plane",
             )
@@ -215,7 +225,7 @@ def register_operations_routes(
                 RunNowCommand(
                     job_name=job_name,
                     idempotency_key=idempotency_key,
-                    actor=actor,
+                    actor=actor_email(request),
                     timestamp=now(),
                 )
             )
@@ -254,7 +264,7 @@ def register_operations_routes(
                     schedule_name=schedule_name,
                     expected_state=expected,
                     desired_state=desired,
-                    actor=actor,
+                    actor=actor_email(request),
                     timestamp=now(),
                 )
             )
@@ -297,7 +307,7 @@ def register_operations_routes(
                 expected_attempt_count=int(
                     _required_control_form_text(form, "expected_attempt_count")
                 ),
-                actor=actor,
+                actor=actor_email(request),
                 requested_at=now(),
             )
         except ValueError as error:
@@ -374,6 +384,7 @@ def register_operations_routes(
                         notice=notice,
                         now=now(),
                     ),
+                    grants=current_account(request).capabilities,
                 ),
                 title="Recent activity",
             )
@@ -411,6 +422,7 @@ def register_operations_routes(
                     "activity",
                     token,
                     _run_detail_page(detail, now=now()),
+                    grants=current_account(request).capabilities,
                 ),
                 title="Pipeline run",
             )
@@ -448,7 +460,13 @@ def register_operations_routes(
                 operations_sidebar_page(
                     "activity",
                     token,
-                    _work_item_page(detail, token, notice=notice),
+                    _work_item_page(
+                        detail,
+                        token,
+                        notice=notice,
+                        grants=current_account(request).capabilities,
+                    ),
+                    grants=current_account(request).capabilities,
                 ),
                 title="Job",
             )
@@ -488,6 +506,7 @@ def register_operations_routes(
                     "analytics",
                     token,
                     _analytics_page(spend),
+                    grants=current_account(request).capabilities,
                 ),
                 title="Model spend",
                 scripts=(
@@ -512,7 +531,7 @@ def register_operations_routes(
                 expected_attempt_count=int(
                     _required_control_form_text(form, "expected_attempt_count")
                 ),
-                actor=actor,
+                actor=actor_email(request),
                 requested_at=now(),
             )
         except ValueError as error:
@@ -571,7 +590,7 @@ def register_operations_routes(
                 idempotency_key=_required_control_form_text(form, "idempotency_key"),
                 expected_decision_id=_required_control_form_text(form, "expected_decision_id"),
                 expected_snapshot_id=_required_control_form_text(form, "expected_snapshot_id"),
-                actor=actor,
+                actor=actor_email(request),
                 requested_at=now(),
             )
         except ValueError as error:
@@ -670,6 +689,7 @@ def _control_page(
     snapshot: ControlPlaneSnapshot | None,
     csrf_token: str,
     *,
+    grants: frozenset[Capability],
     dagster_configured: bool,
     control_error: str | None,
     run_key: str,
@@ -723,7 +743,7 @@ def _control_page(
             ),
             Ul(
                 *(
-                    _schedule_row(schedule, csrf_token, run_key, now=now)
+                    _schedule_row(schedule, csrf_token, run_key, grants=grants, now=now)
                     for schedule in snapshot.schedules
                 ),
                 cls="schedule-list",
@@ -735,6 +755,7 @@ def _control_page(
                         definition.label,
                         definition.cadence,
                         _CONTROL_DESCRIPTIONS.get(definition.job_name),
+                        grants,
                     )
                     for definition in CONTROL_DEFINITIONS
                 ),
@@ -778,7 +799,12 @@ def _controls_off_banner(
 
 
 def _schedule_row(
-    schedule: ScheduleView, csrf_token: str, run_key: str, *, now: datetime
+    schedule: ScheduleView,
+    csrf_token: str,
+    run_key: str,
+    *,
+    grants: frozenset[Capability],
+    now: datetime,
 ) -> object:
     desired = (
         ScheduleStatus.STOPPED
@@ -814,7 +840,9 @@ def _schedule_row(
                     Button("Run now", type="submit", cls="operation-button"),
                     action="/operations/run",
                     method="post",
-                ),
+                )
+                if Capability.CONTROL_RUN in grants
+                else None,
                 Form(
                     Input(type="hidden", name="csrf_token", value=csrf_token),
                     Input(
@@ -835,27 +863,35 @@ def _schedule_row(
                     ),
                     action="/operations/schedule",
                     method="post",
-                ),
+                )
+                if Capability.CONTROL_SCHEDULE in grants
+                else None,
                 cls="schedule-actions",
             ),
         )
     )
 
 
-def _unavailable_schedule_row(label: str, cadence: str, description: str | None) -> object:
+def _unavailable_schedule_row(
+    label: str, cadence: str, description: str | None, grants: frozenset[Capability]
+) -> object:
     return Li(
         Div(
             Div(Strong(label), Span("Unavailable", cls="schedule-state unavailable")),
             P(cadence, cls="schedule-cadence"),
             P(description, cls="operations-muted") if description else None,
             Div(
-                Button("Run now", type="button", disabled=True, cls="operation-button"),
+                Button("Run now", type="button", disabled=True, cls="operation-button")
+                if Capability.CONTROL_RUN in grants
+                else None,
                 Button(
                     "Pause or resume",
                     type="button",
                     disabled=True,
                     cls="operation-button secondary",
-                ),
+                )
+                if Capability.CONTROL_SCHEDULE in grants
+                else None,
                 cls="schedule-actions",
             ),
         )
@@ -1550,6 +1586,7 @@ def _work_item_page(
     csrf_token: str,
     *,
     notice: str | None,
+    grants: frozenset[Capability],
 ) -> object:
     status = "Dismissed" if detail.dismissed else _WORK_STATE_LABELS.get(detail.state, detail.state)
     status_class = "dismissed" if detail.dismissed else detail.state
@@ -1577,7 +1614,7 @@ def _work_item_page(
             cls="operations-section",
         ),
         _work_item_facts(detail),
-        _work_item_actions(detail, csrf_token),
+        _work_item_actions(detail, csrf_token, grants),
         _work_attempt_history(detail.attempts),
         cls="review-shell operations-shell",
     )
@@ -1639,17 +1676,23 @@ def _work_item_facts(detail: WorkItemDetail) -> object:
     )
 
 
-def _work_item_actions(detail: WorkItemDetail, csrf_token: str) -> object:
+def _work_item_actions(
+    detail: WorkItemDetail, csrf_token: str, grants: frozenset[Capability]
+) -> object:
     forms: list[object] = []
-    if detail.state == "failed":
+    if detail.state == "failed" and Capability.ACTIVITY_RECOVER in grants:
         forms.append(_work_detail_form(detail, csrf_token, RecoveryAction.RETRY_NOW, "Retry now"))
-    if detail.state == "terminal_error" and not detail.dismissed:
+    if (
+        detail.state == "terminal_error"
+        and not detail.dismissed
+        and Capability.ACTIVITY_RECOVER in grants
+    ):
         forms.append(
             _work_detail_form(
                 detail, csrf_token, RecoveryAction.RECOVER_TERMINAL, "Recover terminal work"
             )
         )
-    if detail.state == "terminal_error":
+    if detail.state == "terminal_error" and Capability.ACTIVITY_DISMISS in grants:
         if detail.dismissed:
             forms.append(
                 _work_detail_dismiss_form(

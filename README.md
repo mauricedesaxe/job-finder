@@ -28,7 +28,8 @@ Wait for all four services to become healthy, then open the public domain on
 `review`. The first visit redirects to `/setup`.
 
 In Railway, open the `review` service's Variables tab and copy the generated
-`JOB_FINDER_BOOTSTRAP_TOKEN`. Use it on `/setup` to create your owner account.
+`JOB_FINDER_BOOTSTRAP_TOKEN`. Use it on `/setup` with an email address and
+password to create the first admin account.
 Enter your Jina and OpenRouter API keys, job preferences, and spend budget in
 the app, then run the bounded test search. Remove the bootstrap token from the
 Railway service after the owner account exists. See the
@@ -61,7 +62,7 @@ python3 scripts/deploy_railway.py --name job-finder-owner-name --workspace YOUR_
 Use a unique project name for each owner. The command prints the project URL,
 waits for the three application services to deploy, then prints the review URL
 and a one-time bootstrap token. Keep the token private and enter it with the
-owner on the first visit to create their account. Enter your provider keys in
+owner on the first visit to create an admin account with their email. Enter your provider keys in
 the app, not in Railway. Save and publish the acquisition policy and
 qualification definition separately, activate acquisition, set the budget,
 then run the bounded test search. The test search uses a candidate qualification
@@ -89,7 +90,8 @@ For a fresh instance, check the following before handing it to an owner:
    TCP proxy.
 2. The review URL's `/readyz` returns HTTP 200, and the landing page redirects
    to owner setup.
-3. With the generated bootstrap token, create the owner account, enter provider
+3. With the generated bootstrap token, create the first admin account with an
+   email and password, then enter provider
    credentials and preferences, set a spend budget, and run the bounded test
    search. Confirm progress and results appear in the browser.
 4. Check `/operations/control` after setup. It should show the expected schedules
@@ -163,12 +165,23 @@ daemon remain on the internal Compose network. PostgreSQL is available only on
 the configured localhost port. The database is stored in the `postgres-data`
 volume and survives restarts.
 
-On the first visit, enter `JOB_FINDER_BOOTSTRAP_TOKEN` and create the owner
-password. The token proves the first visitor controls the deployment; Job
-Finder hashes the password into PostgreSQL before continuing. Upgrading
-installations can leave their existing `JOB_FINDER_REVIEW_PASSWORD` set for one
-startup; Job Finder imports it once, after which the environment value can be
-removed.
+On the first visit, enter `JOB_FINDER_BOOTSTRAP_TOKEN`, an email, and a password
+to create the first admin. The token proves the first visitor controls the
+deployment; Job Finder hashes the password into PostgreSQL before continuing.
+On an existing installation, the prior owner must enter the old password and an
+email at `/setup` to claim the first admin account. Existing owner cookies do
+not authorize this claim. Upgrading installations can leave their existing
+`JOB_FINDER_REVIEW_PASSWORD` set for one startup to import the old password
+hash, then remove the environment value. After the claim, shared-password login
+is retired.
+
+Admins manage people at **Members**. They can choose Reviewer, Search manager,
+Operator, or Admin as a starting preset, adjust individual grants, and copy a
+single-use invitation link. The recipient sets a password through the link.
+Admins can disable accounts or create a one-use password reset link; disabling
+or resetting an account revokes its sessions. The link itself proves invitation,
+so share it only with the intended recipient. The app does not verify ownership
+of the invited email address.
 The authenticated home reads and controls the four Job Finder schedules through
 Dagster's GraphQL API. In deployment, set `JOB_FINDER_DAGSTER_GRAPHQL_URL`
 to the Dagster webserver's internal `/graphql` URL.

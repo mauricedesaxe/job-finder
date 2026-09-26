@@ -42,6 +42,8 @@ from job_finder.operations.health import (
 from job_finder.operations.service import OperationsService
 
 from job_finder.review.test_app_support import (
+    helper_account_service,
+    helper_login_data,
     helper_default_submit_review as _default_submit_review,
     helper_unexpected_control_call as _unexpected_control_call,
     helper_client as _client,
@@ -61,7 +63,7 @@ from job_finder.review.test_app_support import (
     TODAY,
     NOW,
     SETTINGS,
-    OWNER_PASSWORD,
+    OWNER_EMAIL,
     BOOTSTRAP_TOKEN,
     OWNER_ACCESS,
 )
@@ -72,6 +74,7 @@ def test_http_route_manifest_stays_stable() -> None:
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -79,7 +82,11 @@ def test_http_route_manifest_stays_stable() -> None:
         "/",
         "/favicon.ico",
         "/healthz",
+        "/invite/{token}",
         "/login",
+        "/no-access",
+        "/members",
+        "/members/invite",
         "/operations",
         "/operations/analytics",
         "/operations/control",
@@ -88,6 +95,7 @@ def test_http_route_manifest_stays_stable() -> None:
         "/operations/runs/{run_id}",
         "/operations/work/{job_id}",
         "/readyz",
+        "/reset/{token}",
         "/review",
         "/review/item/{review_item_id}",
         "/setup",
@@ -99,12 +107,17 @@ def test_http_route_manifest_stays_stable() -> None:
     post_paths = {
         "/login",
         "/logout",
+        "/invite/{token}",
+        "/members/invite",
+        "/members/{member_id}",
+        "/members/{member_id}/reset",
         "/operations/dismiss",
         "/operations/recovery",
         "/operations/reevaluation",
         "/operations/run",
         "/operations/schedule",
         "/review/{review_item_id}",
+        "/reset/{token}",
         "/setup",
         "/setup/budget",
         "/setup/providers",
@@ -133,6 +146,7 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
         lambda: _queue(),
         secure_settings,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -141,7 +155,7 @@ def test_security_and_session_middleware_contract_stays_stable() -> None:
     health = client.get("/healthz")
     accepted = client.post(
         "/login",
-        data={"password": OWNER_PASSWORD, "next": "/"},
+        data=helper_login_data(client, next_url="/"),
         follow_redirects=False,
     )
     cookie = SimpleCookie()
@@ -202,7 +216,7 @@ def test_operations_pages_mark_their_shell_sections() -> None:
     runs = client.get("/operations/runs")
     failures = client.get("/operations/failures", follow_redirects=False)
 
-    assert re.search(_shell_link("/operations/runs", "Operations", current=True), runs.text)
+    assert re.search(_shell_link("/operations", "Operations", current=True), runs.text)
     assert re.search(_shell_link("/", "Review"), runs.text)
     assert re.search(_shell_link("/configuration", "Search setup"), runs.text)
     assert re.search(_shell_link("/operations/runs", "Recent activity", current=True), runs.text)
@@ -235,6 +249,7 @@ def test_the_old_review_url_redirects_to_the_landing_page() -> None:
             unexpected_queue_load,
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -252,6 +267,7 @@ def test_the_operations_home_requires_the_existing_owner_session() -> None:
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )
@@ -404,6 +420,7 @@ def test_operations_actions_require_the_owner_session_before_service_calls(path:
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         operations_service=operations,
         control_service=controls,
@@ -452,7 +469,7 @@ def test_run_now_passes_owner_provenance_then_renders_the_allowlisted_notice() -
         RunNowCommand(
             job_name="job_finder",
             idempotency_key="private-key",
-            actor="owner",
+            actor=OWNER_EMAIL,
             timestamp=NOW,
         )
     ]
@@ -519,7 +536,7 @@ def test_schedule_change_reports_stale_state_without_redirecting() -> None:
 
     assert response.status_code == 409
     assert "Expected RUNNING; observed STOPPED" in response.text
-    assert calls[0].actor == "owner"
+    assert calls[0].actor == OWNER_EMAIL
     assert calls[0].timestamp == NOW
 
 
@@ -674,7 +691,7 @@ def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
             action=RecoveryAction.RETRY_NOW,
             expected_state="failed",
             expected_attempt_count=2,
-            actor="owner",
+            actor=OWNER_EMAIL,
             requested_at=NOW,
         )
     ]

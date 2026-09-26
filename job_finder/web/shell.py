@@ -28,19 +28,22 @@ from fasthtml.common import (
 )
 from starlette.responses import HTMLResponse
 
-ShellSection = Literal["review", "operations", "configuration"]
+from job_finder.access_policy import Capability, has_capability
+
+ShellSection = Literal["review", "operations", "configuration", "members"]
 OperationsPage = Literal["activity", "analytics", "control"]
 
-_SECTIONS: tuple[tuple[ShellSection, str, str], ...] = (
-    ("review", "Review", "/"),
-    ("operations", "Operations", "/operations/runs"),
-    ("configuration", "Search setup", "/configuration"),
+_SECTIONS: tuple[tuple[ShellSection, str, str, Capability], ...] = (
+    ("review", "Review", "/", Capability.REVIEW_VIEW),
+    ("operations", "Operations", "/operations", Capability.ACTIVITY_VIEW),
+    ("configuration", "Search setup", "/configuration", Capability.SEARCH_VIEW),
+    ("members", "Members", "/members", Capability.ADMIN_VIEW),
 )
 
-_OPERATIONS_PAGES: tuple[tuple[OperationsPage, str, str], ...] = (
-    ("activity", "Recent activity", "/operations/runs"),
-    ("analytics", "Analytics", "/operations/analytics"),
-    ("control", "Control plane", "/operations/control"),
+_OPERATIONS_PAGES: tuple[tuple[OperationsPage, str, str, Capability], ...] = (
+    ("activity", "Recent activity", "/operations/runs", Capability.ACTIVITY_VIEW),
+    ("analytics", "Analytics", "/operations/analytics", Capability.ANALYTICS_VIEW),
+    ("control", "Control plane", "/operations/control", Capability.CONTROL_VIEW),
 )
 
 _MINUTE = 60
@@ -50,24 +53,28 @@ _MONTH = 30 * _DAY
 _YEAR = 365 * _DAY
 
 
-def sidebar_page(current: ShellSection, csrf_token: str, *content: object) -> object:
+def sidebar_page(
+    current: ShellSection, csrf_token: str, *content: object, grants: frozenset[Capability]
+) -> object:
     return Div(
-        sidebar(csrf_token, current=current),
+        sidebar(csrf_token, current=current, grants=grants),
         Main(*content, cls="app-content"),
         cls="app-shell",
     )
 
 
-def operations_sidebar_page(current: OperationsPage, csrf_token: str, *content: object) -> object:
+def operations_sidebar_page(
+    current: OperationsPage, csrf_token: str, *content: object, grants: frozenset[Capability]
+) -> object:
     return Div(
-        sidebar(csrf_token, current="operations"),
-        operations_sub_sidebar(current),
+        sidebar(csrf_token, current="operations", grants=grants),
+        operations_sub_sidebar(current, grants=grants),
         Main(*content, cls="app-content"),
         cls="app-shell operations-shell",
     )
 
 
-def operations_sub_sidebar(current: OperationsPage) -> object:
+def operations_sub_sidebar(current: OperationsPage, *, grants: frozenset[Capability]) -> object:
     return Aside(
         Small("Operations", cls="shell-label sub-label"),
         Nav(
@@ -78,7 +85,8 @@ def operations_sub_sidebar(current: OperationsPage) -> object:
                     cls="shell-link",
                     aria_current="page" if key is current else None,
                 )
-                for key, label, href in _OPERATIONS_PAGES
+                for key, label, href, capability in _OPERATIONS_PAGES
+                if has_capability(grants, capability)
             ),
             aria_label="Operations",
             cls="shell-nav",
@@ -87,11 +95,11 @@ def operations_sub_sidebar(current: OperationsPage) -> object:
     )
 
 
-def sidebar(csrf_token: str, *, current: ShellSection) -> object:
+def sidebar(csrf_token: str, *, current: ShellSection, grants: frozenset[Capability]) -> object:
     return Aside(
         Div(
             Strong("JF", cls="wordmark"),
-            Small("Owner workbench", cls="shell-label"),
+            Small("Team workbench", cls="shell-label"),
             cls="sidebar-head",
         ),
         Nav(
@@ -102,9 +110,17 @@ def sidebar(csrf_token: str, *, current: ShellSection) -> object:
                     cls="shell-link",
                     aria_current="page" if key is current else None,
                 )
-                for key, label, href in _SECTIONS
+                for key, label, href, capability in _SECTIONS
+                if has_capability(grants, capability)
+                or (
+                    key == "operations"
+                    and any(
+                        has_capability(grants, allowed)
+                        for allowed in (Capability.ANALYTICS_VIEW, Capability.CONTROL_VIEW)
+                    )
+                )
             ),
-            aria_label="Owner workbench",
+            aria_label="Team workbench",
             cls="shell-nav",
         ),
         Form(
@@ -170,9 +186,10 @@ def state_response(
     *,
     action: object | None = None,
     status_code: int,
+    eyebrow: str = "Review queue",
 ) -> HTMLResponse:
     content = Main(
-        Small("Review queue", cls="eyebrow"),
+        Small(eyebrow, cls="eyebrow"),
         Div(H1(title), P(detail), action, cls="state"),
         cls="review-shell state-shell",
     )
@@ -318,6 +335,36 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 .state { margin-top: 1.25rem; padding: clamp(1.5rem, 5vw, 3rem); border: 2px solid var(--line); background-color: var(--panel); background-image: linear-gradient(var(--grid-line-strong) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line-strong) 1px, transparent 1px); background-size: 20px 20px; box-shadow: 8px 8px 0 var(--shadow); }
 .state h1, .state h2 { max-width: 14ch; }
 .state p { max-width: 48ch; color: var(--muted); font-size: 1.08rem; line-height: 1.6; }
+.state form button { min-height: 44px; padding: 0 0.9rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); cursor: pointer; font-weight: 900; }
+.member-page > p { max-width: 65ch; line-height: 1.5; }
+.member-page > a { display: inline-flex; align-items: center; min-height: 44px; margin: 1rem 0 0; padding: 0 0.8rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
+.member-card { margin-top: 1.25rem; padding: clamp(1rem, 3vw, 1.75rem); border: 2px solid var(--line); background: var(--panel); box-shadow: 5px 5px 0 var(--shadow); }
+.member-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; padding-bottom: 1rem; border-bottom: 2px solid var(--line); }
+.member-heading h2 { max-width: none; overflow-wrap: anywhere; font-size: clamp(1.4rem, 3vw, 2rem); }
+.member-heading p { margin: 0; color: var(--muted); font-weight: 800; }
+.member-form { display: grid; gap: 1.2rem; margin-top: 1.25rem; }
+.member-form > label, .member-controls label { display: grid; gap: 0.35rem; font-weight: 900; }
+.member-form input[type=email], .member-controls select { min-height: 44px; padding: 0.5rem; border: 2px solid var(--line); background: var(--surface-raised); color: var(--ink); }
+.member-form input[type=email] { width: min(100%, 420px); }
+.member-controls { display: flex; flex-wrap: wrap; gap: 1rem; }
+.member-form > p { margin: 0; color: var(--muted); line-height: 1.5; }
+.grant-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.8rem; }
+.grant-area { min-width: 0; margin: 0; padding: 0.8rem; border: 2px solid var(--line); }
+.grant-area legend { padding: 0 0.25rem; font-weight: 900; }
+.grant-area label { display: flex; align-items: center; gap: 0.5rem; min-height: 32px; cursor: pointer; }
+.grant-area input { width: 18px; height: 18px; accent-color: var(--focus); }
+.member-primary, .member-reset button { width: fit-content; min-height: 44px; padding: 0.5rem 0.9rem; border: 2px solid var(--line); cursor: pointer; font-weight: 900; }
+.member-primary { background: var(--acid); color: var(--accent-ink); }
+.member-reset { margin-top: 0.75rem; }
+.member-reset button { background: var(--panel); color: var(--ink); }
+.preset-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 1.2rem 0; }
+.preset-link { padding: 0.6rem 0.75rem; border: 2px solid var(--line); background: var(--panel); font-weight: 900; text-decoration: none; }
+.preset-link[aria-current=true] { background: var(--inverse-bg); color: var(--acid); }
+.form-error { width: fit-content; padding: 0.75rem; border: 2px solid var(--line); background: var(--caution); color: var(--accent-ink); }
+.link-copy { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin: 1.25rem 0 0.5rem; }
+.link-copy label { display: grid; flex: 1 1 360px; gap: 0.35rem; min-width: 0; font-weight: 900; }
+.link-copy input { width: 100%; min-height: 44px; padding: 0.5rem; border: 2px solid var(--line); background: var(--panel); color: var(--ink); }
+#copy-status { min-height: 1.5rem; margin: 0 0 1rem; font-weight: 900; }
 .retry { display: inline-flex; min-height: 48px; align-items: center; margin-top: 0.5rem; padding: 0 1.1rem; border: 2px solid var(--line); background: var(--acid); color: var(--accent-ink); font-weight: 900; }
 .login-shell { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr); min-height: 100vh; }
 .login-editorial { display: grid; align-content: center; padding: clamp(2rem, 7vw, 7rem); background: var(--inverse-bg); color: var(--inverse-text); }
@@ -411,7 +458,7 @@ h2 { font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; }
 }
 @media (max-width: 760px) {
   .review-shell { width: min(100% - 1rem, 1180px); padding-top: 0.5rem; }
-  .app-shell { grid-template-columns: 1fr; }
+  .app-shell { grid-template-columns: 1fr; align-content: start; }
   .app-shell.operations-shell { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; flex-direction: row; align-items: center; gap: 0.5rem; border-right: 0; border-bottom: 2px solid var(--line); }
   .sub-sidebar { position: static; height: auto; border-right: 0; border-bottom: 2px solid var(--line); }

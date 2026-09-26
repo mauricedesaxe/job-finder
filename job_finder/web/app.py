@@ -25,7 +25,10 @@ from job_finder.operations.service import OperationsService, unknown_operations_
 from job_finder.operations.spend import AnalyticsService
 from job_finder.operations.web import register_operations_routes
 from job_finder.provider_credentials import ProviderSetupService
-from job_finder.review.access_web import register_access_routes, require_owner as access_guard
+from job_finder.review.access_guard import require_account as access_guard
+from job_finder.review.access_web import register_access_routes
+from job_finder.review.accounts import AccountService
+from job_finder.review.members_web import register_member_routes
 from job_finder.review.split_configuration import register_split_configuration_routes
 from job_finder.review.qualification_targets import register_qualification_target_routes
 from job_finder.review.qualification_promotions_web import register_qualification_promotion_routes
@@ -36,6 +39,7 @@ from job_finder.review.queue import ReviewQueueLoader
 from job_finder.review.workbench import ReviewWorkbench
 
 from job_finder.web.assets import static_asset_path
+from job_finder.web.route_policy import compile_route_policies
 from job_finder.web.security import SecurityHeadersMiddleware
 
 ReadinessProbe = Callable[[], None]
@@ -98,6 +102,7 @@ def create_web_app(
         return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     app.add_middleware(SecurityHeadersMiddleware)
+    app.state.route_policies = compile_route_policies(app, review_routes=False)
     return app
 
 
@@ -109,6 +114,7 @@ def create_review_app(
     settings: ReviewAppSettings,
     *,
     submit_review: ReviewSubmitter,
+    account_service: AccountService,
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
     test_search_service: OnboardingSearchService | None = None,
@@ -119,7 +125,6 @@ def create_review_app(
     activity_service: ActivityService | None = None,
     analytics_service: AnalyticsService | None = None,
     control_service: ControlPlaneService | None = None,
-    actor: str = "owner",
     now: _DateTimeClock = lambda: datetime.now(UTC),
     split_configuration_connect: ConnectionFactory | None = None,
 ) -> FastHTML:
@@ -132,24 +137,33 @@ def create_review_app(
     workbench = ReviewWorkbench(
         load_queue=load_review_queue,
         submit_review=submit_review,
-        actor=actor,
         now=now,
     )
 
-    def require_owner(request: Request) -> Response | None:
-        return access_guard(request, owner_access_service, budget_setup_service)
+    def require_account(request: Request) -> Response | None:
+        policy = app.state.route_policies.get((request.scope.get("endpoint"), request.method))
+        if policy is None:
+            return Response(status_code=403)
+        return access_guard(
+            request,
+            owner_access_service,
+            account_service,
+            budget_setup_service,
+            policy,
+        )
 
-    app = create_web_app(settings, guard=require_owner, readiness=readiness)
+    app = create_web_app(settings, guard=require_account, readiness=readiness)
     register_access_routes(
         app,
         settings=settings,
+        account_service=account_service,
         owner_access_service=owner_access_service,
         provider_setup_service=provider_setup_service,
         budget_setup_service=budget_setup_service,
         test_search_service=test_search_service,
-        actor=actor,
         now=now,
     )
+    register_member_routes(app, accounts=account_service)
 
     workbench.register_queue_routes(app)
 
@@ -161,30 +175,31 @@ def create_review_app(
         analytics=analytics,
         controls=controls,
         dagster_configured=dagster_configured,
-        actor=actor,
         now=now,
     )
 
     if settings.split_execution_artifact_path is not None:
         if split_configuration_connect is None:
             raise ValueError("Split search setup requires a database connection")
-        register_split_configuration_routes(
-            app, connect=split_configuration_connect, actor=actor, now=now
-        )
+        register_split_configuration_routes(app, connect=split_configuration_connect, now=now)
         register_qualification_target_routes(
             app,
             connect=split_configuration_connect,
             artifact_path=settings.split_execution_artifact_path,
-            actor=actor,
             now=now,
         )
         register_qualification_promotion_routes(
             app,
             connect=split_configuration_connect,
             artifact_path=settings.split_execution_artifact_path,
-            actor=actor,
             now=now,
         )
     workbench.register_item_routes(app)
+
+    app.state.route_policies = compile_route_policies(
+        app,
+        review_routes=True,
+        split_routes=settings.split_execution_artifact_path is not None,
+    )
 
     return app
