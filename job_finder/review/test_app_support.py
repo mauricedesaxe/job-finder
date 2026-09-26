@@ -98,6 +98,7 @@ from job_finder.review.owner_access import (
     OwnerAccessState,
     OwnerBootstrapConflict,
 )
+from job_finder.review.accounts import Account, AccountRole, AccountService, AccountStatus
 from job_finder.search_configuration import SearchConfigurationRevisionId
 
 TODAY = date(2026, 9, 10)
@@ -113,6 +114,7 @@ SETTINGS = ReviewAppSettings(
 )
 
 OWNER_PASSWORD = "correct horse battery staple"
+OWNER_EMAIL = "owner@example.com"
 
 BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-32-characters"
 
@@ -123,6 +125,85 @@ OWNER_ACCESS = OwnerAccessService(
     authenticate=lambda password: password == OWNER_PASSWORD,
     bootstrap=lambda _password: OwnerBootstrapConflict(OWNER_STATE),
 )
+
+
+class FakeAccountService:
+    def __init__(
+        self,
+        *,
+        has_accounts: bool = True,
+        on_claim: Callable[[str, str], None] | None = None,
+        legacy_password: str | None = None,
+        password: str = OWNER_PASSWORD,
+    ) -> None:
+        self.account = (
+            Account(UUID(int=1), OWNER_EMAIL, AccountRole.ADMIN, AccountStatus.ACTIVE, frozenset())
+            if has_accounts
+            else None
+        )
+        self.on_claim = on_claim
+        self.legacy_password = legacy_password
+        self.password = password
+        self.sessions: dict[str, Account] = {}
+
+    def has_accounts(self) -> bool:
+        return self.account is not None
+
+    def first_admin(
+        self, email: str, password: str, *, legacy_password: str | None = None
+    ) -> Account | None:
+        if self.account is not None:
+            return None
+        if self.legacy_password is not None and legacy_password != self.legacy_password:
+            raise PermissionError("legacy owner password required")
+        if self.on_claim is not None:
+            self.on_claim(email, password)
+        self.account = Account(
+            UUID(int=1), email.lower(), AccountRole.ADMIN, AccountStatus.ACTIVE, frozenset()
+        )
+        return self.account
+
+    def authenticate(self, email: str, password: str) -> Account | None:
+        return (
+            self.account
+            if self.account is not None
+            and email.lower() == self.account.email
+            and password == self.password
+            else None
+        )
+
+    def create_session(self, user_id: UUID) -> str:
+        assert self.account is not None and user_id == self.account.id
+        token = f"test-account-session-{len(self.sessions) + 1}"
+        self.sessions[token] = self.account
+        return token
+
+    def load_principal(self, token: str) -> Account | None:
+        return self.sessions.get(token)
+
+    def revoke_session(self, token: str) -> None:
+        self.sessions.pop(token, None)
+
+
+def helper_account_service(
+    *,
+    has_accounts: bool = True,
+    on_claim: Callable[[str, str], None] | None = None,
+    legacy_password: str | None = None,
+    password: str = OWNER_PASSWORD,
+) -> AccountService:
+    return cast(
+        AccountService,
+        cast(
+            object,
+            FakeAccountService(
+                has_accounts=has_accounts,
+                on_claim=on_claim,
+                legacy_password=legacy_password,
+                password=password,
+            ),
+        ),
+    )
 
 
 def helper_default_submit_review(_review: ReviewSubmission) -> ReviewSubmitResult:
@@ -206,6 +287,7 @@ def helper_test_search_client() -> (
             SETTINGS,
             submit_review=helper_default_submit_review,
             owner_access_service=owner,
+            account_service=helper_account_service(),
             test_search_service=OnboardingSearchService(inspect=lambda: progress[0], launch=launch),
             now=lambda: NOW,
         )
@@ -234,6 +316,7 @@ def helper_client(
             SETTINGS,
             submit_review=submit,
             owner_access_service=OWNER_ACCESS,
+            account_service=helper_account_service(),
             operations_service=operations,
             runs_service=runs,
             activity_service=activity,
@@ -253,6 +336,7 @@ def helper_draining_client(remaining: list[ReviewItem], submit: Submitter) -> Te
             SETTINGS,
             submit_review=submit,
             owner_access_service=OWNER_ACCESS,
+            account_service=helper_account_service(),
             now=lambda: NOW,
         )
     )
@@ -263,10 +347,24 @@ def helper_draining_client(remaining: list[ReviewItem], submit: Submitter) -> Te
 def helper_authenticate(client: TestClient) -> None:
     response = client.post(
         "/login",
-        data={"password": OWNER_PASSWORD, "next": "/review"},
+        data=helper_login_data(client, next_url="/review"),
         follow_redirects=False,
     )
     assert response.status_code == 303
+
+
+def helper_login_data(
+    client: TestClient, *, password: str = OWNER_PASSWORD, next_url: str = "/review"
+) -> dict[str, str]:
+    login = client.get("/login")
+    csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login.text)
+    assert csrf_match is not None
+    return {
+        "csrf_token": csrf_match.group(1),
+        "email": OWNER_EMAIL,
+        "password": password,
+        "next": next_url,
+    }
 
 
 def helper_queue(*items: ReviewItem) -> ReviewQueue:

@@ -31,6 +31,7 @@ from job_finder.pipeline.reevaluations import (
 from job_finder.operations.service import OperationsService
 
 from job_finder.review.test_app_support import (
+    helper_account_service,
     helper_default_submit_review as _default_submit_review,
     helper_client as _client,
     helper_draining_client as _draining_client,
@@ -48,6 +49,7 @@ from job_finder.review.test_app_support import (
     NOW,
     SETTINGS,
     OWNER_ACCESS,
+    OWNER_EMAIL,
 )
 
 
@@ -142,7 +144,7 @@ def test_job_reevaluation_passes_an_exact_typed_command_and_redirects() -> None:
             idempotency_key="private-key",
             expected_decision_id="1" * 64,
             expected_snapshot_id="2" * 64,
-            actor="owner",
+            actor=OWNER_EMAIL,
             requested_at=NOW,
         )
     ]
@@ -279,6 +281,7 @@ def test_the_login_uses_the_editorial_split_and_route_line() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -477,6 +480,7 @@ def test_submitting_a_revision_returns_to_the_item_page_with_the_update() -> Non
             load_queue,
             SETTINGS,
             submit_review=submit,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -556,7 +560,7 @@ def test_submits_feedback_with_the_exact_rendered_identities() -> None:
             primary_reason=None,
             note="Strong fit.",
             block_company=True,
-            actor="owner",
+            actor=OWNER_EMAIL,
             created_at=NOW,
         )
     ]
@@ -737,6 +741,7 @@ def test_review_pages_render_queue_database_failure_as_retryable_unavailable(
         unavailable,
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )

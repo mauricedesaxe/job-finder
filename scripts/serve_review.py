@@ -26,6 +26,7 @@ from job_finder.review.owner_access import (
     postgres_owner_access_service,
 )
 from job_finder.review.queue import postgres_review_queue_loader
+from job_finder.review.accounts import AccountService
 
 
 def create_app() -> FastHTML:
@@ -78,6 +79,7 @@ def create_app() -> FastHTML:
         postgres_review_queue_loader(connect),
         settings,
         submit_review=postgres_review_submitter(connect),
+        account_service=AccountService(connect),
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
         test_search_service=postgres_test_search_service(

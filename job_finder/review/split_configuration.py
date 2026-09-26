@@ -20,6 +20,7 @@ from fasthtml.common import (
     Input,
     Label,
     P,
+    Pre,
     Request,
     Section,
     Small,
@@ -29,6 +30,7 @@ from fasthtml.common import (
 from pydantic import ValidationError
 from starlette.responses import HTMLResponse, RedirectResponse
 
+from job_finder.access_policy import Capability
 from job_finder.acquisition_policy import (
     AcquisitionPolicy,
     AcquisitionPolicyRevisionId,
@@ -62,6 +64,7 @@ from job_finder.qualification_definition_service import (
     publish_qualification_definition,
     replace_qualification_definition_draft,
 )
+from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
 
@@ -81,7 +84,6 @@ def register_split_configuration_routes(
     app: FastHTML,
     *,
     connect: ConnectionFactory,
-    actor: str,
     now: Callable[[], datetime],
 ) -> None:
     @app.route("/configuration", methods=["GET"], name="create_review_app_configuration")
@@ -89,7 +91,9 @@ def register_split_configuration_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(connect, token, _SPLIT_NOTICES.get(request.query_params.get("notice", "")))
+        return _page(
+            request, connect, token, _SPLIT_NOTICES.get(request.query_params.get("notice", ""))
+        )
 
     @app.route("/configuration/acquisition/draft", methods=["POST"])
     async def save_acquisition(request: Request) -> HTMLResponse | RedirectResponse:
@@ -117,12 +121,13 @@ def register_split_configuration_routes(
                         expected_base_revision_id=draft.base_revision_id,
                         expected_version=int(str(form.get("draft_version", ""))),
                         policy=policy,
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                 )
             if result.kind == "draft_changed":
                 return _page(
+                    request,
                     connect,
                     token,
                     "Acquisition draft changed. Reload and retry.",
@@ -134,6 +139,7 @@ def register_split_configuration_routes(
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
             return _page(
+                request,
                 connect,
                 token,
                 _user_error(error),
@@ -157,12 +163,14 @@ def register_split_configuration_routes(
                         idempotency_key=str(form.get("idempotency_key", "")),
                         expected_draft_version=int(str(form.get("draft_version", ""))),
                         expected_revision_id=acquisition_policy_revision_id(draft.policy),
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                 )
             if result.outcome == "draft_changed":
-                return _page(connect, token, "Acquisition draft changed. Reload and retry.", 409)
+                return _page(
+                    request, connect, token, "Acquisition draft changed. Reload and retry.", 409
+                )
         except psycopg.Error as error:
             _log_database_failure("publish acquisition policy", error)
             return _uncertain_action_response(
@@ -174,7 +182,7 @@ def register_split_configuration_routes(
                 ),
             )
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _user_error(error), 422)
+            return _page(request, connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=acquisition-published", status_code=303)
 
     @app.route("/configuration/acquisition/activate", methods=["POST"])
@@ -195,12 +203,14 @@ def register_split_configuration_routes(
                         ),
                         expected_revision_id=active.revision.id,
                         expected_generation=int(str(form.get("active_generation", ""))),
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                 )
             if receipt.outcome == "active_changed":
-                return _page(connect, token, "Active acquisition changed. Reload and retry.", 409)
+                return _page(
+                    request, connect, token, "Active acquisition changed. Reload and retry.", 409
+                )
         except psycopg.Error as error:
             _log_database_failure("activate acquisition policy", error)
             return _uncertain_action_response(
@@ -213,7 +223,7 @@ def register_split_configuration_routes(
                 ),
             )
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _user_error(error), 422)
+            return _page(request, connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=acquisition-activated", status_code=303)
 
     @app.route("/configuration/qualification/draft", methods=["POST"])
@@ -239,12 +249,13 @@ def register_split_configuration_routes(
                         expected_base_revision_id=draft.base_revision_id,
                         expected_version=int(str(form.get("draft_version", ""))),
                         definition=definition,
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                 )
             if result.kind == "draft_changed":
                 return _page(
+                    request,
                     connect,
                     token,
                     "Qualification draft changed. Reload and retry.",
@@ -256,6 +267,7 @@ def register_split_configuration_routes(
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
             return _page(
+                request,
                 connect,
                 token,
                 _user_error(error),
@@ -279,12 +291,14 @@ def register_split_configuration_routes(
                         idempotency_key=str(form.get("idempotency_key", "")),
                         expected_draft_version=int(str(form.get("draft_version", ""))),
                         expected_revision_id=qualification_definition_revision_id(draft.definition),
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                 )
             if receipt.outcome == "draft_changed":
-                return _page(connect, token, "Qualification draft changed. Reload and retry.", 409)
+                return _page(
+                    request, connect, token, "Qualification draft changed. Reload and retry.", 409
+                )
         except psycopg.Error as error:
             _log_database_failure("publish qualification definition", error)
             return _uncertain_action_response(
@@ -296,7 +310,7 @@ def register_split_configuration_routes(
                 ),
             )
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _user_error(error), 422)
+            return _page(request, connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=qualification-published", status_code=303)
 
     @app.route("/configuration/continue", methods=["POST"])
@@ -316,7 +330,11 @@ def register_split_configuration_routes(
                     != definition.base_revision_id
                 ):
                     return _page(
-                        connect, token, "Publish and activate both saved sections first.", 409
+                        request,
+                        connect,
+                        token,
+                        "Publish and activate both saved sections first.",
+                        409,
                     )
                 advanced = (
                     connection.execute(
@@ -332,13 +350,14 @@ def register_split_configuration_routes(
             _log_database_failure("continue setup", error)
             return _unavailable_response()
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _user_error(error), 422)
+            return _page(request, connect, token, _user_error(error), 422)
         if not advanced:
-            return _page(connect, token, "Setup stage changed. Reload to continue.", 409)
+            return _page(request, connect, token, "Setup stage changed. Reload to continue.", 409)
         return RedirectResponse("/setup/budget", status_code=303)
 
 
 def _page(
+    request: Request,
     connect: ConnectionFactory,
     token: str,
     notice: str | None,
@@ -347,6 +366,7 @@ def _page(
     acquisition_input: tuple[str, tuple[str, ...]] | None = None,
     qualification_input: tuple[str, str] | None = None,
 ) -> HTMLResponse:
+    grants = current_account(request).capabilities
     try:
         with connect() as connection:
             policy = get_acquisition_policy_draft(connection)
@@ -365,18 +385,20 @@ def _page(
                 "Save and publish each section separately. Run a bounded test search before qualification becomes active."
             ),
             P(notice, role="status") if notice else None,
-            _acquisition_panel(policy, active, token, acquisition_input),
-            _qualification_panel(definition, token, qualification_input),
+            _acquisition_panel(policy, active, token, acquisition_input, grants),
+            _qualification_panel(definition, token, qualification_input, grants),
             Form(
                 Input(type="hidden", name="csrf_token", value=token),
                 Button("Continue to budget", type="submit", cls="button primary"),
                 action="/configuration/continue",
                 method="post",
-            ),
-            A("Operations", href="/operations"),
+            )
+            if Capability.ADMIN_BUDGET in grants
+            else None,
             A("Qualification targets", href="/configuration/qualification-targets"),
             cls="review-shell configuration-shell split-setup",
         ),
+        grants=grants,
     )
     return HTMLResponse(document(body, title="Search setup"), status_code=status_code)
 
@@ -425,6 +447,7 @@ def _acquisition_panel(
     active: ActiveAcquisitionPolicy,
     token: str,
     submitted: tuple[str, tuple[str, ...]] | None,
+    grants: frozenset[Capability],
 ) -> object:
     keywords = "\n".join(draft.policy.search_keywords) if submitted is None else submitted[0]
     sources = (
@@ -463,24 +486,37 @@ def _acquisition_panel(
             action="/configuration/acquisition/draft",
             method="post",
             cls="split-config-form",
+        )
+        if Capability.SEARCH_DRAFT in grants
+        else Div(
+            P("Keywords"),
+            Pre(keywords),
+            P("Sources: " + ", ".join(sources)),
         ),
         _action_form(
             "/configuration/acquisition/publish", "Publish acquisition", draft.version, token
-        ),
+        )
+        if Capability.SEARCH_PUBLISH in grants
+        else None,
         _action_form(
             "/configuration/acquisition/activate",
             "Activate acquisition",
             active.generation,
             token,
             candidate_revision_id=draft.base_revision_id,
-        ),
+        )
+        if Capability.SEARCH_ACTIVATE in grants
+        else None,
         P(f"Active generation {active.generation}. Draft version {draft.version}."),
         cls="editor-section split-config-panel",
     )
 
 
 def _qualification_panel(
-    draft: QualificationDefinitionDraft, token: str, submitted: tuple[str, str] | None
+    draft: QualificationDefinitionDraft,
+    token: str,
+    submitted: tuple[str, str] | None,
+    grants: frozenset[Capability],
 ) -> object:
     definition = draft.definition
     criteria_json = (
@@ -535,10 +571,19 @@ def _qualification_panel(
             action="/configuration/qualification/draft",
             method="post",
             cls="split-config-form",
+        )
+        if Capability.SEARCH_DRAFT in grants
+        else Div(
+            P("Personal criteria"),
+            Pre(criteria_json),
+            P("Target profiles"),
+            Pre(profiles_json),
         ),
         _action_form(
             "/configuration/qualification/publish", "Publish qualification", draft.version, token
-        ),
+        )
+        if Capability.SEARCH_PUBLISH in grants
+        else None,
         P(f"Published base {draft.base_revision_id[:12]}. Draft version {draft.version}."),
         cls="editor-section split-config-panel",
     )

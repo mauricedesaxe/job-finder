@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from starlette.datastructures import FormData
 from starlette.responses import HTMLResponse, RedirectResponse
 
+from job_finder.access_policy import Capability
 from job_finder.benchmarks.qualification_activation import (
     ActivateQualificationTargetCommand,
     QualificationActivationError,
@@ -45,6 +46,7 @@ from job_finder.benchmarks.qualification_promotions import (
 )
 from job_finder.database import ConnectionFactory
 from job_finder.evaluation.qualification_components import QualificationTargetId
+from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
 
@@ -71,7 +73,6 @@ def register_qualification_promotion_routes(
     *,
     connect: ConnectionFactory,
     artifact_path: Path,
-    actor: str,
     now: Callable[[], datetime],
 ) -> None:
     @app.route("/configuration/qualification-promotion", methods=["GET"])
@@ -79,7 +80,9 @@ def register_qualification_promotion_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(connect, token, _PROMOTION_NOTICES.get(request.query_params.get("notice", "")))
+        return _page(
+            request, connect, token, _PROMOTION_NOTICES.get(request.query_params.get("notice", ""))
+        )
 
     @app.route("/configuration/qualification-promotion/preview", methods=["POST"])
     async def preview(request: Request) -> HTMLResponse:
@@ -98,7 +101,7 @@ def register_qualification_promotion_routes(
                 if result.eligible
                 else "Evidence is incomplete: " + "; ".join(result.failures)
             )
-            return _page(connect, token, message, submitted=form)
+            return _page(request, connect, token, message, submitted=form)
         except psycopg.Error as error:
             return _database_failure(
                 "Qualification promotion preview failed",
@@ -106,7 +109,7 @@ def register_qualification_promotion_routes(
                 "The preview could not be completed because of a database error. Check the server logs before retrying.",
             )
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _error(error), 422, submitted=form)
+            return _page(request, connect, token, _error(error), 422, submitted=form)
 
     @app.route("/configuration/qualification-promotion/decide", methods=["POST"])
     async def decide(request: Request) -> HTMLResponse | RedirectResponse:
@@ -131,7 +134,7 @@ def register_qualification_promotion_routes(
                     artifact_path=artifact_path,
                     decision=approved_or_rejected,
                     reason=str(form.get("reason", "")),
-                    actor=actor,
+                    actor=actor_email(request),
                     created_at=now(),
                     idempotency_key=str(form.get("idempotency_key", "")),
                 )
@@ -142,7 +145,7 @@ def register_qualification_promotion_routes(
                 "The decision result could not be confirmed. Reload and check current state before retrying.",
             )
         except (ValueError, ValidationError) as error:
-            return _page(connect, token, _error(error), 422, submitted=form)
+            return _page(request, connect, token, _error(error), 422, submitted=form)
         return RedirectResponse(
             "/configuration/qualification-promotion?notice=decision-recorded",
             status_code=303,
@@ -164,13 +167,15 @@ def register_qualification_promotion_routes(
                         promotion_decision_id=str(form.get("promotion_decision_id", "")),
                         expected_target_id=QualificationTargetId(observed) if observed else None,
                         expected_generation=int(str(form.get("expected_generation", ""))),
-                        actor=actor,
+                        actor=actor_email(request),
                         timestamp=now(),
                     ),
                     artifact_path,
                 )
             if receipt.outcome == "active_changed":
-                return _page(connect, token, "Active target changed. Reload and retry.", 409)
+                return _page(
+                    request, connect, token, "Active target changed. Reload and retry.", 409
+                )
         except psycopg.Error as error:
             return _database_failure(
                 "Qualification target activation failed",
@@ -178,7 +183,7 @@ def register_qualification_promotion_routes(
                 "The activation result could not be confirmed. Reload and check the active target before retrying.",
             )
         except (ValueError, ValidationError, QualificationActivationError) as error:
-            return _page(connect, token, _error(error), 422)
+            return _page(request, connect, token, _error(error), 422)
         return RedirectResponse(
             "/configuration/qualification-promotion?notice=qualification-activated",
             status_code=303,
@@ -211,6 +216,7 @@ def _error(error: ValueError) -> str:
 
 
 def _page(
+    request: Request,
     connect: ConnectionFactory,
     token: str,
     notice: str | None,
@@ -218,6 +224,7 @@ def _page(
     *,
     submitted: FormData | None = None,
 ) -> HTMLResponse:
+    grants = current_account(request).capabilities
     try:
         with connect() as connection:
             active = get_active_qualification_target(connection)
@@ -248,7 +255,7 @@ def _page(
             ),
             P(notice, role="status") if notice else None,
             P(f"Active target: {active.target_id or 'none'}. Generation {active.generation}."),
-            _decision_form(token, target_ids, submitted),
+            _decision_form(token, target_ids, submitted, grants),
             H2("Recent canonical evidence"),
             Ul(*(Li(f"{row[2]} · target {str(row[1])[:12]} · {row[0]}") for row in evidence))
             if evidence
@@ -257,15 +264,23 @@ def _page(
             Ul(*(Li(f"{row[2]} · target {str(row[1])[:12]} · {row[0]}") for row in decisions))
             if decisions
             else P("No decisions recorded yet."),
-            _activation_form(token, active.target_id, active.generation, decisions),
+            _activation_form(token, active.target_id, active.generation, decisions)
+            if Capability.SEARCH_ACTIVATE in grants
+            else None,
             A("Qualification candidates", href="/configuration/qualification-targets"),
             cls="review-shell configuration-shell",
         ),
+        grants=grants,
     )
     return HTMLResponse(document(body, title="Qualification promotion"), status_code=status_code)
 
 
-def _decision_form(token: str, targets: tuple[str, ...], submitted: FormData | None) -> object:
+def _decision_form(
+    token: str,
+    targets: tuple[str, ...],
+    submitted: FormData | None,
+    grants: frozenset[Capability],
+) -> object:
     def selected(name: str) -> str:
         return "" if submitted is None else str(submitted.get(name, ""))
 
@@ -322,7 +337,9 @@ def _decision_form(token: str, targets: tuple[str, ...], submitted: FormData | N
             "Record decision",
             type="submit",
             formaction="/configuration/qualification-promotion/decide",
-        ),
+        )
+        if Capability.SEARCH_PUBLISH in grants
+        else None,
         action="/configuration/qualification-promotion/preview",
         method="post",
     )

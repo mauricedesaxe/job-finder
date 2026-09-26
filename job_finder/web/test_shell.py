@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fasthtml.common import to_xml
+from job_finder.access_policy import Capability
 
 from job_finder.web.shell import (
     absolute_time,
@@ -14,6 +15,7 @@ from job_finder.web.shell import (
 )
 
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+ALL_GRANTS = frozenset(Capability)
 
 
 def _relative(seconds: float) -> str:
@@ -68,16 +70,16 @@ def test_timestamp_carries_the_absolute_time_as_its_title() -> None:
 
 
 def test_sidebar_marks_the_current_section() -> None:
-    markup = to_xml(sidebar("token", current="operations"))
+    markup = to_xml(sidebar("token", current="operations", grants=ALL_GRANTS))
 
     assert 'href="/"' in markup
-    assert 'href="/operations/runs" aria-current="page"' in markup
+    assert 'href="/operations" aria-current="page"' in markup
     assert 'href="/configuration"' in markup
     assert 'action="/logout"' in markup
 
 
 def test_operations_sub_sidebar_marks_the_current_page() -> None:
-    markup = to_xml(operations_sub_sidebar("control"))
+    markup = to_xml(operations_sub_sidebar("control", grants=ALL_GRANTS))
 
     assert 'href="/operations/runs"' in markup
     assert 'href="/operations/analytics"' in markup

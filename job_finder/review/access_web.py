@@ -9,7 +9,6 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import quote
 
 import psycopg
 from anyio import Lock, to_thread
@@ -34,8 +33,9 @@ from fasthtml.common import (
     Ul,
 )
 from pydantic import SecretStr
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse
 
+from job_finder.access_policy import landing_path
 from job_finder.config import ReviewAppSettings
 from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.execution_budget import (
@@ -57,20 +57,20 @@ from job_finder.review.onboarding import (
     OnboardingSearchProgress,
     OnboardingSearchService,
 )
+from job_finder.review.accounts import AccountService
 from job_finder.review.owner_access import (
     MAXIMUM_PASSWORD_INPUT_LENGTH,
     MAXIMUM_PASSWORD_LENGTH,
     MINIMUM_PASSWORD_LENGTH,
     OnboardingStage,
     OwnerAccessService,
-    OwnerBootstrapConflict,
 )
 from job_finder.web.security import (
-    authenticate_session,
     ensure_csrf_token,
     form_text,
     valid_csrf,
 )
+from job_finder.web.principal import actor_email
 from job_finder.web.shell import (
     document,
     state_response,
@@ -122,10 +122,10 @@ def register_access_routes(
     *,
     settings: ReviewAppSettings,
     owner_access_service: OwnerAccessService,
+    account_service: AccountService,
     provider_setup_service: ProviderSetupService | None,
     budget_setup_service: BudgetSetupService | None,
     test_search_service: OnboardingSearchService | None,
-    actor: str,
     now: DateTimeClock,
 ) -> None:
     login_failures: dict[str, deque[float]] = {}
@@ -137,7 +137,8 @@ def register_access_routes(
         if not isinstance(csrf_token, str):
             csrf_token = secrets.token_urlsafe(32)
             request.session["csrf_token"] = csrf_token
-        return HTMLResponse(document(_setup_content(csrf_token)))
+        state = owner_access_service.load_state()
+        return HTMLResponse(document(_setup_content(csrf_token, legacy=state.has_password)))
 
     @app.route("/setup", methods=["POST"], name="create_review_app_setup_submit")
     async def setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
@@ -149,32 +150,45 @@ def register_access_routes(
             )
         csrf_token = request.session.get("csrf_token")
         assert isinstance(csrf_token, str)
+        state = owner_access_service.load_state()
+        legacy = state.has_password
         password = form_text(form, "password")
-        configured_token = settings.bootstrap_token
-        supplied_token = form_text(form, "bootstrap_token")
-        if configured_token is None or not hmac.compare_digest(
-            supplied_token, configured_token.get_secret_value()
+        email = form_text(form, "email")
+        if not legacy and (
+            settings.bootstrap_token is None
+            or not hmac.compare_digest(
+                form_text(form, "bootstrap_token"),
+                settings.bootstrap_token.get_secret_value(),
+            )
         ):
             return HTMLResponse(
                 document(
-                    _setup_content(
-                        csrf_token,
-                        "The bootstrap token is incorrect.",
-                    )
+                    _setup_content(csrf_token, "The bootstrap token is incorrect.", legacy=False)
                 ),
                 status_code=401,
             )
-        if password != form_text(form, "password_confirmation"):
+        if not legacy and password != form_text(form, "password_confirmation"):
             return HTMLResponse(
-                document(_setup_content(csrf_token, "Passwords differ.")),
+                document(_setup_content(csrf_token, "Passwords differ.", legacy=False)),
                 status_code=400,
             )
         try:
-            result = await to_thread.run_sync(owner_access_service.bootstrap, password)
+            result = await to_thread.run_sync(
+                lambda: account_service.first_admin(
+                    email, password, legacy_password=password if legacy else None
+                )
+            )
         except ValueError as error:
             return HTMLResponse(
-                document(_setup_content(csrf_token, str(error))),
+                document(_setup_content(csrf_token, str(error), legacy=legacy)),
                 status_code=400,
+            )
+        except PermissionError:
+            return HTMLResponse(
+                document(
+                    _setup_content(csrf_token, "The owner password is incorrect.", legacy=legacy)
+                ),
+                status_code=401,
             )
         except psycopg.Error as error:
             return _setup_failure(
@@ -182,15 +196,16 @@ def register_access_routes(
                 "The owner password could not be saved",
                 error,
             )
-        if isinstance(result, OwnerBootstrapConflict):
+        if result is None:
             return state_response(
                 "Owner setup is already complete",
-                "Sign in with the owner password that was created first.",
+                "Sign in with the account that was created first.",
                 action=A("Go to sign in", href="/login", cls="retry"),
                 status_code=409,
             )
-        authenticate_session(request)
-        return RedirectResponse("/setup/providers", status_code=303)
+        token = await to_thread.run_sync(account_service.create_session, result.id)
+        _set_account_session(request, token)
+        return RedirectResponse("/setup/providers" if not legacy else "/", status_code=303)
 
     @app.route("/setup/providers", methods=["GET"], name="create_review_app_provider_setup_form")
     def provider_setup_form(request: Request) -> HTMLResponse:
@@ -247,7 +262,7 @@ def register_access_routes(
                 provider,
                 SecretStr(credential),
                 expected_generation,
-                "owner",
+                actor_email(request),
                 now(),
             )
         except (psycopg.Error, RuntimeError, ValueError) as error:
@@ -333,7 +348,11 @@ def register_access_routes(
     @app.route("/login", methods=["GET"], name="create_review_app_login_form")
     def login_form(request: Request) -> HTMLResponse:
         return HTMLResponse(
-            document(_login_content(_safe_next(request.query_params.get("next", "/"))))
+            document(
+                _login_content(
+                    _safe_next(request.query_params.get("next", "/")), ensure_csrf_token(request)
+                )
+            )
         )
 
     @app.route("/setup/budget", methods=["GET"], name="create_review_app_budget_setup_form")
@@ -375,7 +394,7 @@ def register_access_routes(
                 monthly_limit,
                 run_limit,
                 max_jobs,
-                actor,
+                actor_email(request),
                 now(),
             )
         except (InvalidOperation, ValueError):
@@ -452,7 +471,7 @@ def register_access_routes(
                 "Test search was not started", "Reload the page and try again.", status_code=403
             )
         try:
-            result = test_search_service.launch(actor, now())
+            result = test_search_service.launch(actor_email(request), now())
         except (psycopg.Error, RuntimeError) as error:
             return _setup_failure(
                 "Test search is unavailable",
@@ -470,35 +489,57 @@ def register_access_routes(
 
     @app.route("/login", methods=["POST"], name="create_review_app_login_submit")
     async def login_submit(request: Request) -> HTMLResponse | RedirectResponse:
-        return await _submit_login(
-            request, owner_access_service, login_failures, login_attempt_lock
-        )
+        return await _submit_login(request, account_service, login_failures, login_attempt_lock)
 
     @app.route("/logout", methods=["POST"], name="create_review_app_logout")
     async def logout(request: Request) -> HTMLResponse | RedirectResponse:
-        return await _submit_logout(request)
+        return await _submit_logout(request, account_service)
+
+    @app.route("/no-access", methods=["GET"], name="create_review_app_no_access")
+    def no_access(request: Request) -> HTMLResponse | RedirectResponse:
+        path = landing_path(request.state.principal.capabilities)
+        if path != "/no-access":
+            return RedirectResponse(path, status_code=303)
+        return state_response(
+            "No access assigned",
+            "Ask an administrator to grant access to an area.",
+            action=Form(
+                Input(type="hidden", name="csrf_token", value=ensure_csrf_token(request)),
+                Button("Sign out", type="submit"),
+                action="/logout",
+                method="post",
+            ),
+            status_code=200,
+            eyebrow="Account access",
+        )
 
 
 async def _submit_login(
     request: Request,
-    owner_access: OwnerAccessService,
+    accounts: AccountService,
     login_failures: dict[str, deque[float]],
     login_attempt_lock: Lock,
 ) -> HTMLResponse | RedirectResponse:
     form = await request.form()
+    if not valid_csrf(request, form_text(form, "csrf_token")):
+        return state_response(
+            "Sign in failed", "This sign-in form expired. Reload and try again.", status_code=403
+        )
+    email = form_text(form, "email")
     password = form_text(form, "password")
     next_url = _safe_next(form_text(form, "next"))
     client_id = request.client.host if request.client else "unknown"
     async with login_attempt_lock:
         return await _check_login(
-            request, owner_access, login_failures, password, next_url, client_id
+            request, accounts, login_failures, email, password, next_url, client_id
         )
 
 
 async def _check_login(
     request: Request,
-    owner_access: OwnerAccessService,
+    accounts: AccountService,
     login_failures: dict[str, deque[float]],
+    email: str,
     password: str,
     next_url: str,
     client_id: str,
@@ -509,31 +550,52 @@ async def _check_login(
         recent.popleft()
     if len(recent) >= LOGIN_MAX_FAILURES:
         return HTMLResponse(
-            document(_login_content(next_url, "Too many attempts. Try again in a few minutes.")),
+            document(
+                _login_content(
+                    next_url,
+                    ensure_csrf_token(request),
+                    "Too many attempts. Try again in a few minutes.",
+                )
+            ),
             status_code=429,
         )
     try:
-        authenticated = await to_thread.run_sync(owner_access.authenticate, password)
-    except psycopg.Error as error:
+        principal = await to_thread.run_sync(accounts.authenticate, email, password)
+    except (psycopg.Error, ValueError) as error:
         return _setup_failure(
             "Sign in is unavailable",
-            "The owner password could not be checked",
+            "The account could not be checked",
             error,
         )
-    if authenticated:
-        login_failures.pop(client_id, None)
-        authenticate_session(request)
-        return RedirectResponse(next_url, status_code=303)
+    if principal is not None:
+        try:
+            token = await to_thread.run_sync(accounts.create_session, principal.id)
+        except ValueError:
+            pass
+        except psycopg.Error as error:
+            return _setup_failure("Sign in is unavailable", "A session could not be created", error)
+        else:
+            login_failures.pop(client_id, None)
+            _set_account_session(request, token)
+            destination = landing_path(principal.capabilities) if next_url == "/" else next_url
+            return RedirectResponse(destination, status_code=303)
     if client_id not in login_failures and len(login_failures) >= LOGIN_MAX_CLIENTS:
         login_failures.pop(next(iter(login_failures)))
     recent.append(checked_at)
     login_failures[client_id] = recent
     return HTMLResponse(
-        document(_login_content(next_url, "The password is incorrect.")), status_code=401
+        document(
+            _login_content(
+                next_url, ensure_csrf_token(request), "The email or password is incorrect."
+            )
+        ),
+        status_code=401,
     )
 
 
-async def _submit_logout(request: Request) -> HTMLResponse | RedirectResponse:
+async def _submit_logout(
+    request: Request, accounts: AccountService
+) -> HTMLResponse | RedirectResponse:
     form = await request.form()
     if not valid_csrf(request, form_text(form, "csrf_token")):
         return state_response(
@@ -541,87 +603,16 @@ async def _submit_logout(request: Request) -> HTMLResponse | RedirectResponse:
             "Reload the page and try again.",
             status_code=403,
         )
+    token = request.session.get("account_session")
+    if isinstance(token, str):
+        await to_thread.run_sync(accounts.revoke_session, token)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
 
 
-def require_owner(
-    request: Request,
-    owner_access: OwnerAccessService,
-    budget_setup: BudgetSetupService | None,
-) -> Response | None:
-    if ".." in request.url.path.split("/"):
-        return Response(status_code=404)
-    try:
-        state = owner_access.load_state()
-    except (psycopg.Error, RuntimeError) as error:
-        return _setup_failure(
-            "Owner access is unavailable",
-            "Installation state could not be loaded",
-            error,
-        )
-    if state.stage is OnboardingStage.LEGACY_OWNER_IMPORT:
-        return state_response(
-            "Legacy owner import is required",
-            "Restore JOB_FINDER_REVIEW_PASSWORD for one startup to import the existing owner securely.",
-            status_code=503,
-        )
-    if state.stage is OnboardingStage.OWNER_ACCOUNT:
-        if request.url.path == "/setup":
-            return None
-        return RedirectResponse("/setup", status_code=303)
-    onboarding_path = {
-        OnboardingStage.PROVIDERS: "/setup/providers",
-        OnboardingStage.PREFERENCES: "/configuration",
-        OnboardingStage.BUDGET: "/setup/budget",
-        OnboardingStage.TEST_SEARCH: "/setup/test-search",
-    }.get(state.stage)
-    if onboarding_path is not None:
-        if request.url.path == "/login":
-            return None
-        if request.session.get("authenticated") is not True:
-            return RedirectResponse(
-                f"/login?next={quote(onboarding_path, safe='')}", status_code=303
-            )
-        allowed_prefix = (
-            "/configuration" if state.stage is OnboardingStage.PREFERENCES else onboarding_path
-        )
-        if request.url.path == "/logout" or request.url.path.startswith(allowed_prefix):
-            return None
-        return RedirectResponse(onboarding_path, status_code=303)
-    budget_response = _require_completed_budget(request, budget_setup)
-    if budget_response is not None:
-        return budget_response
-    if request.url.path == "/setup":
-        destination = "/" if request.session.get("authenticated") is True else "/login"
-        return RedirectResponse(destination, status_code=303)
-    if request.url.path == "/login":
-        return None
-    if request.session.get("authenticated") is True:
-        return None
-    next_url = request.url.path
-    if request.url.query:
-        next_url = f"{next_url}?{request.url.query}"
-    return RedirectResponse(f"/login?next={quote(next_url, safe='')}", status_code=303)
-
-
-def _require_completed_budget(
-    request: Request,
-    budget_setup: BudgetSetupService | None,
-) -> Response | None:
-    if (
-        budget_setup is None
-        or request.session.get("authenticated") is not True
-        or request.url.path in ("/logout", "/setup/budget")
-    ):
-        return None
-    try:
-        policy = budget_setup.inspect(25).policy
-    except (psycopg.Error, RuntimeError) as error:
-        return _budget_inspection_failure(error)
-    if policy is None:
-        return RedirectResponse("/setup/budget", status_code=303)
-    return None
+def _set_account_session(request: Request, token: str) -> None:
+    request.session.clear()
+    request.session.update({"account_session": token, "csrf_token": secrets.token_urlsafe(32)})
 
 
 def _provider_setup_content(
@@ -859,25 +850,32 @@ def _test_search_content(progress: OnboardingSearchProgress, csrf_token: str) ->
     )
 
 
-def _setup_content(csrf_token: str, error: str | None = None) -> object:
+def _setup_content(csrf_token: str, error: str | None = None, *, legacy: bool = False) -> object:
     return Main(
         Div(
             Small("JF / FIRST RUN", cls="eyebrow"),
-            H1("Create the owner password."),
+            H1("Claim the admin account." if legacy else "Create the first admin."),
             P(
-                "This password protects configuration, operations, and every job decision. "
-                + "It is hashed before storage and cannot be recovered.",
+                "Enter the existing owner password to claim this installation. "
+                "Your email and that password will become your individual sign-in."
+                if legacy
+                else "Create your individual admin account. Your password is hashed before storage.",
                 cls="login-intro",
             ),
             cls="login-editorial",
         ),
         Div(
-            Small("Owner setup", cls="eyebrow"),
-            H2("Secure this installation"),
+            Small("Admin setup", cls="eyebrow"),
+            H2("Claim this installation" if legacy else "Secure this installation"),
             P(error, cls="error", role="alert") if error else None,
             Form(
                 Input(type="hidden", name="csrf_token", value=csrf_token),
                 Label(
+                    "Email", Input(type="email", name="email", required=True, autocomplete="email")
+                ),
+                None
+                if legacy
+                else Label(
                     "Bootstrap token",
                     Input(
                         type="password",
@@ -887,17 +885,19 @@ def _setup_content(csrf_token: str, error: str | None = None) -> object:
                     ),
                 ),
                 Label(
-                    "Password",
+                    "Existing owner password" if legacy else "Password",
                     Input(
                         type="password",
                         name="password",
                         minlength=str(MINIMUM_PASSWORD_LENGTH),
                         maxlength=str(MAXIMUM_PASSWORD_LENGTH),
                         required=True,
-                        autocomplete="new-password",
+                        autocomplete="current-password" if legacy else "new-password",
                     ),
                 ),
-                Label(
+                None
+                if legacy
+                else Label(
                     "Confirm password",
                     Input(
                         type="password",
@@ -908,7 +908,11 @@ def _setup_content(csrf_token: str, error: str | None = None) -> object:
                         autocomplete="new-password",
                     ),
                 ),
-                Button("Create owner", type="submit", cls="primary-action"),
+                Button(
+                    "Claim admin account" if legacy else "Create admin",
+                    type="submit",
+                    cls="primary-action",
+                ),
                 action="/setup",
                 method="post",
             ),
@@ -918,7 +922,7 @@ def _setup_content(csrf_token: str, error: str | None = None) -> object:
     )
 
 
-def _login_content(next_url: str, error: str | None = None) -> object:
+def _login_content(next_url: str, csrf_token: str, error: str | None = None) -> object:
     return Main(
         Div(
             Small("JF / PRIVATE REVIEW", cls="eyebrow"),
@@ -938,11 +942,15 @@ def _login_content(next_url: str, error: str | None = None) -> object:
             cls="login-editorial",
         ),
         Div(
-            Small("Owner access", cls="eyebrow"),
+            Small("Account access", cls="eyebrow"),
             H2("Enter the workbench"),
             P(error, cls="error", role="alert") if error else None,
             Form(
                 Input(type="hidden", name="next", value=next_url),
+                Input(type="hidden", name="csrf_token", value=csrf_token),
+                Label(
+                    "Email", Input(type="email", name="email", required=True, autocomplete="email")
+                ),
                 Label(
                     "Password",
                     Input(

@@ -42,10 +42,11 @@ from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerAccessService,
     OwnerAccessState,
-    OwnerBootstrapped,
 )
 
 from job_finder.review.test_app_support import (
+    helper_account_service,
+    helper_login_data,
     helper_default_submit_review as _default_submit_review,
     helper_test_search_request as _test_search_request,
     helper_test_search_client as _test_search_client,
@@ -61,6 +62,7 @@ from job_finder.review.test_app_support import (
     NOW,
     SETTINGS,
     OWNER_PASSWORD,
+    OWNER_EMAIL,
     BOOTSTRAP_TOKEN,
     OWNER_ACCESS,
 )
@@ -91,6 +93,7 @@ def test_requires_a_signed_session_for_review_routes(method: str, path: str, loc
             unused,
             SETTINGS,
             submit_review=unused,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -104,17 +107,16 @@ def test_requires_a_signed_session_for_review_routes(method: str, path: str, loc
 
 def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     state = [OwnerAccessState(stage=OnboardingStage.OWNER_ACCOUNT, has_password=False)]
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
 
-    def bootstrap(password: str) -> OwnerBootstrapped:
-        calls.append(password)
-        state[0] = OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=True)
-        return OwnerBootstrapped(state[0])
+    def claim(email: str, password: str) -> None:
+        calls.append((email, password))
+        state[0] = OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=False)
 
     owner_access = OwnerAccessService(
         load_state=lambda: state[0],
         authenticate=lambda _password: False,
-        bootstrap=bootstrap,
+        bootstrap=lambda _password: pytest.fail("legacy bootstrap was unexpectedly called"),
     )
 
     def replace_provider(
@@ -142,6 +144,7 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(has_accounts=False, on_claim=claim),
             owner_access_service=owner_access,
             provider_setup_service=provider_setup,
             now=lambda: NOW,
@@ -151,7 +154,11 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     protected = client.get("/review", follow_redirects=False)
     forbidden = client.post(
         "/setup",
-        data={"password": OWNER_PASSWORD, "password_confirmation": OWNER_PASSWORD},
+        data={
+            "email": "owner@example.com",
+            "password": OWNER_PASSWORD,
+            "password_confirmation": OWNER_PASSWORD,
+        },
     )
     setup = client.get("/setup")
     csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', setup.text)
@@ -161,6 +168,7 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
         data={
             "csrf_token": csrf_match.group(1),
             "bootstrap_token": "incorrect-bootstrap-token-with-32-characters",
+            "email": "owner@example.com",
             "password": OWNER_PASSWORD,
             "password_confirmation": OWNER_PASSWORD,
         },
@@ -170,6 +178,7 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
         data={
             "csrf_token": csrf_match.group(1),
             "bootstrap_token": BOOTSTRAP_TOKEN,
+            "email": "owner@example.com",
             "password": OWNER_PASSWORD,
             "password_confirmation": OWNER_PASSWORD,
         },
@@ -180,10 +189,10 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     assert protected.headers["location"] == "/setup"
     assert forbidden.status_code == 403
     assert rejected_token.status_code == 401
-    assert "Create the owner password" in setup.text
+    assert "Create the first admin" in setup.text
     assert completed.status_code == 303
     assert completed.headers["location"] == "/setup/providers"
-    assert calls == [OWNER_PASSWORD]
+    assert calls == [("owner@example.com", OWNER_PASSWORD)]
     review = client.get("/review", follow_redirects=False)
     assert review.status_code == 303
     assert review.headers["location"] == "/setup/providers"
@@ -253,6 +262,7 @@ def test_provider_setup_never_echoes_credentials_and_advances_when_ready() -> No
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner_access,
             provider_setup_service=providers,
             now=lambda: NOW,
@@ -328,6 +338,7 @@ def test_budget_setup_shows_bounds_and_advances_to_test_search() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             budget_setup_service=budget,
             test_search_service=OnboardingSearchService(
@@ -374,7 +385,7 @@ def test_test_search_launch_requires_csrf_and_polls_durable_progress() -> None:
     )
     assert started.status_code == 303
     assert started.headers["location"] == "/setup/test-search"
-    assert launches == [("owner", NOW)]
+    assert launches == [(OWNER_EMAIL, NOW)]
     queued = client.get("/setup/test-search")
     assert "Test search queued" in queued.text
     assert 'http-equiv="refresh" content="5;url=/setup/test-search"' in queued.text
@@ -455,6 +466,7 @@ def test_completed_upgrade_without_a_budget_is_routed_to_budget_setup() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             budget_setup_service=budget,
         )
@@ -525,6 +537,7 @@ def test_budget_inspection_failure_reports_the_cause_without_exposing_secrets(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             budget_setup_service=BudgetSetupService(
                 inspect=inspect,
@@ -561,6 +574,7 @@ def test_owner_state_failure_is_logged_without_claiming_the_database_is_down(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
         )
     )
@@ -570,7 +584,7 @@ def test_owner_state_failure_is_logged_without_claiming_the_database_is_down(
     assert response.status_code == 503
     assert "Installation state could not be loaded" in response.text
     assert "database" not in response.text.lower()
-    assert "Installation state could not be loaded: RuntimeError" in caplog.text
+    assert "Account access unavailable: RuntimeError" in caplog.text
     assert "secret-password" not in response.text + caplog.text
 
 
@@ -614,6 +628,7 @@ def test_provider_state_failure_names_only_the_actual_cause(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             provider_setup_service=provider,
         )
@@ -645,6 +660,7 @@ def test_test_search_state_failure_does_not_claim_the_database_is_down(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             test_search_service=OnboardingSearchService(
                 inspect=inspect,
@@ -693,6 +709,7 @@ def test_budget_save_release_failure_is_logged_and_actionable(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=owner,
             budget_setup_service=BudgetSetupService(
                 inspect=lambda _max_jobs: BudgetSetupState(policy=None, estimate=estimate),
@@ -732,6 +749,7 @@ def test_legacy_install_fails_closed_until_password_import() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=legacy,
             now=lambda: NOW,
         )
@@ -749,15 +767,16 @@ def test_authenticates_and_signs_out_the_owner() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
     )
 
-    rejected = client.post("/login", data={"password": "wrong password", "next": "/review"})
+    rejected = client.post("/login", data=helper_login_data(client, password="wrong password"))
     accepted = client.post(
         "/login",
-        data={"password": OWNER_PASSWORD, "next": "/review"},
+        data=helper_login_data(client),
         follow_redirects=False,
     )
     csrf_token = _csrf(client)
@@ -780,6 +799,7 @@ def test_login_redirects_unsafe_next_targets_to_the_review_home(next_value: str)
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -787,7 +807,7 @@ def test_login_redirects_unsafe_next_targets_to_the_review_home(next_value: str)
 
     response = client.post(
         "/login",
-        data={"password": OWNER_PASSWORD, "next": next_value},
+        data=helper_login_data(client, next_url=next_value),
         follow_redirects=False,
     )
 
@@ -806,6 +826,7 @@ def test_exposes_public_health_and_database_readiness() -> None:
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         readiness=ready,
         now=lambda: NOW,
@@ -829,6 +850,7 @@ def test_reports_database_readiness_failure_without_authentication() -> None:
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             readiness=unavailable,
             now=lambda: NOW,
@@ -854,6 +876,7 @@ def test_reports_incompatible_release_readiness_without_authentication(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
+            account_service=helper_account_service(),
             owner_access_service=OWNER_ACCESS,
             readiness=incompatible,
             now=lambda: NOW,

@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
+from job_finder.access_policy import Capability
 from job_finder.review.feedback import (
     ReviewConflict,
     ReviewSubmission,
@@ -46,6 +47,7 @@ from job_finder.review.queue import (
     ReviewQueue,
     ReviewQueueLoader,
 )
+from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, form_text, valid_csrf
 from job_finder.web.shell import document, sidebar_page, state_response
 
@@ -56,7 +58,6 @@ _logger = logging.getLogger(__name__)
 class ReviewWorkbench:
     load_queue: ReviewQueueLoader
     submit_review: ReviewSubmitter
-    actor: str
     now: Callable[[], datetime]
 
     def register_queue_routes(self, app: FastHTML) -> None:
@@ -92,7 +93,16 @@ class ReviewWorkbench:
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return HTMLResponse(document(sidebar_page("review", token, _review_page(queue))))
+        return HTMLResponse(
+            document(
+                sidebar_page(
+                    "review",
+                    token,
+                    _review_page(queue),
+                    grants=current_account(request).capabilities,
+                )
+            )
+        )
 
     def _review_page_redirect(self, request: Request) -> Response:
         _ = request
@@ -130,7 +140,7 @@ class ReviewWorkbench:
                     "decision": form_text(form, "decision"),
                     "note": form_text(form, "note"),
                     "block_company": form_text(form, "block_company") == "on",
-                    "actor": self.actor,
+                    "actor": actor_email(request),
                     "created_at": self.now(),
                 }
             )
@@ -166,10 +176,24 @@ class ReviewWorkbench:
             return _item_not_found_response()
         if item.reviewed:
             return HTMLResponse(
-                document(sidebar_page("review", token, _revision_page(item, token)))
+                document(
+                    sidebar_page(
+                        "review",
+                        token,
+                        _revision_page(item, token, current_account(request).capabilities),
+                        grants=current_account(request).capabilities,
+                    )
+                )
             )
         return HTMLResponse(
-            document(sidebar_page("review", token, _item_page(queue.items, item, token)))
+            document(
+                sidebar_page(
+                    "review",
+                    token,
+                    _item_page(queue.items, item, token, current_account(request).capabilities),
+                    grants=current_account(request).capabilities,
+                )
+            )
         )
 
 
@@ -252,7 +276,12 @@ def _job_subline(job: ReviewJob) -> str:
     return f"{job.company} · {location}"
 
 
-def _item_page(items: tuple[ReviewItem, ...], item: ReviewItem, csrf_token: str) -> object:
+def _item_page(
+    items: tuple[ReviewItem, ...],
+    item: ReviewItem,
+    csrf_token: str,
+    grants: frozenset[Capability],
+) -> object:
     position = next(i for i, candidate in enumerate(items) if candidate.id == item.id)
     previous_item = items[position - 1] if position > 0 else None
     next_item = items[position + 1] if position + 1 < len(items) else None
@@ -267,7 +296,7 @@ def _item_page(items: tuple[ReviewItem, ...], item: ReviewItem, csrf_token: str)
             ),
             cls="item-topbar",
         ),
-        _job_card(item, csrf_token),
+        _job_card(item, csrf_token, grants),
         cls="review-shell",
     )
 
@@ -278,19 +307,19 @@ def _item_arrow(glyph: str, target: ReviewItem | None) -> object:
     return A(glyph, href=_item_url(target.id), cls="item-nav-link")
 
 
-def _revision_page(item: ReviewItem, csrf_token: str) -> object:
+def _revision_page(item: ReviewItem, csrf_token: str, grants: frozenset[Capability]) -> object:
     return Div(
         Div(
             A("← All jobs", href="/", cls="back-link"),
             Span("Revision", cls="position-marker"),
             cls="item-topbar",
         ),
-        _job_card(item, csrf_token),
+        _job_card(item, csrf_token, grants),
         cls="review-shell",
     )
 
 
-def _job_card(item: ReviewItem, csrf_token: str) -> object:
+def _job_card(item: ReviewItem, csrf_token: str, grants: frozenset[Capability]) -> object:
     second_look = item.lane == "rejected_audit"
     return Div(
         Div(
@@ -322,8 +351,12 @@ def _job_card(item: ReviewItem, csrf_token: str) -> object:
         Div(
             Small("Decision desk", cls="eyebrow"),
             H2("Make the call" if not item.reviewed else "Review the call"),
-            _decision_form(item, csrf_token),
-            _reevaluation_form(item, csrf_token),
+            _decision_form(item, csrf_token)
+            if Capability.REVIEW_SUBMIT in grants
+            else P("You can view this review."),
+            _reevaluation_form(item, csrf_token)
+            if Capability.ACTIVITY_REEVALUATE in grants
+            else None,
             cls="decision-panel",
         ),
         cls="workbench audit-card" if second_look else "workbench",

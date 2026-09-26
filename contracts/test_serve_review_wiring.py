@@ -9,6 +9,7 @@ from Postgres; this contract proves the composition serves real requests.
 from __future__ import annotations
 
 import importlib.util
+import re
 from collections.abc import Generator
 from pathlib import Path
 from typing import Callable, cast
@@ -22,8 +23,6 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from job_finder.config import PostgresContractSettings
-from job_finder.database import apply_migrations
-from job_finder.review.owner_access import postgres_owner_access_service
 
 SERVE_REVIEW = Path(__file__).parents[1] / "scripts" / "serve_review.py"
 OWNER_PASSWORD = "wiring test owner password"
@@ -82,27 +81,26 @@ def test_serve_review_serves_real_requests_from_the_environment(
     assert client.get("/healthz").status_code == 200
     assert client.get("/readyz").status_code == 200
 
-    def connect() -> psycopg.Connection[tuple[object, ...]]:
-        connection = psycopg.connect(settings.postgres_dsn, autocommit=True)
-        _ = connection.execute(
-            sql.SQL("SET search_path TO {}").format(sql.Identifier(wiring_schema))
-        )
-        return connection
-
-    with connect() as connection:
-        _ = apply_migrations(connection)
-    _ = postgres_owner_access_service(connect).bootstrap(OWNER_PASSWORD)
-
     guarded = client.get("/operations/runs", follow_redirects=False)
     assert guarded.status_code == 303
-    assert guarded.headers["location"].startswith("/login")
+    assert guarded.headers["location"] == "/setup"
 
-    login = client.post(
-        "/login",
-        data={"password": OWNER_PASSWORD, "next": "/setup/providers"},
+    setup_form = client.get("/setup")
+    csrf_match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', setup_form.text)
+    assert csrf_match is not None
+    claim = client.post(
+        "/setup",
+        data={
+            "csrf_token": csrf_match.group(1),
+            "bootstrap_token": "wiring-test-bootstrap-token-01234567",
+            "email": "admin@example.com",
+            "password": OWNER_PASSWORD,
+            "password_confirmation": OWNER_PASSWORD,
+        },
         follow_redirects=False,
     )
-    assert login.status_code == 303
+    assert claim.status_code == 303
+    assert claim.headers["location"] == "/setup/providers"
 
     setup = client.get("/setup/providers")
     assert setup.status_code == 200

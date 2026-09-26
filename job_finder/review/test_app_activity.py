@@ -32,6 +32,7 @@ from job_finder.operations.work_history import (
 )
 
 from job_finder.review.test_app_support import (
+    helper_account_service,
     helper_default_submit_review as _default_submit_review,
     helper_client as _client,
     helper_queue as _queue,
@@ -561,6 +562,7 @@ def test_static_assets_require_the_owner_session() -> None:
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
+        account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
         now=lambda: NOW,
     )

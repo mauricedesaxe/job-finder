@@ -22,7 +22,7 @@ Open `REVIEW_URL/readyz` and confirm it says `ready`. Open `REVIEW_URL`; a fresh
 
 ## Complete the setup screens with the owner
 
-1. At `/setup`, enter the bootstrap token. Have the owner create and retain the owner password. Confirm that the app opens **Connect the services that do the work**.
+1. At `/setup`, enter the bootstrap token and the owner's email. Have the owner create and retain their individual admin password. Confirm that the app opens **Connect the services that do the work**.
 2. Enter each provider key on `/setup/providers` and select **Validate and save** for Jina, OpenRouter, and Typesafe. Continue only after all three show **Validated**. Validation makes real provider requests, including small paid model requests.
 3. At `/configuration`, edit **Find jobs** with the owner's keywords and job boards. Select **Save acquisition draft**, **Publish acquisition**, then **Activate acquisition**.
 4. Edit **Choose relevant jobs** with the owner's personal criteria and target profiles. Select **Save qualification draft**, then **Publish qualification**. Select **Continue to budget**. Qualification is not active for daily runs yet.
@@ -41,6 +41,6 @@ The bounded test completes owner setup, but **daily qualification stays idle unt
 3. [Preview, approve, and activate the first qualification target](qualification-first-activation.md). Confirm that `/configuration/qualification-promotion` shows the candidate as active.
 4. Open `/operations/control`. Confirm that the expected schedules are running and that the Dagster API is available. Check the next full discovery run and the review queue after it finishes. Tell the owner where to review jobs and how to give feedback.
 
-Keep the Railway project URL and review URL in the owner's private handoff. The project URL is for the operator; the review URL is for the owner. The owner password cannot currently be rotated in the app, and there is no separate operator account, so decide who holds that password during the setup call.
+Keep the Railway project URL and review URL in the owner's private handoff. The project URL is for the operator; the review URL is for the owner. The first owner is an admin and can invite a separate operator at **Members**. Choose the Operator preset, adjust grants if needed, and copy the invitation link. The operator sets their own password. The link is single-use and expires after seven days; possession of it proves invitation, without email ownership verification. Admins can disable an account or create a one-use password reset link later.
 
 For a local or self-hosted installation, use [Run Job Finder for yourself](../README.md#run-job-finder-for-yourself). Its Compose stack has the same browser setup steps, but you generate the secrets in `.env` and open `http://localhost:8080`.
