@@ -1,6 +1,7 @@
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportUnusedFunction=false, reportMissingTypeStubs=false
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from datetime import datetime
@@ -45,7 +46,9 @@ from job_finder.benchmarks.qualification_promotions import (
 from job_finder.database import ConnectionFactory
 from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.web.security import csrf_token, verified_csrf_token
-from job_finder.web.shell import document, sidebar_page
+from job_finder.web.shell import document, sidebar_page, state_response
+
+_logger = logging.getLogger(__name__)
 
 _EVIDENCE_FIELDS = (
     ("input_preparation_evidence_id", "Input preparation evidence"),
@@ -96,7 +99,13 @@ def register_qualification_promotion_routes(
                 else "Evidence is incomplete: " + "; ".join(result.failures)
             )
             return _page(connect, token, message, submitted=form)
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error as error:
+            return _database_failure(
+                "Qualification promotion preview failed",
+                error,
+                "The preview could not be completed because of a database error. Check the server logs before retrying.",
+            )
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _error(error), 422, submitted=form)
 
     @app.route("/configuration/qualification-promotion/decide", methods=["POST"])
@@ -126,7 +135,13 @@ def register_qualification_promotion_routes(
                     created_at=now(),
                     idempotency_key=str(form.get("idempotency_key", "")),
                 )
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error as error:
+            return _database_failure(
+                "Qualification promotion decision failed",
+                error,
+                "The decision result could not be confirmed. Reload and check current state before retrying.",
+            )
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _error(error), 422, submitted=form)
         return RedirectResponse(
             "/configuration/qualification-promotion?notice=decision-recorded",
@@ -156,7 +171,13 @@ def register_qualification_promotion_routes(
                 )
             if receipt.outcome == "active_changed":
                 return _page(connect, token, "Active target changed. Reload and retry.", 409)
-        except (ValueError, ValidationError, psycopg.Error, QualificationActivationError) as error:
+        except psycopg.Error as error:
+            return _database_failure(
+                "Qualification target activation failed",
+                error,
+                "The activation result could not be confirmed. Reload and check the active target before retrying.",
+            )
+        except (ValueError, ValidationError, QualificationActivationError) as error:
             return _page(connect, token, _error(error), 422)
         return RedirectResponse(
             "/configuration/qualification-promotion?notice=qualification-activated",
@@ -178,9 +199,12 @@ def _evidence(form: FormData) -> PromotionEvidenceSelection:
     )
 
 
-def _error(error: ValueError | psycopg.Error) -> str:
-    if isinstance(error, psycopg.Error):
-        return "Qualification promotion is unavailable. Reload and try again."
+def _database_failure(operation: str, error: psycopg.Error, message: str) -> HTMLResponse:
+    _logger.error("%s: %s", operation, type(error).__name__)
+    return state_response("Qualification promotion is unavailable", message, status_code=503)
+
+
+def _error(error: ValueError) -> str:
     if isinstance(error, ValidationError):
         return str(error.errors()[0]["msg"]).removeprefix("Value error, ")
     return str(error)
@@ -194,17 +218,24 @@ def _page(
     *,
     submitted: FormData | None = None,
 ) -> HTMLResponse:
-    with connect() as connection:
-        active = get_active_qualification_target(connection)
-        targets = connection.execute(
-            "SELECT id FROM qualification_targets ORDER BY created_at DESC, id DESC LIMIT 20"
-        ).fetchall()
-        evidence = connection.execute(
-            "SELECT id, target_id, phase FROM qualification_phase_evidence WHERE origin = 'canonical' AND outcome = 'passed' ORDER BY created_at DESC LIMIT 25"
-        ).fetchall()
-        decisions = connection.execute(
-            "SELECT id, candidate_target_id, decision FROM qualification_promotion_decisions ORDER BY created_at DESC LIMIT 10"
-        ).fetchall()
+    try:
+        with connect() as connection:
+            active = get_active_qualification_target(connection)
+            targets = connection.execute(
+                "SELECT id FROM qualification_targets ORDER BY created_at DESC, id DESC LIMIT 20"
+            ).fetchall()
+            evidence = connection.execute(
+                "SELECT id, target_id, phase FROM qualification_phase_evidence WHERE origin = 'canonical' AND outcome = 'passed' ORDER BY created_at DESC LIMIT 25"
+            ).fetchall()
+            decisions = connection.execute(
+                "SELECT id, candidate_target_id, decision FROM qualification_promotion_decisions ORDER BY created_at DESC LIMIT 10"
+            ).fetchall()
+    except psycopg.Error as error:
+        return _database_failure(
+            "Qualification promotion page load failed",
+            error,
+            "Qualification promotion state could not be loaded. Check the server logs before retrying.",
+        )
     target_ids = tuple(str(row[0]) for row in targets)
     body = sidebar_page(
         "configuration",

@@ -416,6 +416,89 @@ def test_search_setup_reports_database_outage_as_retryable(
 
 
 @pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        (
+            "/configuration/qualification-targets",
+            "Qualification target state could not be loaded",
+        ),
+        (
+            "/configuration/qualification-promotion",
+            "Qualification promotion state could not be loaded",
+        ),
+    ],
+)
+def test_qualification_pages_report_database_outage_without_exposing_details(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    client, _ = _client_for_schema("unused")
+
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("secret-password")):
+        response = client.get(path)
+
+    assert response.status_code == 503
+    assert message in response.text
+    assert "OperationalError" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "fields", "message"),
+    [
+        (
+            "/configuration/qualification-targets/candidate",
+            {},
+            "The creation result could not be confirmed",
+        ),
+        (
+            "/configuration/qualification-promotion/preview",
+            {"candidate_target_id": "a" * 64},
+            "The preview could not be completed because of a database error",
+        ),
+        (
+            "/configuration/qualification-promotion/preview",
+            {"candidate_target_id": "invalid"},
+            "Qualification promotion state could not be loaded",
+        ),
+        (
+            "/configuration/qualification-promotion/decide",
+            {"candidate_target_id": "a" * 64, "decision": "approved"},
+            "The decision result could not be confirmed",
+        ),
+        (
+            "/configuration/qualification-promotion/activate",
+            {"expected_generation": "0"},
+            "The activation result could not be confirmed",
+        ),
+    ],
+)
+def test_qualification_writes_report_database_outage_as_server_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    fields: dict[str, str],
+    message: str,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    client, _ = _client_for_schema("unused")
+    control = client.get("/operations/control")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', control.text)
+    assert token_match is not None
+
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("secret-password")):
+        response = client.post(path, data={"csrf_token": token_match.group(1), **fields})
+
+    assert response.status_code == 503
+    assert message in response.text
+    assert "OperationalError" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "/configuration/acquisition/draft",
