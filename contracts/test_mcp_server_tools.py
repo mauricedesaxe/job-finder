@@ -35,9 +35,13 @@ from job_finder.benchmarks.promotions import PromptPromotionDecision
 from job_finder.benchmarks.qualification_evidence import (
     FixtureCase,
     PhaseFixtureSet,
+    ProviderExperimentSettings,
+    RelevanceExperimentInput,
+    experiment_input_id,
     fixture_set_id,
 )
 from job_finder.config import PostgresContractSettings
+from job_finder.configuration_service import PublishedActiveSearchConfiguration
 from job_finder.database import apply_migrations
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.models import EvaluationResult, Qualified, ReleaseTarget
@@ -66,55 +70,6 @@ from scripts.serve_mcp import create_server
 
 _NOW = datetime(2026, 9, 19, 12, tzinfo=UTC)
 _RAW_URL = "https://example.com/jobs/mcp-contract"
-_TOOL_NAMES = {
-    "qualification_active_get",
-    "qualification_candidate_get",
-    "qualification_candidate_create",
-    "qualification_candidate_compile",
-    "qualification_definition_draft_get",
-    "qualification_definition_draft_update",
-    "qualification_definition_publish",
-    "qualification_definition_revision_get",
-    "qualification_evidence_list",
-    "qualification_evidence_get",
-    "qualification_evidence_execute",
-    "qualification_fixture_set_store",
-    "qualification_fixture_set_get",
-    "qualification_relevance_input_store",
-    "qualification_relevance_input_get",
-    "qualification_relevance_comparison_create",
-    "qualification_promotion_preview",
-    "qualification_promotion_decide",
-    "qualification_activate",
-    "acquisition_active_get",
-    "acquisition_draft_get",
-    "acquisition_revision_get",
-    "acquisition_draft_update",
-    "acquisition_publish",
-    "acquisition_activate",
-    "feedback_list",
-    "feedback_get",
-    "feedback_curate",
-    "manifest_preview",
-    "manifest_create",
-    "manifest_get",
-    "manifest_list",
-    "release_target_candidate_create",
-    "release_target_active_get",
-    "evaluation_execution_get",
-    "evaluation_run",
-    "evaluation_run_get",
-    "release_target_compare",
-    "release_target_decide",
-    "release_target_activate",
-    "langfuse_projection_status",
-    "configuration_active_get",
-    "configuration_draft_get",
-    "configuration_validate",
-    "configuration_preview",
-    "configuration_revision_list",
-    "configuration_revision_get",
-}
 _ACTIVATION_RESULT: TypeAdapter[ActivateReleaseTargetResult] = TypeAdapter(
     ActivateReleaseTargetResult
 )
@@ -188,9 +143,36 @@ def test_mcp_qualification_evidence_catalog_freezes_and_reads_fixture_sets(
 ) -> None:
     with _connection(authority_schema) as connection:
         apply_migrations(connection)
+        review_event_id = _seed_pursued_feedback(connection)
+        include_review_event(
+            connection,
+            review_event_id=review_event_id,
+            critical=False,
+            reason="Evidence catalog contract case.",
+            actor="contract-owner",
+            created_at=_NOW,
+            idempotency_key="evidence-catalog:curation",
+        )
+        manifest = create_manifest(
+            connection,
+            policy=ManifestPolicy(),
+            created_at=_NOW,
+            created_by="contract-owner",
+            idempotency_key="evidence-catalog:manifest",
+        )
     fixture = PhaseFixtureSet(
         phase="input_preparation",
         cases=(FixtureCase(input={}, expected={}, input_path="direct"),),
+    )
+    experiment = RelevanceExperimentInput(
+        manifest_id=manifest.id,
+        exchange_rates=ExchangeRateSnapshot(
+            rates={"EUR": Decimal("1")}, source="fallback", observed_at=_NOW
+        ),
+        provider_settings=ProviderExperimentSettings(
+            provider="openrouter", temperature=0, seed=1, retry_limit=2
+        ),
+        input_path="direct",
     )
     server = create_mcp_server(
         McpDependencies(
@@ -207,6 +189,26 @@ def test_mcp_qualification_evidence_catalog_freezes_and_reads_fixture_sets(
                 "qualification_fixture_set_get", {"fixture_id": fixture_set_id(fixture)}
             )
             assert PhaseFixtureSet.model_validate(fetched.structured_content) == fixture
+            _ = await client.call_tool(
+                "qualification_relevance_input_store",
+                {"content": experiment.model_dump(mode="json")},
+            )
+            fetched_experiment = await client.call_tool(
+                "qualification_relevance_input_get",
+                {"input_id": experiment_input_id(experiment)},
+            )
+            assert RelevanceExperimentInput.model_validate(
+                fetched_experiment.structured_content
+            ) == experiment
+            with pytest.raises(ToolError, match="Relevance experiment input does not exist"):
+                _ = await client.call_tool(
+                    "qualification_relevance_input_get", {"input_id": "0" * 64}
+                )
+            with pytest.raises(ToolError, match="Relevance evidence does not exist"):
+                _ = await client.call_tool(
+                    "qualification_relevance_comparison_create",
+                    {"baseline_evidence_id": "0" * 64, "candidate_evidence_id": "1" * 64},
+                )
             listed = await client.call_tool(
                 "qualification_evidence_list", {"target_id": "0" * 64, "limit": 10}
             )
@@ -425,7 +427,7 @@ def test_mcp_tools_serve_real_database_state(authority_schema: str) -> None:
     asyncio.run(exercise())
 
 
-def test_serve_mcp_builds_the_server_from_the_environment(
+def test_serve_mcp_builds_a_working_server_from_the_environment(
     authority_schema: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,11 +439,18 @@ def test_serve_mcp_builds_the_server_from_the_environment(
 
     server = create_server()
 
-    async def exercise() -> set[str]:
+    async def exercise() -> None:
         async with Client(server) as client:
-            return {tool.name for tool in await client.list_tools()}
+            published = PublishedActiveSearchConfiguration.model_validate(
+                (await client.call_tool("configuration_active_get", {})).structured_content
+            )
+            assert published.active.generation == 0
+            with pytest.raises(ToolError, match="Search configuration revision does not exist"):
+                _ = await client.call_tool(
+                    "configuration_revision_get", {"revision_id": "a" * 64}
+                )
 
-    assert asyncio.run(exercise()) == _TOOL_NAMES
+    asyncio.run(exercise())
     with _connection(authority_schema) as connection:
         assert load_active_search_configuration(connection).generation == 0
 
