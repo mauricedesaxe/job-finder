@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 from tempfile import NamedTemporaryFile
+from unittest.mock import patch
 from uuid import uuid4
 
 import psycopg
@@ -330,6 +331,17 @@ def test_invalid_split_draft_keeps_entered_values(authority_schema: str) -> None
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
     assert csrf is not None
     token = csrf.group(1)
+    empty_acquisition = client.post(
+        "/configuration/acquisition/draft",
+        data={
+            "csrf_token": token,
+            "draft_version": "0",
+            "search_keywords": "",
+            "enabled_sources": next(iter(SupportedSearchSource)).value,
+        },
+    )
+    assert empty_acquisition.status_code == 422
+    assert "Enter at least one search keyword." in empty_acquisition.text
     invalid_acquisition = client.post(
         "/configuration/acquisition/draft",
         data={
@@ -390,3 +402,81 @@ def test_stale_acquisition_edit_keeps_submitted_keywords(authority_schema: str) 
         assert get_acquisition_policy_draft(connection).policy.search_keywords == (
             "backend engineer",
         )
+
+
+def test_search_setup_reports_database_outage_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    client, _ = _client_for_schema("unused")
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("offline")):
+        response = client.get("/configuration")
+
+    assert response.status_code == 503
+    assert "Search setup is unavailable" in response.text
+    assert 'href="/configuration"' in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/configuration/acquisition/draft",
+        "/configuration/acquisition/publish",
+        "/configuration/acquisition/activate",
+        "/configuration/qualification/draft",
+        "/configuration/qualification/publish",
+        "/configuration/continue",
+    ],
+)
+def test_every_split_setup_write_checks_csrf_before_database_access(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    client, _ = _client_for_schema("unused")
+    with patch("psycopg.connect") as connect:
+        response = client.post(path, data={"csrf_token": "invalid"})
+
+    assert response.status_code == 403
+    connect.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("path", "fields"),
+    [
+        (
+            "/configuration/acquisition/publish",
+            {"draft_version": "0", "idempotency_key": "retry-acquisition-publish"},
+        ),
+        (
+            "/configuration/qualification/publish",
+            {"draft_version": "0", "idempotency_key": "retry-qualification-publish"},
+        ),
+        (
+            "/configuration/acquisition/activate",
+            {
+                "active_generation": "0",
+                "candidate_revision_id": "a" * 64,
+                "idempotency_key": "retry-acquisition-activate",
+            },
+        ),
+    ],
+)
+def test_uncertain_split_write_preserves_its_retry_command(
+    authority_schema: str, path: str, fields: dict[str, str]
+) -> None:
+    client, connect = _client_for_schema(authority_schema)
+    with connect() as connection:
+        _ = apply_migrations(connection)
+    page = client.get("/configuration")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert token_match is not None
+    token = token_match.group(1)
+
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("offline")):
+        response = client.post(path, data={"csrf_token": token, **fields})
+
+    assert response.status_code == 503
+    assert "Search setup result is unknown" in response.text
+    assert f'action="{path}"' in response.text
+    for key, value in fields.items():
+        assert f'name="{key}" value="{value}"' in response.text

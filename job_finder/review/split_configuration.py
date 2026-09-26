@@ -62,7 +62,7 @@ from job_finder.qualification_definition_service import (
     replace_qualification_definition_draft,
 )
 from job_finder.web.security import csrf_token, verified_csrf_token
-from job_finder.web.shell import document, sidebar_page
+from job_finder.web.shell import document, sidebar_page, state_response
 
 
 def register_split_configuration_routes(
@@ -89,6 +89,8 @@ def register_split_configuration_routes(
         raw_sources = tuple(str(value) for value in form.getlist("enabled_sources"))
         try:
             keywords = tuple(line.strip() for line in raw_keywords.splitlines() if line.strip())
+            if not keywords:
+                raise ValueError("Enter at least one search keyword.")
             policy = AcquisitionPolicy.model_validate(
                 {
                     "search_keywords": keywords,
@@ -115,7 +117,9 @@ def register_split_configuration_routes(
                     409,
                     acquisition_input=(raw_keywords, raw_sources),
                 )
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _unavailable_response()
+        except (ValueError, ValidationError) as error:
             return _page(
                 connect,
                 token,
@@ -146,7 +150,16 @@ def register_split_configuration_routes(
                 )
             if result.outcome == "draft_changed":
                 return _page(connect, token, "Acquisition draft changed. Reload and retry.", 409)
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _uncertain_action_response(
+                "/configuration/acquisition/publish",
+                token,
+                (
+                    ("draft_version", str(form.get("draft_version", ""))),
+                    ("idempotency_key", str(form.get("idempotency_key", ""))),
+                ),
+            )
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=Acquisition+published", status_code=303)
 
@@ -174,7 +187,17 @@ def register_split_configuration_routes(
                 )
             if receipt.outcome == "active_changed":
                 return _page(connect, token, "Active acquisition changed. Reload and retry.", 409)
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _uncertain_action_response(
+                "/configuration/acquisition/activate",
+                token,
+                (
+                    ("active_generation", str(form.get("active_generation", ""))),
+                    ("candidate_revision_id", str(form.get("candidate_revision_id", ""))),
+                    ("idempotency_key", str(form.get("idempotency_key", ""))),
+                ),
+            )
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=Acquisition+activated", status_code=303)
 
@@ -213,7 +236,9 @@ def register_split_configuration_routes(
                     409,
                     qualification_input=(raw_criteria, raw_profiles),
                 )
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _unavailable_response()
+        except (ValueError, ValidationError) as error:
             return _page(
                 connect,
                 token,
@@ -244,7 +269,16 @@ def register_split_configuration_routes(
                 )
             if receipt.outcome == "draft_changed":
                 return _page(connect, token, "Qualification draft changed. Reload and retry.", 409)
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _uncertain_action_response(
+                "/configuration/qualification/publish",
+                token,
+                (
+                    ("draft_version", str(form.get("draft_version", ""))),
+                    ("idempotency_key", str(form.get("idempotency_key", ""))),
+                ),
+            )
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
         return RedirectResponse("/configuration?notice=Qualification+published", status_code=303)
 
@@ -277,7 +311,9 @@ def register_split_configuration_routes(
                     ).rowcount
                     == 1
                 )
-        except (ValueError, ValidationError, psycopg.Error) as error:
+        except psycopg.Error:
+            return _unavailable_response()
+        except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
         if not advanced:
             return _page(connect, token, "Setup stage changed. Reload to continue.", 409)
@@ -293,10 +329,13 @@ def _page(
     acquisition_input: tuple[str, tuple[str, ...]] | None = None,
     qualification_input: tuple[str, str] | None = None,
 ) -> HTMLResponse:
-    with connect() as connection:
-        policy = get_acquisition_policy_draft(connection)
-        active = get_active_acquisition_policy(connection)
-        definition = get_qualification_definition_draft(connection)
+    try:
+        with connect() as connection:
+            policy = get_acquisition_policy_draft(connection)
+            active = get_active_acquisition_policy(connection)
+            definition = get_qualification_definition_draft(connection)
+    except psycopg.Error:
+        return _unavailable_response()
     body = sidebar_page(
         "configuration",
         token,
@@ -323,9 +362,33 @@ def _page(
     return HTMLResponse(document(body, title="Search setup"), status_code=status_code)
 
 
-def _user_error(error: ValueError | psycopg.Error) -> str:
-    if isinstance(error, psycopg.Error):
-        return "Search setup is unavailable. Reload and try again."
+def _unavailable_response() -> HTMLResponse:
+    return state_response(
+        "Search setup is unavailable",
+        "Reload after the database recovers, then check saved values before retrying.",
+        action=A("Retry", href="/configuration", cls="retry"),
+        status_code=503,
+    )
+
+
+def _uncertain_action_response(
+    action: str, token: str, fields: tuple[tuple[str, str], ...]
+) -> HTMLResponse:
+    return state_response(
+        "Search setup result is unknown",
+        "The database disconnected. Retry this exact request after it recovers.",
+        action=Form(
+            Input(type="hidden", name="csrf_token", value=token),
+            *(Input(type="hidden", name=name, value=value) for name, value in fields),
+            Button("Retry this request", type="submit", cls="button primary"),
+            action=action,
+            method="post",
+        ),
+        status_code=503,
+    )
+
+
+def _user_error(error: ValueError) -> str:
     if isinstance(error, json.JSONDecodeError):
         return "Enter valid JSON for the criteria and profiles."
     if isinstance(error, ValidationError):
