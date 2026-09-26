@@ -725,9 +725,12 @@ def test_run_keys_never_cross_execution_authorities() -> None:
         acquisition_id = AcquisitionPolicyRevisionId(cast(str, active[0]))
         configuration = load_active_search_configuration(connection)
         legacy_target = get_active_release_target(connection).target
-        rates = lambda: ExchangeRateSnapshot(  # pyright: ignore[reportUnknownLambdaType]
-            rates={"USD": Decimal("1")}, source="fallback", observed_at=now
-        )
+
+        def rates() -> ExchangeRateSnapshot:
+            return ExchangeRateSnapshot(
+                rates={"USD": Decimal("1")}, source="fallback", observed_at=now
+            )
+
         root = Path(__file__).resolve().parents[1]
         with NamedTemporaryFile(
             dir=root, prefix=".qualification-artifact-", suffix=".json"
@@ -769,7 +772,7 @@ def test_run_keys_never_cross_execution_authorities() -> None:
                     fetch_rates=lambda: pytest.fail("Rates must not be re-fetched"),
                 )
 
-            split = prepare_split_orchestration_run(
+            _ = prepare_split_orchestration_run(
                 connection,
                 idempotency_key="split-key",
                 implementation_ref="build",

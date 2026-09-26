@@ -548,13 +548,17 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
                 lease_expires_at=now + timedelta(minutes=5),
             )
         )
-        guarded.model_call_started("evaluation:criterion")
+        started = guarded.model_call_started
+        assert started is not None
+        generation_lookup = guarded.generation_sender
+        assert generation_lookup is not None
+        chat = guarded.model_sender
+        assert chat is not None
+        started("evaluation:criterion")
         with pytest.raises(requests.Timeout):
-            guarded.generation_sender("https://openrouter.test", {}, "generation-1", 30)
-        generation_response = guarded.generation_sender(
-            "https://openrouter.test", {}, "generation-1", 30
-        )
-        malformed = guarded.model_sender("https://openrouter.test", {}, {"model": "test"}, 30)
+            generation_lookup("https://openrouter.test", {}, "generation-1", 30)
+        generation_response = generation_lookup("https://openrouter.test", {}, "generation-1", 30)
+        malformed = chat("https://openrouter.test", {}, {"model": "test"}, 30)
         recovered, recovered_claim = guard_onboarding_provider_boundaries(
             connection,
             PipelineBoundaries(
@@ -577,11 +581,13 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
                 lease_expires_at=now + timedelta(minutes=5),
             )
         )
-        recovered.model_call_started("evaluation:criterion")
-        replayed_malformed = recovered.model_sender(
-            "https://openrouter.test", {}, {"model": "test"}, 30
-        )
-        retried_chat = recovered.model_sender("https://openrouter.test", {}, {"model": "test"}, 30)
+        recovered_started = recovered.model_call_started
+        assert recovered_started is not None
+        recovered_chat = recovered.model_sender
+        assert recovered_chat is not None
+        recovered_started("evaluation:criterion")
+        replayed_malformed = recovered_chat("https://openrouter.test", {}, {"model": "test"}, 30)
+        retried_chat = recovered_chat("https://openrouter.test", {}, {"model": "test"}, 30)
         first = prepare_onboarding_provider_dispatch(
             connection,
             request_key=claimed.idempotency_key,

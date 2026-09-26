@@ -61,7 +61,7 @@ def register_qualification_target_routes(
             return HTMLResponse(status_code=403)
         try:
             with connect() as connection:
-                candidate = create_current_qualification_candidate(
+                _ = create_current_qualification_candidate(
                     connection,
                     CreateCurrentQualificationCandidateCommand(actor=actor, timestamp=now()),
                     artifact_path,
