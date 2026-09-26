@@ -37,7 +37,7 @@ from job_finder.execution_budget import (
     ExecutionBlocked,
     postgres_budget_setup_service,
 )
-from job_finder.jobs.decision_pipeline import job_id_for_url
+from job_finder.jobs.listings import job_id_for_url
 from job_finder.onboarding_test_search import (
     CreateOnboardingTestSearch,
     OnboardingTestSearchAccepted,

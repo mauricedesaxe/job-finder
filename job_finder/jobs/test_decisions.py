@@ -17,7 +17,7 @@ from job_finder.evaluation.models import (
 )
 from job_finder.evaluation.openrouter import HttpResponse, ModelCallPersistence, prompt_input_digest
 from job_finder.evaluation.prompt_releases import build_prompt_release
-from job_finder.jobs.decision_pipeline import (
+from job_finder.jobs.decisions import (
     CompanyPolicy,
     DecisionContext,
     DecisionOutcome,

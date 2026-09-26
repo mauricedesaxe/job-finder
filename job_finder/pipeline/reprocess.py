@@ -6,7 +6,7 @@ from uuid import UUID
 from psycopg import Connection, sql
 from psycopg.pq import TransactionStatus
 
-from job_finder.jobs.decision_pipeline import THIN_BODY_THRESHOLD
+from job_finder.jobs.listings import THIN_BODY_THRESHOLD
 from job_finder.jobs.structural_filter import (
     GENERIC_TITLE_REASON,
     NON_ROLE_TITLE_REASON,

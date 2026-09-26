@@ -53,8 +53,7 @@ from job_finder.evaluation.relevance_releases import (
     JevFaithfulExecutionPolicy,
     RelevanceExecutionPolicy,
 )
-from job_finder.jobs.decision_pipeline import (
-    THIN_BODY_THRESHOLD,
+from job_finder.jobs.decisions import (
     DecisionContext,
     DecisionStore,
     PersistedDecision,
@@ -62,11 +61,11 @@ from job_finder.jobs.decision_pipeline import (
     normalize_ledger_text,
     persist_rejected_job,
     persist_suppressed_job,
-    postgres_decision_store,
     process_qualified_job,
 )
+from job_finder.jobs.decision_persistence import postgres_decision_store
 from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
-from job_finder.jobs.listings import JobListing
+from job_finder.jobs.listings import THIN_BODY_THRESHOLD, JobListing
 from job_finder.jobs.scraping import parse_job_details
 from job_finder.jobs.structural_filter import StructuralRejection, structural_filter
 from job_finder.jobs.title_deduplication import (
