@@ -23,6 +23,10 @@ from job_finder.benchmarks.qualification_evidence import (
     store_fixture_set,
     store_relevance_experiment_input,
 )
+from job_finder.benchmarks.qualification_execution import (
+    QualificationEvidenceExecution,
+    execute_qualification_evidence,
+)
 from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.mcp_tools.common import APPEND_ONLY, READ_ONLY, McpDependencies
 
@@ -51,9 +55,40 @@ class QualificationEvidencePage(_Model):
 
 
 def register_qualification_evidence_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
+    _register_execution_tool(mcp, dependencies)
     _register_evidence_reads(mcp, dependencies)
     _register_fixture_tools(mcp, dependencies)
     _register_relevance_tools(mcp, dependencies)
+
+
+def _register_execution_tool(mcp: FastMCP, dependencies: McpDependencies) -> None:
+    @mcp.tool(annotations=APPEND_ONLY)
+    def qualification_evidence_execute(
+        idempotency_key: Annotated[str, Field(min_length=1)],
+        target_id: _TargetId,
+        phase: Phase,
+        input_id: Annotated[str, Field(pattern=_DIGEST)],
+    ) -> QualificationEvidenceExecution:
+        """Execute frozen qualification input once against the verified build artifact."""
+        if dependencies.implementation_artifact_path is None:
+            raise ToolError("Executing build artifact is not configured")
+        if dependencies.resolve_provider_credentials is None:
+            raise ToolError("Provider credential resolver is not configured")
+        try:
+            with dependencies.connect() as connection:
+                return execute_qualification_evidence(
+                    connection,
+                    idempotency_key=idempotency_key,
+                    target_id=target_id,
+                    phase=phase,
+                    input_id=input_id,
+                    artifact_path=dependencies.implementation_artifact_path,
+                    resolve_credentials=dependencies.resolve_provider_credentials,
+                    completed_at=dependencies.now(),
+                    created_by=dependencies.actor,
+                )
+        except ValueError as error:
+            raise ToolError(str(error)) from error
 
 
 def _register_evidence_reads(mcp: FastMCP, dependencies: McpDependencies) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from mcp.types import ToolAnnotations
 
 from job_finder.benchmarks.executions import EvaluateManifestCommand, EvaluationExecutionState
+from job_finder.benchmarks.qualification_execution import CredentialResolver
 from job_finder.database import Connection, ConnectionFactory
 
 Clock = Callable[[], datetime]
@@ -21,6 +22,7 @@ class McpDependencies:
     now: Clock = lambda: datetime.now(UTC)
     run_evaluation: EvaluationRunner | None = None
     implementation_artifact_path: Path | None = None
+    resolve_provider_credentials: CredentialResolver | None = None
 
 
 READ_ONLY = ToolAnnotations(

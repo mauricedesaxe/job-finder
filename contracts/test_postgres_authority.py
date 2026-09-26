@@ -345,6 +345,7 @@ EXPECTED_MIGRATIONS = (
     "0047_split_reservation_authority.sql",
     "0048_split_run_execution_projections.sql",
     "0049_split_onboarding_request_authority.sql",
+    "0050_qualification_evidence_executions.sql",
 )
 
 
