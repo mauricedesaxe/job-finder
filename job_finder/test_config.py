@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -222,3 +224,21 @@ def test_langfuse_schedule_requires_both_credentials() -> None:
             "LANGFUSE_SECRET_KEY": "sk-lf-secret",
         }
     )
+
+
+def test_split_execution_requires_an_implementation_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "correct horse battery staple")
+    monkeypatch.setenv("JOB_FINDER_BOOTSTRAP_TOKEN", "b" * 32)
+    monkeypatch.setenv("JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY", "credential-key")
+    monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
+    monkeypatch.setenv("JOB_FINDER_REVIEW_COOKIE_SECURE", "false")
+    monkeypatch.setenv("JOB_FINDER_ENABLE_SPLIT_EXECUTION", "true")
+
+    with pytest.raises(ValueError, match="Split execution requires"):
+        _ = ReviewAppSettings.from_environment()
+
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_ARTIFACT", "/artifact/implementation.json")
+    settings = ReviewAppSettings.from_environment()
+    assert settings.split_execution_artifact_path == Path("/artifact/implementation.json")

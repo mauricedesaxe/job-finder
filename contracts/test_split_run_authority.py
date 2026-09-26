@@ -41,6 +41,8 @@ from job_finder.evaluation.qualification_components import (
 from job_finder.evaluation.qualification_prompt_compilations import (
     bind_qualification_prompt_release,
 )
+from job_finder.evaluation.release_targets import get_active_release_target
+from job_finder.search_configuration import load_active_search_configuration
 from job_finder.pipeline.orchestration import PipelineBoundaries, discover_jobs
 from job_finder.onboarding_test_search import (
     CreateOnboardingTestSearch,
@@ -54,6 +56,7 @@ from job_finder.pipeline.runs import (
     SplitOrchestrationRun,
     fail_orchestration_run,
     load_run_by_id,
+    prepare_orchestration_run,
     prepare_split_onboarding_run,
     prepare_split_orchestration_run,
 )
@@ -706,3 +709,83 @@ def test_split_run_creation_and_retry_keep_reserved_authority() -> None:
             assert resumed.id == first.id and resumed.status == "running"
             assert resumed.acquisition_policy_revision_id == acquisition_id
             assert resumed.qualification_target_id == qualification_id
+
+
+def test_run_keys_never_cross_execution_authorities() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    with _schema() as connection:
+        _ = apply_migrations(connection)
+        _, _, target = _store_default_qualification_target(connection, now)
+        qualification_id = qualification_target_id(target)
+        _ = _compiled_release(connection, qualification_id, now)
+        active = connection.execute(
+            "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
+        ).fetchone()
+        assert active is not None
+        acquisition_id = AcquisitionPolicyRevisionId(cast(str, active[0]))
+        configuration = load_active_search_configuration(connection)
+        legacy_target = get_active_release_target(connection).target
+        rates = lambda: ExchangeRateSnapshot(  # pyright: ignore[reportUnknownLambdaType]
+            rates={"USD": Decimal("1")}, source="fallback", observed_at=now
+        )
+        root = Path(__file__).resolve().parents[1]
+        with NamedTemporaryFile(
+            dir=root, prefix=".qualification-artifact-", suffix=".json"
+        ) as temporary:
+            artifact_path = Path(temporary.name)
+            _ = write_implementation_artifact(root, artifact_path)
+            _ = connection.execute(
+                """
+                INSERT INTO execution_budget_reservations (
+                    idempotency_key, policy_version, period_start, reserved_usd,
+                    status, max_jobs, authority_kind, acquisition_policy_revision_id,
+                    qualification_target_id, acquisition_generation, qualification_generation,
+                    search_queries, logical_model_calls_per_job,
+                    maximum_provider_attempts, created_at
+                ) VALUES ('split-key', 1, %s, 1, 'reserved', 1, 'split', %s, %s, %s, 1,
+                          1, 1, 1, %s)
+                """,
+                (now.date(), acquisition_id, qualification_id, active[1], now),
+            )
+            legacy = prepare_orchestration_run(
+                connection,
+                idempotency_key="shared-key",
+                implementation_ref="build",
+                configuration_revision_id=configuration.revision.id,
+                target=legacy_target,
+                started_at=now,
+                fetch_rates=rates,
+            )
+            assert legacy.authority_kind == "legacy"
+            with pytest.raises(ValueError, match="another execution authority"):
+                _ = prepare_split_orchestration_run(
+                    connection,
+                    idempotency_key="shared-key",
+                    implementation_ref="build",
+                    acquisition_policy_revision_id=acquisition_id,
+                    qualification_target_id=qualification_id,
+                    artifact_path=artifact_path,
+                    started_at=now,
+                    fetch_rates=lambda: pytest.fail("Rates must not be re-fetched"),
+                )
+
+            split = prepare_split_orchestration_run(
+                connection,
+                idempotency_key="split-key",
+                implementation_ref="build",
+                acquisition_policy_revision_id=acquisition_id,
+                qualification_target_id=qualification_id,
+                artifact_path=artifact_path,
+                started_at=now,
+                fetch_rates=rates,
+            )
+            with pytest.raises(ValueError, match="another execution authority"):
+                _ = prepare_orchestration_run(
+                    connection,
+                    idempotency_key="split-key",
+                    implementation_ref="build",
+                    configuration_revision_id=configuration.revision.id,
+                    target=legacy_target,
+                    started_at=now,
+                    fetch_rates=lambda: pytest.fail("Rates must not be re-fetched"),
+                )
