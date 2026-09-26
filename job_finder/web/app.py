@@ -1,6 +1,7 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportUnusedFunction=false
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import psycopg
@@ -13,6 +14,7 @@ from datetime import UTC, datetime
 
 from job_finder.database import ConnectionFactory
 from job_finder.execution_budget import BudgetSetupService
+from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.operations.activity import ActivityService
 from job_finder.operations.control_plane import (
     ControlPlaneService,
@@ -41,6 +43,7 @@ RequestGuard = Callable[[Request], Response | None]
 
 _SESSION_COOKIE = "job_finder_review_session"
 _SESSION_MAX_AGE = 14 * 24 * 60 * 60
+_logger = logging.getLogger(__name__)
 
 
 def create_web_app(
@@ -72,8 +75,15 @@ def create_web_app(
     def readyz() -> PlainTextResponse:
         try:
             readiness()
-        except psycopg.Error:
+        except psycopg.Error as error:
+            _logger.error("Readiness database check failed: %s", type(error).__name__)
             return PlainTextResponse("database unavailable", status_code=503)
+        except RelevanceReleaseError:
+            _logger.exception("Readiness failed because the active relevance release is invalid")
+            return PlainTextResponse("active release incompatible", status_code=503)
+        except RuntimeError as error:
+            _logger.error("Readiness state check failed: %s", type(error).__name__)
+            return PlainTextResponse("application state unavailable", status_code=503)
         return PlainTextResponse("ready")
 
     @app.route("/favicon.ico", methods=["GET"], name="create_review_app_favicon")
