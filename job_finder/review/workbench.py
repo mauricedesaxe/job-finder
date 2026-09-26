@@ -35,24 +35,24 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from job_finder.review.feedback import (
     ReviewConflict,
-    ReviewFeedbackService,
     ReviewSubmission,
+    ReviewSubmitter,
 )
 from job_finder.review.queue import (
     Compensation,
     ReviewItem,
     ReviewJob,
     ReviewQueue,
-    ReviewQueueService,
+    ReviewQueueLoader,
 )
-from job_finder.web.security import form_text, valid_csrf
+from job_finder.web.security import csrf_token, form_text, valid_csrf
 from job_finder.web.shell import document, sidebar_page, state_response
 
 
 @dataclass(frozen=True, kw_only=True)
 class ReviewWorkbench:
-    queue_service: ReviewQueueService
-    feedback_service: ReviewFeedbackService
+    load_queue: ReviewQueueLoader
+    submit_review: ReviewSubmitter
     actor: str
     now: Callable[[], datetime]
 
@@ -82,13 +82,13 @@ class ReviewWorkbench:
 
     def _home(self, request: Request) -> HTMLResponse:
         try:
-            queue = self.queue_service.review_queue()
+            queue = self.load_queue()
         except psycopg.Error:
             return _unavailable_response()
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
-        return HTMLResponse(document(sidebar_page("review", csrf_token, _review_page(queue))))
+        return HTMLResponse(document(sidebar_page("review", token, _review_page(queue))))
 
     def _review_page_redirect(self, request: Request) -> Response:
         _ = request
@@ -105,7 +105,7 @@ class ReviewWorkbench:
         except ValueError:
             return _item_not_found_response()
         try:
-            queue = self.queue_service.review_queue()
+            queue = self.load_queue()
         except psycopg.Error:
             return _unavailable_response()
         item = _find_item(queue, item_id)
@@ -132,7 +132,7 @@ class ReviewWorkbench:
         except ValidationError:
             return _conflict_response("This review form is invalid. Reload the page and try again.")
         try:
-            result = self.feedback_service.submit(submission)
+            result = self.submit_review(submission)
         except psycopg.Error:
             return _unavailable_response()
         if isinstance(result, ReviewConflict):
@@ -144,11 +144,11 @@ class ReviewWorkbench:
 
     def _review_item_page(self, review_item_id: str, request: Request) -> HTMLResponse:
         try:
-            queue = self.queue_service.review_queue()
+            queue = self.load_queue()
         except psycopg.Error:
             return _unavailable_response()
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         try:
             item_id = UUID(review_item_id)
@@ -159,10 +159,10 @@ class ReviewWorkbench:
             return _item_not_found_response()
         if item.reviewed:
             return HTMLResponse(
-                document(sidebar_page("review", csrf_token, _revision_page(item, csrf_token)))
+                document(sidebar_page("review", token, _revision_page(item, token)))
             )
         return HTMLResponse(
-            document(sidebar_page("review", csrf_token, _item_page(queue.items, item, csrf_token)))
+            document(sidebar_page("review", token, _item_page(queue.items, item, token)))
         )
 
 

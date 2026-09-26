@@ -29,10 +29,10 @@ from job_finder.review.split_configuration import register_split_configuration_r
 from job_finder.review.qualification_targets import register_qualification_target_routes
 from job_finder.review.qualification_promotions_web import register_qualification_promotion_routes
 from job_finder.review.configuration_editor import ConfigurationEditorService
-from job_finder.review.feedback import ReviewFeedbackService
+from job_finder.review.feedback import ReviewSubmitter
 from job_finder.review.onboarding import OnboardingProgressService, OnboardingSearchService
 from job_finder.review.owner_access import OwnerAccessService
-from job_finder.review.queue import ReviewQueueService
+from job_finder.review.queue import ReviewQueueLoader
 from job_finder.review.workbench import ReviewWorkbench
 
 from job_finder.web.assets import static_asset_path
@@ -97,11 +97,11 @@ _DateTimeClock = Callable[[], datetime]
 
 
 def create_review_app(
-    queue_service: ReviewQueueService,
+    load_review_queue: ReviewQueueLoader,
     configuration_service: ConfigurationEditorService,
     settings: ReviewAppSettings,
     *,
-    feedback_service: ReviewFeedbackService,
+    submit_review: ReviewSubmitter,
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
     onboarding_progress_service: OnboardingProgressService | None = None,
@@ -124,8 +124,8 @@ def create_review_app(
     controls = control_service or unavailable_control_plane_service()
     dagster_configured = control_service is not None
     workbench = ReviewWorkbench(
-        queue_service=queue_service,
-        feedback_service=feedback_service,
+        load_queue=load_review_queue,
+        submit_review=submit_review,
         actor=actor,
         now=now,
     )
