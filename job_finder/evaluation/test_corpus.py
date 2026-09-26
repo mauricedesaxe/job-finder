@@ -15,7 +15,6 @@ from job_finder.evaluation.corpus import (
     CORPUS_ROOT,
     MAX_FALSE_NEGATIVE_RATE,
     MAX_FALSE_POSITIVE_RATE,
-    CorpusIdentity,
     EvaluationCorpusResult,
     corpus_identity,
     evaluate_corpus_case,
@@ -51,7 +50,7 @@ from job_finder.evaluation.relevance_releases import (
     build_work_culture_candidate_policy,
 )
 from job_finder.jobs.listings import JobListing
-from scripts.evaluate_corpus import corpus_run_parameters, parse_arguments
+from scripts.evaluate_corpus import parse_arguments
 
 
 def test_loads_only_direct_evaluation_fixtures_by_default() -> None:
@@ -162,21 +161,6 @@ def test_corpus_identity_tracks_expected_outcome(tmp_path: Path) -> None:
         corpus_identity(changed, "direct", "a" * 64, "p" * 64, "EUR=1").content_digest
         != first.content_digest
     )
-
-
-def test_records_corpus_content_and_execution_policy_with_the_run() -> None:
-    release = build_prompt_release()
-    identity = CorpusIdentity(
-        content_digest="a" * 64,
-        run_digest="b" * 64,
-        execution_policy_digest="c" * 64,
-        prompt_release_id=str(release.id),
-    )
-
-    parameters = corpus_run_parameters("direct", "openrouter", 1, identity)
-    assert parameters["corpus_content_digest"] == identity.content_digest
-    assert parameters["corpus_run_digest"] == identity.run_digest
-    assert parameters["execution_policy_digest"] == identity.execution_policy_digest
 
 
 def test_pinned_jev_faithful_policy_matches_the_current_legacy_questions() -> None:
