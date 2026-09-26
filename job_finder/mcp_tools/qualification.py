@@ -98,11 +98,11 @@ def _register_candidate_tools(mcp: FastMCP, dependencies: McpDependencies) -> No
 def _register_promotion_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
     @mcp.tool(annotations=READ_ONLY)
     def qualification_promotion_preview(
-        baseline_target_id: _TargetId,
+        baseline_target_id: _TargetId | None,
         candidate_target_id: _TargetId,
         evidence: PromotionEvidenceSelection,
     ) -> QualificationPromotionPreview:
-        """Check selected canonical evidence and full composition without changing authority."""
+        """Check canonical evidence. Use a null baseline for the first activation."""
         try:
             with dependencies.connect() as connection:
                 return preview_qualification_promotion(
@@ -117,14 +117,14 @@ def _register_promotion_tools(mcp: FastMCP, dependencies: McpDependencies) -> No
 
     @mcp.tool(annotations=APPEND_ONLY)
     def qualification_promotion_decide(
-        baseline_target_id: _TargetId,
+        baseline_target_id: _TargetId | None,
         candidate_target_id: _TargetId,
         evidence: PromotionEvidenceSelection,
         decision: Literal["approved", "rejected"],
         reason: Annotated[str, Field(min_length=1, max_length=2000)],
         idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
     ) -> QualificationPromotionDecision:
-        """Record an immutable decision after rechecking exact composite evidence."""
+        """Record an immutable decision. A null baseline requires every phase to pass."""
         try:
             with dependencies.connect() as connection:
                 return record_qualification_promotion_decision(
@@ -149,7 +149,7 @@ def _register_promotion_tools(mcp: FastMCP, dependencies: McpDependencies) -> No
         expected_target_id: _TargetId | None,
         expected_generation: Annotated[int, Field(ge=0, le=2**63 - 1)],
     ) -> QualificationActivationReceipt:
-        """Activate an eligible complete target if qualification authority still matches."""
+        """Activate an approved target. For the first activation expect null target and generation 0."""
         try:
             with dependencies.connect() as connection:
                 return activate_qualification_target(

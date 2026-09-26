@@ -70,7 +70,7 @@ class PromotionEvidenceSelection(BaseModel):
 class QualificationPromotionPreview(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-    baseline_target_id: QualificationTargetId
+    baseline_target_id: QualificationTargetId | None
     candidate_target_id: QualificationTargetId
     evidence: PromotionEvidenceSelection
     eligible: bool
@@ -81,7 +81,7 @@ class QualificationPromotionDecision(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     id: Annotated[str, Field(pattern=_DIGEST)]
-    baseline_target_id: QualificationTargetId
+    baseline_target_id: QualificationTargetId | None
     candidate_target_id: QualificationTargetId
     evidence: PromotionEvidenceSelection
     decision: Literal["approved", "rejected"]
@@ -93,7 +93,7 @@ class QualificationPromotionDecision(BaseModel):
 def record_qualification_promotion_decision(
     connection: psycopg.Connection[tuple[object, ...]],
     *,
-    baseline_target_id: QualificationTargetId,
+    baseline_target_id: QualificationTargetId | None,
     candidate_target_id: QualificationTargetId,
     evidence: PromotionEvidenceSelection,
     artifact_path: Path,
@@ -123,7 +123,7 @@ def record_qualification_promotion_decision(
             (f"qualification_promotion_pair:{baseline_target_id}:{candidate_target_id}",),
         )
         duplicate = connection.execute(
-            "SELECT 1 FROM qualification_promotion_decisions WHERE baseline_target_id = %s AND candidate_target_id = %s",
+            "SELECT 1 FROM qualification_promotion_decisions WHERE baseline_target_id IS NOT DISTINCT FROM %s AND candidate_target_id = %s",
             (baseline_target_id, candidate_target_id),
         ).fetchone()
         if duplicate is not None:
@@ -179,7 +179,7 @@ def record_qualification_promotion_decision(
 
 def _validate_promotion_request(
     connection: psycopg.Connection[tuple[object, ...]],
-    baseline_target_id: QualificationTargetId,
+    baseline_target_id: QualificationTargetId | None,
     candidate_target_id: QualificationTargetId,
     idempotency_key: str,
     reason: str,
@@ -195,7 +195,7 @@ def _validate_promotion_request(
 
 def _same_promotion_request(
     existing: QualificationPromotionDecision,
-    baseline_target_id: QualificationTargetId,
+    baseline_target_id: QualificationTargetId | None,
     candidate_target_id: QualificationTargetId,
     evidence: PromotionEvidenceSelection,
     decision: Literal["approved", "rejected"],
@@ -251,40 +251,44 @@ def load_qualification_promotion_decision(
 
 def preview_qualification_promotion(
     connection: psycopg.Connection[tuple[object, ...]],
-    baseline_target_id: QualificationTargetId,
+    baseline_target_id: QualificationTargetId | None,
     candidate_target_id: QualificationTargetId,
     evidence: PromotionEvidenceSelection,
     artifact_path: Path,
 ) -> QualificationPromotionPreview:
-    baseline = load_qualification_target(connection, baseline_target_id)
+    baseline = (
+        load_qualification_target(connection, baseline_target_id)
+        if baseline_target_id is not None
+        else None
+    )
     candidate = resolve_executable_qualification_target(
         connection, candidate_target_id, artifact_path
     )
     failures: list[str] = []
-    if baseline.id == candidate.id:
+    if baseline is not None and baseline.id == candidate.id:
         failures.append("Candidate is the baseline target")
-    components: tuple[tuple[Phase, str, str, QualificationEvidenceId | None], ...] = (
+    components: tuple[tuple[Phase, str | None, str, QualificationEvidenceId | None], ...] = (
         (
             "input_preparation",
-            baseline.content.input_preparation_release_id,
+            baseline.content.input_preparation_release_id if baseline is not None else None,
             candidate.content.input_preparation_release_id,
             evidence.input_preparation_evidence_id,
         ),
         (
             "relevance",
-            baseline.content.relevance_release_id,
+            baseline.content.relevance_release_id if baseline is not None else None,
             candidate.content.relevance_release_id,
             evidence.relevance_evidence_id,
         ),
         (
             "enrichment",
-            baseline.content.enrichment_release_id,
+            baseline.content.enrichment_release_id if baseline is not None else None,
             candidate.content.enrichment_release_id,
             evidence.enrichment_evidence_id,
         ),
         (
             "deduplication",
-            baseline.content.deduplication_release_id,
+            baseline.content.deduplication_release_id if baseline is not None else None,
             candidate.content.deduplication_release_id,
             evidence.deduplication_evidence_id,
         ),
@@ -301,14 +305,18 @@ def preview_qualification_promotion(
             failures,
         )
     _check_composition(connection, evidence.composition_evidence_id, candidate, failures)
-    relevance_changed = (
-        baseline.content.relevance_release_id != candidate.content.relevance_release_id
-    )
-    _check_relevance_comparison(
-        connection, baseline, candidate, evidence, relevance_changed, failures
-    )
+    if baseline is None:
+        if evidence.relevance_comparison_id is not None:
+            failures.append("First activation has no baseline for a relevance comparison")
+    else:
+        relevance_changed = (
+            baseline.content.relevance_release_id != candidate.content.relevance_release_id
+        )
+        _check_relevance_comparison(
+            connection, baseline, candidate, evidence, relevance_changed, failures
+        )
     return QualificationPromotionPreview(
-        baseline_target_id=baseline.id,
+        baseline_target_id=baseline.id if baseline is not None else None,
         candidate_target_id=candidate.id,
         evidence=evidence,
         eligible=not failures,
@@ -322,7 +330,7 @@ def _check_component_evidence(
     changed: bool,
     component_id: str,
     evidence_id: QualificationEvidenceId | None,
-    baseline: ResolvedQualificationTarget,
+    baseline: ResolvedQualificationTarget | None,
     candidate: ResolvedQualificationTarget,
     failures: list[str],
 ) -> None:
@@ -334,7 +342,7 @@ def _check_component_evidence(
     if item is None:
         failures.append(f"{phase} evidence is missing or has invalid identity")
         return
-    allowed_targets = {candidate.id} if changed else {baseline.id, candidate.id}
+    allowed_targets = {candidate.id} if changed or baseline is None else {baseline.id, candidate.id}
     if not _evidence_matches_component(
         item, phase, allowed_targets, component_id, candidate.content.artifact_id
     ):
