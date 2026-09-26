@@ -69,10 +69,10 @@ def create_app() -> FastHTML:
             production_provider_validators(),
         )
     )
+    budget_setup = postgres_budget_setup_service(connect)
 
     def readiness() -> None:
-        with connect() as connection:
-            _ = connection.execute("SELECT 1").fetchone()
+        _ = budget_setup.inspect(25)
 
     return create_review_app(
         postgres_review_queue_loader(connect),
@@ -84,7 +84,7 @@ def create_app() -> FastHTML:
             connect, artifact_path=settings.split_execution_artifact_path
         ),
         split_configuration_connect=connect,
-        budget_setup_service=postgres_budget_setup_service(connect),
+        budget_setup_service=budget_setup,
         readiness=readiness,
         operations_service=postgres_operations_service(connect),
         runs_service=postgres_runs_service(connect),

@@ -18,6 +18,7 @@ from job_finder.execution_budget import (
     ExecutionBudgetPolicy,
     ExecutionEstimate,
 )
+from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.review.onboarding import (
     OnboardingSearchProgress,
     OnboardingSearchService,
@@ -466,6 +467,84 @@ def test_completed_upgrade_without_a_budget_is_routed_to_budget_setup() -> None:
     assert response.headers["location"] == "/setup/budget"
 
 
+@pytest.mark.parametrize(
+    ("stage", "path"),
+    [
+        (OnboardingStage.BUDGET, "/setup/budget"),
+        (OnboardingStage.COMPLETE, "/"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("error", "message", "log_message"),
+    [
+        (
+            RelevanceReleaseError("Relevance policy implementation artifacts do not match"),
+            "Activate a release compatible with this deployment",
+            "Budget inspection failed because the relevance release is invalid",
+        ),
+        (
+            psycopg.OperationalError("secret-password"),
+            "Budget database state could not be read",
+            "Budget database inspection failed: OperationalError",
+        ),
+        (
+            RuntimeError("secret-password"),
+            "Budget state could not be loaded. Check the server logs.",
+            "Budget inspection failed: RuntimeError",
+        ),
+    ],
+)
+def test_budget_inspection_failure_reports_the_cause_without_exposing_secrets(
+    stage: OnboardingStage,
+    path: str,
+    error: RuntimeError | psycopg.Error,
+    message: str,
+    log_message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def inspect(_max_jobs: int) -> Never:
+        raise error
+
+    def save_budget(
+        _expected_version: int,
+        _monthly_limit: Decimal,
+        _run_allowance: Decimal,
+        _max_jobs: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> Never:
+        pytest.fail("budget was unexpectedly saved")
+
+    owner = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(stage=stage, has_password=True),
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=owner,
+            budget_setup_service=BudgetSetupService(
+                inspect=inspect,
+                save=save_budget,
+            ),
+        )
+    )
+    _authenticate(client)
+
+    response = client.get(path, follow_redirects=False)
+
+    assert response.status_code == 503
+    assert message in response.text
+    assert "database recovers" not in response.text
+    assert "secret-password" not in response.text
+    assert log_message in caplog.text
+    if not isinstance(error, RelevanceReleaseError):
+        assert "secret-password" not in caplog.text
+
+
 def test_legacy_install_fails_closed_until_password_import() -> None:
     legacy = OwnerAccessService(
         load_state=lambda: OwnerAccessState(
@@ -586,6 +665,32 @@ def test_reports_database_readiness_failure_without_authentication() -> None:
 
     assert response.status_code == 503
     assert response.text == "database unavailable"
+
+
+def test_reports_incompatible_release_readiness_without_authentication(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def incompatible() -> None:
+        raise RelevanceReleaseError(
+            "Relevance policy implementation artifacts do not match current source artifacts"
+        )
+
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=OWNER_ACCESS,
+            readiness=incompatible,
+            now=lambda: NOW,
+        )
+    )
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.text == "active release incompatible"
+    assert "Relevance policy implementation artifacts" in caplog.text
 
 
 def test_dismiss_undo_redirects_with_its_own_notice() -> None:

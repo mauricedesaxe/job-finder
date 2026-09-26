@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 import time
 from collections import deque
@@ -42,6 +43,7 @@ from job_finder.execution_budget import (
     BudgetSetupState,
     ExecutionBlocked,
 )
+from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.onboarding_test_search import OnboardingTestSearchAccepted
 from job_finder.provider_credentials import (
     ProviderCredentialChanged,
@@ -78,6 +80,23 @@ DateTimeClock = Callable[[], datetime]
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_CLIENTS = 1024
+logger = logging.getLogger(__name__)
+
+
+def _budget_inspection_failure(error: psycopg.Error | RuntimeError) -> HTMLResponse:
+    if isinstance(error, RelevanceReleaseError):
+        logger.exception("Budget inspection failed because the relevance release is invalid")
+        message = (
+            "The active relevance release could not be validated. "
+            "Activate a release compatible with this deployment, then reload."
+        )
+    elif isinstance(error, psycopg.Error):
+        logger.error("Budget database inspection failed: %s", type(error).__name__)
+        message = "Budget database state could not be read. Check the server logs and retry."
+    else:
+        logger.error("Budget inspection failed: %s", type(error).__name__)
+        message = "Budget state could not be loaded. Check the server logs."
+    return state_response("Budget setup is unavailable", message, status_code=503)
 
 
 def register_access_routes(
@@ -309,12 +328,8 @@ def register_access_routes(
             )
         try:
             initial = budget_setup_service.inspect(25)
-        except (psycopg.Error, RuntimeError):
-            return state_response(
-                "Budget setup is unavailable",
-                "Budget state could not be loaded. Try again after the database recovers.",
-                status_code=503,
-            )
+        except (psycopg.Error, RuntimeError) as error:
+            return _budget_inspection_failure(error)
         return HTMLResponse(document(_budget_setup_content(ensure_csrf_token(request), initial)))
 
     @app.route("/setup/budget", methods=["POST"], name="create_review_app_budget_setup_submit")
@@ -580,12 +595,8 @@ def _require_completed_budget(
         return None
     try:
         policy = budget_setup.inspect(25).policy
-    except (psycopg.Error, RuntimeError):
-        return state_response(
-            "Budget setup is unavailable",
-            "Budget state could not be loaded. Try again after the database recovers.",
-            status_code=503,
-        )
+    except (psycopg.Error, RuntimeError) as error:
+        return _budget_inspection_failure(error)
     if policy is None:
         return RedirectResponse("/setup/budget", status_code=303)
     return None
