@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from job_finder.jobs.models import JobListing, JobSource
+from job_finder.jobs.listings import JobListing, JobSource
 from job_finder.urls import parse_http_url
 
 _JINA_TITLE = re.compile(r"^Title:\s*(.+)$", re.MULTILINE)

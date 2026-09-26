@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import re
+from typing import Annotated, ClassVar, Literal
 
-from job_finder.jobs.models import (
-    JobListing,
-    StructuralDecision,
-    StructuralPass,
-    StructuralRejection,
-)
+from pydantic import BaseModel, ConfigDict, Field
+
+from job_finder.jobs.listings import JobListing
 from job_finder.urls import parse_http_url
+
+
+class StructuralPass(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["pass"] = "pass"
+
+
+class StructuralRejection(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["rejected"] = "rejected"
+    reason: str
+
+
+StructuralDecision = Annotated[StructuralPass | StructuralRejection, Field(discriminator="kind")]
 
 _GENERIC_TITLE_PATTERNS = (
     re.compile(r"\bgeneral application\b", re.I),

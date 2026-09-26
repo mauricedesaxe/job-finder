@@ -15,7 +15,7 @@ from job_finder.evaluation.models import (
     Rejected,
 )
 from job_finder.evaluation.prompt_releases import PromptVersion, build_prompt_release
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from job_finder.search_configuration import (
     DEFAULT_SEARCH_CONFIGURATION,
     PersonalCriterion,

@@ -29,7 +29,7 @@ from job_finder.jobs.decision_pipeline import (
     process_qualified_job,
 )
 from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate, deduplicate_title
 
 

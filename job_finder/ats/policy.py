@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsSource
-from job_finder.jobs.models import StructuralDecision, StructuralPass, StructuralRejection
+from job_finder.jobs.structural_filter import (
+    StructuralDecision,
+    StructuralPass,
+    StructuralRejection,
+)
 from job_finder.urls import parse_http_url
 
 

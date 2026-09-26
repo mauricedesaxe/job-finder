@@ -39,7 +39,7 @@ from job_finder.evaluation.qualification_prompt_compilations import (
     load_compiled_qualification_target,
 )
 from job_finder.jobs.enrichment import EnrichedJob, enrich_job, enrichment_values
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _FLOAT: TypeAdapter[float] = TypeAdapter(float)

@@ -17,7 +17,7 @@ from job_finder.evaluation.openrouter import (
     invoke_prompt,
 )
 from job_finder.evaluation.prompt_releases import PromptRelease
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 
 
 class EnrichedJob(EvaluationModel):

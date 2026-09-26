@@ -15,9 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import ats_structural_filter, format_ats_description
 from job_finder.evaluation.models import EvaluationOutcome, EvaluationResult, evaluation_outcome
-from job_finder.jobs.models import JobListing, StructuralRejection
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.scraping import detect_source, extract_company_from_url
-from job_finder.jobs.structural_filter import structural_filter
+from job_finder.jobs.structural_filter import StructuralRejection, structural_filter
 
 CORPUS_ROOT = Path(__file__).with_name("fixtures")
 MAX_FALSE_POSITIVE_RATE = Decimal("0.15")

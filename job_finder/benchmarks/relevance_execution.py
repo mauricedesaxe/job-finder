@@ -63,7 +63,7 @@ from job_finder.evaluation.relevance_releases import (
     JevFaithfulExecutionPolicy,
     load_relevance_release,
 )
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 
 _FLOAT: TypeAdapter[float] = TypeAdapter(float)
 _INT: TypeAdapter[int] = TypeAdapter(int)
