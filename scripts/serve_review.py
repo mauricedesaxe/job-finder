@@ -13,17 +13,13 @@ from job_finder.provider_credentials import (
     production_provider_validators,
 )
 from job_finder.web.app import create_review_app
-from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.operations.control_plane import dagster_control_plane_service
 from job_finder.review.feedback import postgres_review_submitter
 from job_finder.operations.spend import postgres_analytics_service
 from job_finder.operations.activity import postgres_activity_service
 from job_finder.operations.run_history import postgres_runs_service
 from job_finder.operations.service import postgres_operations_service
-from job_finder.review.onboarding import (
-    postgres_onboarding_progress_service,
-    postgres_test_search_service,
-)
+from job_finder.review.onboarding import postgres_test_search_service
 from job_finder.review.owner_access import (
     OnboardingStage,
     import_legacy_owner_password,
@@ -35,6 +31,8 @@ from job_finder.review.queue import postgres_review_queue_loader
 def create_app() -> FastHTML:
     database = DatabaseSettings.from_environment()
     settings = ReviewAppSettings.from_environment()
+    if settings.split_execution_artifact_path is None:
+        raise RuntimeError("JOB_FINDER_ENABLE_SPLIT_EXECUTION must be true for owner search setup")
     dagster = DagsterControlSettings.from_environment()
 
     def connect() -> psycopg.Connection[tuple[object, ...]]:
@@ -78,12 +76,10 @@ def create_app() -> FastHTML:
 
     return create_review_app(
         postgres_review_queue_loader(connect),
-        postgres_configuration_editor_service(connect),
         settings,
         submit_review=postgres_review_submitter(connect),
         owner_access_service=postgres_owner_access_service(connect),
         provider_setup_service=provider_setup,
-        onboarding_progress_service=postgres_onboarding_progress_service(connect),
         test_search_service=postgres_test_search_service(
             connect, artifact_path=settings.split_execution_artifact_path
         ),

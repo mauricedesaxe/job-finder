@@ -208,7 +208,6 @@ from job_finder.jobs.decisions import (
 from job_finder.jobs.enrichment import EnrichedJob
 from job_finder.jobs.listings import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
-from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.feedback import (
     ReviewSaved,
     ReviewSubmission,
@@ -216,7 +215,6 @@ from job_finder.review.feedback import (
     load_review_feedback,
     record_review,
 )
-from job_finder.review.onboarding import postgres_onboarding_progress_service
 from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerBootstrapped,
@@ -2609,6 +2607,8 @@ def test_existing_installation_requires_and_idempotently_imports_legacy_owner(
     monkeypatch.setenv("JOB_FINDER_REVIEW_PASSWORD", "legacy secure owner password")
     monkeypatch.delenv("JOB_FINDER_BOOTSTRAP_TOKEN", raising=False)
     monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "s" * 32)
+    monkeypatch.setenv("JOB_FINDER_ENABLE_SPLIT_EXECUTION", "true")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_ARTIFACT", "/unused/artifact.json")
     monkeypatch.delenv("JOB_FINDER_DAGSTER_GRAPHQL_URL", raising=False)
 
     _ = create_review_server()
@@ -2716,20 +2716,9 @@ def test_provider_credentials_are_encrypted_versioned_and_gate_onboarding(
             connection.execute("DELETE FROM provider_credentials WHERE provider = 'jina'")
 
     with _connection(authority_schema) as connection:
-        active = get_active_search_configuration(connection)
-    activation = postgres_onboarding_progress_service(
-        lambda: _connection(authority_schema)
-    ).activate_preferences(
-        ActivateConfigurationCommand(
-            target_revision_id=active.active.revision.id,
-            expected_active_revision_id=active.active.revision.id,
-            expected_generation=active.active.generation,
-            actor="owner",
-            timestamp=datetime(2026, 9, 22, tzinfo=UTC),
+        connection.execute(
+            "UPDATE owner_onboarding SET stage = 'budget', updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1"
         )
-    )
-
-    assert isinstance(activation, ConfigurationActivated)
     assert owner.load_state().stage is OnboardingStage.BUDGET
 
     budget = postgres_budget_setup_service(lambda: _connection(authority_schema))
@@ -3727,37 +3716,6 @@ def test_get_search_configuration_revision_reports_a_missing_revision(
 
         with pytest.raises(ConfigurationRevisionNotFound):
             get_search_configuration_revision(connection, missing_revision_id)
-
-
-def test_configuration_editor_inspects_the_live_draft_active_and_saved_revisions(
-    authority_schema: str,
-) -> None:
-    with _connection(authority_schema) as connection:
-        apply_migrations(connection)
-
-    service = postgres_configuration_editor_service(connect=lambda: _connection(authority_schema))
-    state = service.inspect()
-
-    assert state.draft.version == 0
-    assert state.draft.base_revision_id == SearchConfigurationRevisionId(
-        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-    )
-    assert state.draft.configuration == DEFAULT_SEARCH_CONFIGURATION
-    assert state.active.active.generation == 0
-    assert state.active.active.revision.id == SearchConfigurationRevisionId(
-        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-    )
-    assert state.active.publication.revision_id == SearchConfigurationRevisionId(
-        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-    )
-    assert state.content_revision_id == SearchConfigurationRevisionId(
-        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-    )
-    assert state.saved_revision is not None
-    assert state.saved_revision.revision.id == SearchConfigurationRevisionId(
-        INITIAL_SEARCH_CONFIGURATION_REVISION_ID
-    )
-    assert state.saved_revision.publication is not None
 
 
 def test_configuration_service_saves_a_draft_and_preserves_its_base(

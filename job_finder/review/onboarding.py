@@ -6,12 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from job_finder.configuration_service import (
-    ActivateConfigurationCommand,
-    ActivateConfigurationResult,
-    ConfigurationActivated,
-    activate_search_configuration,
-)
 from job_finder.database import ConnectionFactory
 from job_finder.execution_budget import ExecutionBlocked
 from job_finder.onboarding_test_search import (
@@ -27,11 +21,6 @@ from job_finder.qualification_target_service import (
     CreateCurrentQualificationCandidateCommand,
     create_current_qualification_candidate,
 )
-
-
-@dataclass(frozen=True)
-class OnboardingProgressService:
-    activate_preferences: Callable[[ActivateConfigurationCommand], ActivateConfigurationResult]
 
 
 @dataclass(frozen=True)
@@ -150,37 +139,3 @@ def postgres_test_search_service(
             )
 
     return OnboardingSearchService(inspect=inspect, launch=launch)
-
-
-def postgres_onboarding_progress_service(
-    connect: ConnectionFactory,
-) -> OnboardingProgressService:
-    def activate_preferences(
-        command: ActivateConfigurationCommand,
-    ) -> ActivateConfigurationResult:
-        with connect() as connection, connection.transaction():
-            row = connection.execute(
-                """
-                SELECT stage
-                FROM owner_onboarding
-                WHERE singleton_id = 1
-                FOR UPDATE
-                """
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("Owner onboarding state is missing")
-            stage = OnboardingStage(str(row[0]))
-            result = activate_search_configuration(connection, command)
-            if not isinstance(result, ConfigurationActivated):
-                return result
-            if stage is OnboardingStage.PREFERENCES:
-                _ = connection.execute(
-                    """
-                    UPDATE owner_onboarding
-                    SET stage = 'budget', updated_at = CURRENT_TIMESTAMP
-                    WHERE singleton_id = 1 AND stage = 'preferences'
-                    """
-                )
-        return result
-
-    return OnboardingProgressService(activate_preferences=activate_preferences)

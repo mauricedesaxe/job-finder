@@ -23,7 +23,6 @@ from job_finder.database import apply_migrations
 from job_finder.database import ConnectionFactory
 from job_finder.discovery.catalog import SupportedSearchSource
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
-from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.feedback import postgres_review_submitter
 from job_finder.review.owner_access import (
     OnboardingStage,
@@ -71,7 +70,6 @@ def _client_for_schema(
     )
     app = create_review_app(
         postgres_review_queue_loader(connect),
-        postgres_configuration_editor_service(connect),
         ReviewAppSettings(
             session_secret="s" * 32,
             cookie_secure=False,

@@ -11,6 +11,7 @@ from starlette.responses import FileResponse, PlainTextResponse, Response
 from job_finder.config import ReviewAppSettings
 from datetime import UTC, datetime
 
+from job_finder.database import ConnectionFactory
 from job_finder.execution_budget import BudgetSetupService
 from job_finder.operations.activity import ActivityService
 from job_finder.operations.control_plane import (
@@ -23,14 +24,11 @@ from job_finder.operations.spend import AnalyticsService
 from job_finder.operations.web import register_operations_routes
 from job_finder.provider_credentials import ProviderSetupService
 from job_finder.review.access_web import register_access_routes, require_owner as access_guard
-from job_finder.review.configuration import register_configuration_routes
-from job_finder.database import ConnectionFactory
 from job_finder.review.split_configuration import register_split_configuration_routes
 from job_finder.review.qualification_targets import register_qualification_target_routes
 from job_finder.review.qualification_promotions_web import register_qualification_promotion_routes
-from job_finder.review.configuration_editor import ConfigurationEditorService
 from job_finder.review.feedback import ReviewSubmitter
-from job_finder.review.onboarding import OnboardingProgressService, OnboardingSearchService
+from job_finder.review.onboarding import OnboardingSearchService
 from job_finder.review.owner_access import OwnerAccessService
 from job_finder.review.queue import ReviewQueueLoader
 from job_finder.review.workbench import ReviewWorkbench
@@ -98,13 +96,11 @@ _DateTimeClock = Callable[[], datetime]
 
 def create_review_app(
     load_review_queue: ReviewQueueLoader,
-    configuration_service: ConfigurationEditorService,
     settings: ReviewAppSettings,
     *,
     submit_review: ReviewSubmitter,
     owner_access_service: OwnerAccessService,
     provider_setup_service: ProviderSetupService | None = None,
-    onboarding_progress_service: OnboardingProgressService | None = None,
     test_search_service: OnboardingSearchService | None = None,
     budget_setup_service: BudgetSetupService | None = None,
     readiness: ReadinessProbe = lambda: None,
@@ -179,16 +175,6 @@ def create_review_app(
             actor=actor,
             now=now,
         )
-    else:
-        register_configuration_routes(
-            app,
-            configuration_service=configuration_service,
-            owner_access_service=owner_access_service,
-            onboarding_progress_service=onboarding_progress_service,
-            actor=actor,
-            now=now,
-        )
-
     workbench.register_item_routes(app)
 
     return app
