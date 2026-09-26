@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import ClassVar, Literal, Self
@@ -82,17 +81,15 @@ class ReviewQueue(_ReviewQueueModel):
         return self.reviewed_counts.get(review_day, 0)
 
 
-@dataclass(frozen=True)
-class ReviewQueueService:
-    review_queue: Callable[[], ReviewQueue]
+ReviewQueueLoader = Callable[[], ReviewQueue]
 
 
-def postgres_review_queue_service(connect: ConnectionFactory) -> ReviewQueueService:
+def postgres_review_queue_loader(connect: ConnectionFactory) -> ReviewQueueLoader:
     def review_queue() -> ReviewQueue:
         with connect() as connection:
             return load_review_queue(connection)
 
-    return ReviewQueueService(review_queue=review_queue)
+    return review_queue
 
 
 def enqueue_qualified_review_item(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, ClassVar, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -129,17 +128,15 @@ class ReviewFeedbackNotFound(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class ReviewFeedbackService:
-    submit: Callable[[ReviewSubmission], ReviewSubmitResult]
+ReviewSubmitter = Callable[[ReviewSubmission], ReviewSubmitResult]
 
 
-def postgres_review_feedback_service(connect: ConnectionFactory) -> ReviewFeedbackService:
+def postgres_review_submitter(connect: ConnectionFactory) -> ReviewSubmitter:
     def submit(review: ReviewSubmission) -> ReviewSubmitResult:
         with connect() as connection:
             return record_review(connection, review)
 
-    return ReviewFeedbackService(submit=submit)
+    return submit
 
 
 def list_review_feedback(

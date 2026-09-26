@@ -108,6 +108,7 @@ from job_finder.pipeline.work_recoveries import (
 )
 from job_finder.web.assets import static_url
 from job_finder.web.security import (
+    csrf_token,
     verified_control_csrf_token,
 )
 from job_finder.web.shell import (
@@ -159,8 +160,8 @@ def register_operations_routes(
 
     @app.route("/operations/control", methods=["GET"], name="create_review_app_control_plane_page")
     def control_plane_page(request: Request) -> HTMLResponse:
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         try:
             control_snapshot = controls.load()
@@ -174,10 +175,10 @@ def register_operations_routes(
             document(
                 operations_sidebar_page(
                     "control",
-                    csrf_token,
+                    token,
                     _control_page(
                         control_snapshot,
-                        csrf_token,
+                        token,
                         dagster_configured=dagster_configured,
                         control_error=control_error,
                         run_key=secrets.token_urlsafe(32),
@@ -334,8 +335,8 @@ def register_operations_routes(
                 "The database could not be reached. Reload this page to try again.",
                 status_code=503,
             )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
         next_href = (
@@ -347,7 +348,7 @@ def register_operations_routes(
             document(
                 operations_sidebar_page(
                     "activity",
-                    csrf_token,
+                    token,
                     _activity_content(
                         page,
                         filters=request.query_params,
@@ -378,14 +379,14 @@ def register_operations_routes(
                 "The database could not be reached. Reload this page to try again.",
                 status_code=503,
             )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         return HTMLResponse(
             document(
                 operations_sidebar_page(
                     "activity",
-                    csrf_token,
+                    token,
                     _run_detail_page(detail, now=now()),
                 ),
                 title="Pipeline run",
@@ -410,16 +411,16 @@ def register_operations_routes(
                 "The database could not be reached. Reload this page to try again.",
                 status_code=503,
             )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         notice = _WORK_ACTION_NOTICES.get(request.query_params.get("notice", ""))
         return HTMLResponse(
             document(
                 operations_sidebar_page(
                     "activity",
-                    csrf_token,
-                    _work_item_page(detail, csrf_token, notice=notice),
+                    token,
+                    _work_item_page(detail, token, notice=notice),
                 ),
                 title="Job",
             )
@@ -445,14 +446,14 @@ def register_operations_routes(
                 "The database could not be reached. Reload this page to try again.",
                 status_code=503,
             )
-        csrf_token = request.session.get("csrf_token")
-        if not isinstance(csrf_token, str):
+        token = csrf_token(request)
+        if token is None:
             return HTMLResponse(status_code=401)
         return HTMLResponse(
             document(
                 operations_sidebar_page(
                     "analytics",
-                    csrf_token,
+                    token,
                     _analytics_page(spend),
                 ),
                 title="Model spend",

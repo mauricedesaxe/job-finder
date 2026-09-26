@@ -24,7 +24,7 @@ from job_finder.database import ConnectionFactory
 from job_finder.discovery.catalog import SupportedSearchSource
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
-from job_finder.review.feedback import postgres_review_feedback_service
+from job_finder.review.feedback import postgres_review_submitter
 from job_finder.review.owner_access import (
     OnboardingStage,
     OwnerAccessService,
@@ -32,7 +32,7 @@ from job_finder.review.owner_access import (
     OwnerBootstrapConflict,
     postgres_owner_access_service,
 )
-from job_finder.review.queue import postgres_review_queue_service
+from job_finder.review.queue import postgres_review_queue_loader
 from job_finder.qualification_definition_service import get_qualification_definition_draft
 from job_finder.web.app import create_review_app
 
@@ -70,14 +70,14 @@ def _client_for_schema(
         bootstrap=lambda _password: OwnerBootstrapConflict(owner_state),
     )
     app = create_review_app(
-        postgres_review_queue_service(connect),
+        postgres_review_queue_loader(connect),
         postgres_configuration_editor_service(connect),
         ReviewAppSettings(
             session_secret="s" * 32,
             cookie_secure=False,
             split_execution_artifact_path=artifact_path or Path("/unused/artifact.json"),
         ),
-        feedback_service=postgres_review_feedback_service(connect),
+        submit_review=postgres_review_submitter(connect),
         owner_access_service=owner,
         split_configuration_connect=connect,
         now=lambda: datetime(2026, 9, 25, tzinfo=UTC),

@@ -36,7 +36,7 @@ from job_finder.review.configuration_editor import (
     ConfigurationEditorService,
     ConfigurationEditorState,
 )
-from job_finder.review.feedback import ReviewFeedbackService, ReviewSaved
+from job_finder.review.feedback import ReviewSaved
 from job_finder.review.onboarding import OnboardingProgressService
 from job_finder.review.owner_access import (
     OnboardingStage,
@@ -44,7 +44,7 @@ from job_finder.review.owner_access import (
     OwnerAccessState,
     OwnerBootstrapConflict,
 )
-from job_finder.review.queue import ReviewQueue, ReviewQueueService
+from job_finder.review.queue import ReviewQueue
 from job_finder.search_configuration import (
     ActiveSearchConfiguration,
     DEFAULT_SEARCH_CONFIGURATION,
@@ -635,16 +635,12 @@ def test_configuration_database_failure_is_a_retryable_503() -> None:
         publish=service.publish,
         activate=service.activate,
     )
-    queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue())
-    feedback_service = ReviewFeedbackService(
-        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1))
-    )
     client = TestClient(
         create_review_app(
-            queue_service,
+            lambda: ReviewQueue(),
             service,
             SETTINGS,
-            feedback_service=feedback_service,
+            submit_review=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
             owner_access_service=OWNER_ACCESS,
             now=lambda: NOW,
         )
@@ -684,16 +680,12 @@ def _client(
     owner_access: OwnerAccessService = OWNER_ACCESS,
     onboarding_progress: OnboardingProgressService | None = None,
 ) -> TestClient:
-    queue_service = ReviewQueueService(review_queue=lambda: ReviewQueue())
-    feedback_service = ReviewFeedbackService(
-        submit=lambda _review: ReviewSaved(review_event_id=UUID(int=1))
-    )
     client = TestClient(
         create_review_app(
-            queue_service,
+            lambda: ReviewQueue(),
             harness.service(),
             SETTINGS,
-            feedback_service=feedback_service,
+            submit_review=lambda _review: ReviewSaved(review_event_id=UUID(int=1)),
             owner_access_service=owner_access,
             onboarding_progress_service=onboarding_progress,
             now=lambda: NOW,
