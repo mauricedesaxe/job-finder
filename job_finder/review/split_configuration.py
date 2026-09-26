@@ -65,6 +65,15 @@ from job_finder.web.security import csrf_token, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
 
 
+_SPLIT_NOTICES = {
+    "acquisition-draft-saved": "Acquisition draft saved.",
+    "acquisition-published": "Acquisition published.",
+    "acquisition-activated": "Acquisition activated.",
+    "qualification-draft-saved": "Qualification draft saved.",
+    "qualification-published": "Qualification published.",
+}
+
+
 def register_split_configuration_routes(
     app: FastHTML,
     *,
@@ -77,7 +86,7 @@ def register_split_configuration_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(connect, token, request.query_params.get("notice"))
+        return _page(connect, token, _SPLIT_NOTICES.get(request.query_params.get("notice", "")))
 
     @app.route("/configuration/acquisition/draft", methods=["POST"])
     async def save_acquisition(request: Request) -> HTMLResponse | RedirectResponse:
@@ -127,7 +136,7 @@ def register_split_configuration_routes(
                 422,
                 acquisition_input=(raw_keywords, raw_sources),
             )
-        return RedirectResponse("/configuration?notice=Acquisition+draft+saved", status_code=303)
+        return RedirectResponse("/configuration?notice=acquisition-draft-saved", status_code=303)
 
     @app.route("/configuration/acquisition/publish", methods=["POST"])
     async def publish_acquisition(request: Request) -> HTMLResponse | RedirectResponse:
@@ -161,7 +170,7 @@ def register_split_configuration_routes(
             )
         except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
-        return RedirectResponse("/configuration?notice=Acquisition+published", status_code=303)
+        return RedirectResponse("/configuration?notice=acquisition-published", status_code=303)
 
     @app.route("/configuration/acquisition/activate", methods=["POST"])
     async def activate_acquisition(request: Request) -> HTMLResponse | RedirectResponse:
@@ -199,7 +208,7 @@ def register_split_configuration_routes(
             )
         except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
-        return RedirectResponse("/configuration?notice=Acquisition+activated", status_code=303)
+        return RedirectResponse("/configuration?notice=acquisition-activated", status_code=303)
 
     @app.route("/configuration/qualification/draft", methods=["POST"])
     async def save_qualification(request: Request) -> HTMLResponse | RedirectResponse:
@@ -246,7 +255,7 @@ def register_split_configuration_routes(
                 422,
                 qualification_input=(raw_criteria, raw_profiles),
             )
-        return RedirectResponse("/configuration?notice=Qualification+draft+saved", status_code=303)
+        return RedirectResponse("/configuration?notice=qualification-draft-saved", status_code=303)
 
     @app.route("/configuration/qualification/publish", methods=["POST"])
     async def publish_qualification(request: Request) -> HTMLResponse | RedirectResponse:
@@ -280,7 +289,7 @@ def register_split_configuration_routes(
             )
         except (ValueError, ValidationError) as error:
             return _page(connect, token, _user_error(error), 422)
-        return RedirectResponse("/configuration?notice=Qualification+published", status_code=303)
+        return RedirectResponse("/configuration?notice=qualification-published", status_code=303)
 
     @app.route("/configuration/continue", methods=["POST"])
     async def continue_setup(request: Request) -> HTMLResponse | RedirectResponse:

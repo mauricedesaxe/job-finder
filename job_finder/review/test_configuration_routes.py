@@ -207,14 +207,14 @@ def test_edit_actions_rerender_without_persistence_and_preserve_exact_values() -
     harness = ServiceHarness()
     client = _client(harness)
     data = _form_data(harness.configuration, _csrf(client))
-    data["search_keywords"] = "  exact whitespace  \nsecond keyword"
+    data["search_keywords"] = "  exact whitespace  \n\nsecond keyword\n  exact whitespace  "
     data["action"] = "criterion.down.0"
     harness.calls.clear()
 
     response = client.post("/configuration/edit", data=data)
 
     assert response.status_code == 200
-    assert "  exact whitespace  \nsecond keyword" in response.text
+    assert "  exact whitespace  \n\nsecond keyword\n  exact whitespace  " in response.text
     assert "Unsaved browser changes are shown below" in response.text
     assert "Release actions still apply to the saved draft" in response.text
     assert "Save or discard the browser entries before using release actions" in response.text
@@ -222,6 +222,26 @@ def test_edit_actions_rerender_without_persistence_and_preserve_exact_values() -
     assert 'action="/configuration/activate"' not in response.text
     assert harness.calls == ["inspect"]
     assert harness.saved_commands == []
+
+
+def test_source_removal_uses_the_submitted_position_before_filtering_unchecked_sources() -> None:
+    harness = ServiceHarness()
+    client = _client(harness)
+    data = _form_data(harness.configuration, _csrf(client))
+    data["source_count"] = "3"
+    data["source_order.0"] = "ashby"
+    data["source_order.1"] = "lever"
+    data["source_order.2"] = "unknown"
+    data["source_selected"] = ["lever"]
+    data["source_preserve"] = "2"
+    data["action"] = "source.remove.2"
+
+    response = client.post("/configuration/edit", data=data)
+
+    assert response.status_code == 200
+    assert 'name="source_order.0" value="lever"' in response.text
+    assert 'name="source_order.1"' not in response.text
+    assert 'name="source_preserve"' not in response.text
 
 
 @pytest.mark.parametrize(

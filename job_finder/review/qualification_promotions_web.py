@@ -57,6 +57,12 @@ _EVIDENCE_FIELDS = (
 )
 
 
+_PROMOTION_NOTICES = {
+    "decision-recorded": "Decision recorded.",
+    "qualification-activated": "Qualification activated.",
+}
+
+
 def register_qualification_promotion_routes(
     app: FastHTML,
     *,
@@ -70,7 +76,7 @@ def register_qualification_promotion_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(connect, token, request.query_params.get("notice"))
+        return _page(connect, token, _PROMOTION_NOTICES.get(request.query_params.get("notice", "")))
 
     @app.route("/configuration/qualification-promotion/preview", methods=["POST"])
     async def preview(request: Request) -> HTMLResponse:
@@ -123,7 +129,7 @@ def register_qualification_promotion_routes(
         except (ValueError, ValidationError, psycopg.Error) as error:
             return _page(connect, token, _error(error), 422, submitted=form)
         return RedirectResponse(
-            f"/configuration/qualification-promotion?notice=Decision+{result.id}+recorded",
+            "/configuration/qualification-promotion?notice=decision-recorded",
             status_code=303,
         )
 
@@ -153,7 +159,7 @@ def register_qualification_promotion_routes(
         except (ValueError, ValidationError, psycopg.Error, QualificationActivationError) as error:
             return _page(connect, token, _error(error), 422)
         return RedirectResponse(
-            "/configuration/qualification-promotion?notice=Qualification+activated",
+            "/configuration/qualification-promotion?notice=qualification-activated",
             status_code=303,
         )
 

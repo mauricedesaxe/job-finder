@@ -480,3 +480,34 @@ def test_uncertain_split_write_preserves_its_retry_command(
     assert f'action="{path}"' in response.text
     for key, value in fields.items():
         assert f'name="{key}" value="{value}"' in response.text
+
+
+def test_split_pages_do_not_reflect_unknown_notices(authority_schema: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(dir=root, prefix=".notice-ui-", suffix=".json") as artifact_file:
+        artifact_path = Path(artifact_file.name)
+        _ = write_implementation_artifact(root, artifact_path)
+        client, connect = _client_for_schema(authority_schema, artifact_path=artifact_path)
+        with connect() as connection:
+            _ = apply_migrations(connection)
+        hostile = "%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+        configuration = client.get(f"/configuration?notice={hostile}")
+        assert configuration.status_code == 200
+        assert "<script>alert(1)</script>" not in configuration.text
+        known = client.get("/configuration?notice=acquisition-draft-saved")
+        assert "Acquisition draft saved." in known.text
+        targets = client.get(f"/configuration/qualification-targets?notice={hostile}")
+        assert targets.status_code == 200
+        assert "<script>alert(1)</script>" not in targets.text
+        assert "Candidate created." in client.get(
+            "/configuration/qualification-targets?notice=candidate-created"
+        ).text
+        promotion = client.get(f"/configuration/qualification-promotion?notice={hostile}")
+        assert promotion.status_code == 200
+        assert "<script>alert(1)</script>" not in promotion.text
+        assert "Decision recorded." in client.get(
+            "/configuration/qualification-promotion?notice=decision-recorded"
+        ).text
+        assert "Qualification activated." in client.get(
+            "/configuration/qualification-promotion?notice=qualification-activated"
+        ).text
