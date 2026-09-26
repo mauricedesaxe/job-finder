@@ -10,6 +10,7 @@ each day's existing maximum, matching how the domain enqueues.
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import UTC, date, datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -52,7 +53,9 @@ def main() -> None:
             ).fetchall()
         ]
         if arguments.dry_run:
-            print(f"Dry run: {len(rows)} qualified decision(s) would enter the review queue")
+            _ = sys.stdout.write(
+                f"Dry run: {len(rows)} qualified decision(s) would enter the review queue\n"
+            )
             for evaluation_id, review_day in rows[:20]:
                 sample = connection.execute(
                     """
@@ -64,9 +67,9 @@ def main() -> None:
                     (evaluation_id,),
                 ).fetchone()
                 if sample is not None:
-                    print(f"  {review_day}  {sample[0]}  |  {sample[1]}")
+                    _ = sys.stdout.write(f"  {review_day}  {sample[0]}  |  {sample[1]}\n")
             if len(rows) > 20:
-                print(f"  ... and {len(rows) - 20} more")
+                _ = sys.stdout.write(f"  ... and {len(rows) - 20} more\n")
             return
         positions: dict[str, int] = {
             _as_date(row[0]).isoformat(): int(str(row[1]))
@@ -96,7 +99,7 @@ def main() -> None:
                 """,
                 (item_id, evaluation_id, review_day, positions[day], datetime.now(UTC)),
             ).rowcount
-        print(f"Enqueued {inserted} review item(s) on {connection.info.dsn}")
+        _ = sys.stdout.write(f"Enqueued {inserted} review item(s)\n")
 
 
 def _as_date(value: object) -> date:
