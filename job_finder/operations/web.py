@@ -660,7 +660,8 @@ def _control_page(
                 + "minutes, so a job found this morning is not decided tomorrow, and failed "
                 + "work comes back there on retry. Review sample fills your daily audit. The "
                 + "Langfuse projection copies telemetry out after decisions are made — it "
-                + "never changes one.",
+                + "never changes one. A schedule skips its tick while an earlier run of the "
+                + "same job is queued or running.",
                 cls="operations-muted",
             ),
             cls="operations-section",
