@@ -9,9 +9,12 @@ from dagster import (
     AssetExecutionContext,
     ConfigurableResource,
     DefaultScheduleStatus,
+    DagsterRunStatus,
     Definitions,
     RetryPolicy,
+    RunsFilter,
     ScheduleDefinition,
+    ScheduleEvaluationContext,
     asset,
     define_asset_job,  # pyright: ignore[reportUnknownVariableType]
 )
@@ -430,34 +433,63 @@ langfuse_projection_job = define_asset_job(
     "langfuse_projection", selection=[langfuse_projection_queue.key]
 )
 review_sample_job = define_asset_job("review_sample", selection=[review_audit_sample.key])
+
+
+def _skip_while_job_unfinished(
+    job_name: str,
+) -> Callable[[ScheduleEvaluationContext], bool]:
+    def should_execute(context: ScheduleEvaluationContext) -> bool:
+        return (
+            context.instance.get_runs_count(
+                filters=RunsFilter(
+                    job_name=job_name,
+                    statuses=[
+                        DagsterRunStatus.QUEUED,
+                        DagsterRunStatus.STARTING,
+                        DagsterRunStatus.STARTED,
+                        DagsterRunStatus.CANCELING,
+                    ],
+                )
+            )
+            == 0
+        )
+
+    return should_execute
+
+
 review_sample_schedule = ScheduleDefinition(
     job=review_sample_job,
     cron_schedule="15 0 * * *",
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
+    should_execute=_skip_while_job_unfinished("review_sample"),
 )
 job_finder_schedule = ScheduleDefinition(
     job=job_finder_job,
     cron_schedule="0 7 * * *",
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
+    should_execute=_skip_while_job_unfinished("job_finder"),
 )
 job_work_queue_schedule = ScheduleDefinition(
     job=job_work_queue_job,
     cron_schedule="*/15 * * * *",
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
+    should_execute=_skip_while_job_unfinished("job_work_queue"),
 )
 onboarding_test_search_schedule = ScheduleDefinition(
     job=onboarding_test_search_job,
     cron_schedule="* * * * *",
     execution_timezone="UTC",
     default_status=DefaultScheduleStatus.RUNNING,
+    should_execute=_skip_while_job_unfinished("onboarding_test_search"),
 )
 langfuse_projection_schedule = ScheduleDefinition(
     job=langfuse_projection_job,
     cron_schedule="* * * * *",
     execution_timezone="UTC",
+    should_execute=_skip_while_job_unfinished("langfuse_projection"),
     default_status=(
         DefaultScheduleStatus.RUNNING
         if LangfuseSettings.credentials_are_configured()

@@ -36,30 +36,32 @@ class ControlDefinition:
 
 
 CONTROL_DEFINITIONS = (
-    ControlDefinition("job_finder", "job_finder_schedule", "Full pipeline", "Daily at 07:00 UTC"),
+    ControlDefinition(
+        "job_finder", "job_finder_schedule", "Full pipeline", "Daily at 07:00 UTC if idle"
+    ),
     ControlDefinition(
         "job_work_queue",
         "job_work_queue_schedule",
         "Work queue",
-        "Every 15 minutes",
+        "Every 15 minutes if idle",
     ),
     ControlDefinition(
         "onboarding_test_search",
         "onboarding_test_search_schedule",
         "Setup test search",
-        "Every minute while setup is active",
+        "Every minute while setup is active and the prior run is done",
     ),
     ControlDefinition(
         "review_sample",
         "review_sample_schedule",
         "Review sample",
-        "Daily at 00:15 UTC",
+        "Daily at 00:15 UTC if idle",
     ),
     ControlDefinition(
         "langfuse_projection",
         "langfuse_projection_schedule",
         "Langfuse projection",
-        "Every minute",
+        "Every minute if idle",
     ),
 )
 _JOBS = {definition.job_name: definition for definition in CONTROL_DEFINITIONS}
