@@ -482,8 +482,9 @@ def postgres_model_call_persistence(
 def enqueue_model_call_projection(
     connection: psycopg.Connection[tuple[object, ...]], attempt: ModelCallAttempt
 ) -> None:
+    projection_attempt = dataclass_replace(attempt, observed_at=attempt.observed_at.astimezone(UTC))
     payload = TypeAdapter(dict[str, JsonValue]).validate_json(
-        TypeAdapter(ModelCallAttempt).dump_json(attempt)
+        TypeAdapter(ModelCallAttempt).dump_json(projection_attempt)
     )
     payload_digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

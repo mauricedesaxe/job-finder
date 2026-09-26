@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, ClassVar, Literal
 from uuid import UUID
 
@@ -16,6 +16,7 @@ ProjectionKind = Literal["evaluation_manifest", "evaluation_run", "prompt_promot
 _BenchmarkProjectionKind = Literal["evaluation_manifest", "evaluation_run", "prompt_promotion"]
 _METADATA = TypeAdapter(dict[str, JsonValue])
 _PROJECTION_KIND: TypeAdapter[ProjectionKind] = TypeAdapter(ProjectionKind)
+_TIMESTAMP: TypeAdapter[datetime] = TypeAdapter(datetime)
 
 
 class ProjectionModel(BaseModel):
@@ -94,6 +95,10 @@ def enqueue_projection(
     created_at: datetime,
 ) -> None:
     data = payload.model_dump(mode="json")
+    for field in ("created_at", "completed_at"):
+        moment = getattr(payload, field, None)
+        if isinstance(moment, datetime):
+            data[field] = _TIMESTAMP.dump_python(moment.astimezone(UTC), mode="json")
     payload_digest = _digest(data)
     projection_id = _digest({"kind": kind, "source_id": source_id})
     _ = connection.execute(
