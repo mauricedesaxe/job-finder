@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from typing import Literal
 from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -7934,5 +7935,112 @@ def test_direct_relevance_experiment_records_a_failing_threshold_outcome(
             assert evidence.outcome == "failed"
             metrics = EvaluationMetrics.model_validate(evidence.result["metrics"])
             assert metrics.false_negative_rate > 0
+        finally:
+            artifact_path.unlink(missing_ok=True)
+
+
+def test_composition_fixture_guards_reject_tampered_fixture_sets(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    rates = ExchangeRateSnapshot(rates={"EUR": Decimal("1.10")}, source="fallback", observed_at=now)
+    openrouter = ProviderExperimentSettings(provider="openrouter", temperature=0, retry_limit=0)
+    typesafe = ProviderExperimentSettings(provider="typesafe", temperature=0, retry_limit=0)
+
+    def fixture_case(
+        *, raw_url: str, input_path: Literal["direct", "ats"], ats: AtsAvailable | AtsNotApplicable
+    ) -> FixtureCase:
+        return FixtureCase(
+            input={
+                "raw_url": raw_url,
+                "keyword": "software engineer",
+                "domain": "jobs.lever.co",
+                "scrape": {"kind": "succeeded", "markdown": "# Engineer\nBuild tools. " * 20},
+                "ats_evidence": ats.model_dump(mode="json"),
+                "configuration_revision_id": INITIAL_SEARCH_CONFIGURATION_REVISION_ID,
+                "exchange_rates": rates.model_dump(mode="json"),
+                "openrouter_settings": openrouter.model_dump(mode="json"),
+                "relevance_settings": typesafe.model_dump(mode="json"),
+                "observed_at": now.isoformat(),
+            },
+            expected={
+                "decision_outcome": "rejected",
+                "decision_stage": "structural",
+                "work_state": "completed",
+                "review_enqueued": False,
+            },
+            input_path=input_path,
+        )
+
+    shared_url = "https://jobs.lever.co/acme/duplicate-role"
+    duplicated = PhaseFixtureSet(
+        phase="composition",
+        cases=(
+            fixture_case(raw_url=shared_url, input_path="direct", ats=AtsNotApplicable()),
+            fixture_case(raw_url=shared_url, input_path="direct", ats=AtsNotApplicable()),
+        ),
+    )
+    mismatched = PhaseFixtureSet(
+        phase="composition",
+        cases=(
+            fixture_case(
+                raw_url="https://jobs.lever.co/acme/ats-role",
+                input_path="direct",
+                ats=AtsAvailable(
+                    source="ashby",
+                    location="London",
+                    locations=("London",),
+                    workplace_type="OnSite",
+                    country="GB",
+                ),
+            ),
+        ),
+    )
+    with _connection(authority_schema) as connection:
+        _ = apply_migrations(connection)
+        jev_release_id = store_relevance_release(
+            connection,
+            build_relevance_release(build_jev_atomic_policy()),
+            created_at=now,
+            created_by="contract",
+        )
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=jev_release_id.id
+        )
+        target_id = qualification_target_id(target)
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            for fixture, message in (
+                (duplicated, "Composition fixture URLs must be distinct"),
+                (mismatched, "Composition input path differs from ATS evidence"),
+            ):
+                fixture_id = store_fixture_set(
+                    connection, fixture, created_at=now, created_by="owner"
+                )
+                with pytest.raises(ValueError, match=message):
+                    _ = execute_composition_fixture_set(
+                        connection,
+                        target_id,
+                        fixture_id,
+                        artifact_path,
+                        openrouter_api_key="unused",
+                        typesafe_api_key="unused",
+                        completed_at=now,
+                        created_by="owner",
+                        model_sender=lambda *_args: pytest.fail(  # pyright: ignore[reportUnknownLambdaType]
+                            "A rejected fixture set must not call a model"
+                        ),
+                        jev_sender=lambda *_args: pytest.fail(  # pyright: ignore[reportUnknownLambdaType]
+                            "A rejected fixture set must not call JEV"
+                        ),
+                    )
+                assert connection.execute(
+                    "SELECT count(*) FROM qualification_phase_evidence WHERE target_id = %s",
+                    (target_id,),
+                ).fetchone() == (0,)
         finally:
             artifact_path.unlink(missing_ok=True)

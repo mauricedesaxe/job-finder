@@ -24,7 +24,7 @@ from job_finder.configuration_service import (
 from job_finder.database import apply_migrations
 from job_finder.dagster import defs
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
-from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
+from job_finder.discovery.jina import JinaUnavailable, ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.models import ReleaseTarget
 from job_finder.evaluation.openrouter import HttpResponse
 from job_finder.evaluation.prompt_releases import (
@@ -1385,3 +1385,135 @@ def test_budget_guards_block_replays_and_exhausted_months(authority_schema: str)
             ),
         )
         assert exhausted == ExecutionBlocked(reason="monthly_budget_exhausted")
+
+
+def test_worker_fails_the_request_when_every_search_query_is_unavailable(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(
+        rates={"EUR": Decimal("1.11")}, source="frankfurter", observed_at=now
+    )
+    _prepare_test_search_owner(authority_schema, now)
+
+    def unavailable(keyword: str, domain: str) -> JinaUnavailable:
+        return JinaUnavailable(
+            operation="search",
+            error_code="provider_down",
+            reason=f"Jina returned 503 for {keyword} on {domain}",
+        )
+
+    boundaries = PipelineBoundaries(
+        search=unavailable,
+        scrape=lambda _url: pytest.fail("An unavailable search must not scrape"),
+        fetch_ats=lambda _url, _title: pytest.fail("An unavailable search must not fetch ATS"),
+    )
+    with _connection(authority_schema) as connection:
+        created = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(idempotency_key="owner-setup", actor="owner", timestamp=now),
+        )
+        assert isinstance(created, OnboardingTestSearchAccepted)
+        result = execute_next_onboarding_test_search(
+            connection,
+            boundaries,
+            implementation_ref="commit-1",
+            openrouter_api_key="unused",
+            typesafe_api_key=None,
+            owner_token=uuid4(),
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=1),
+            enable_ats_enrichment=False,
+            fetch_rates=lambda: rates,
+            now=lambda: now,
+        )
+        stored = load_onboarding_test_search(connection, "owner-setup")
+        assert stored is not None
+        reservation = connection.execute(
+            """
+            SELECT status, consumed_usd FROM execution_budget_reservations
+            WHERE idempotency_key = %s
+            """,
+            (created.request.budget_reservation_key,),
+        ).fetchone()
+        run = connection.execute(
+            """
+            SELECT status, error->>'code' FROM pipeline_runs WHERE id = %s
+            """,
+            (created.request.run_id,),
+        ).fetchone()
+
+    assert result.state == "failed"
+    assert result.queries == created.request.limits.max_queries
+    assert stored.state == "failed"
+    assert stored.error_code == "OnboardingSearchLimitReached"
+    assert reservation == ("settled", Decimal("50"))
+    assert run == ("failed", "OnboardingSearchLimitReached")
+
+
+def test_worker_leaves_failed_work_retryable_instead_of_failing_the_request(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    rates = ExchangeRateSnapshot(
+        rates={"EUR": Decimal("1.11")}, source="frankfurter", observed_at=now
+    )
+    _prepare_test_search_owner(authority_schema, now)
+    test_url = "https://jobs.ashbyhq.com/acme/onboarding-retry"
+
+    def search(_keyword: str, _domain: str) -> SearchSucceeded:
+        return SearchSucceeded(urls=(test_url,))
+
+    def scrape(_url: str) -> JinaUnavailable:
+        return JinaUnavailable(
+            operation="scrape", error_code="reader_down", reason="Jina reader timed out"
+        )
+
+    boundaries = PipelineBoundaries(
+        search=search,
+        scrape=scrape,
+        fetch_ats=lambda _url, _title: pytest.fail("An unscraped job must not reach ATS"),
+        model_sender=lambda _url, _headers, _body, _timeout: pytest.fail(
+            "An unscraped job must not call a model"
+        ),
+    )
+    with _connection(authority_schema) as connection:
+        created = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(idempotency_key="owner-setup", actor="owner", timestamp=now),
+        )
+        assert isinstance(created, OnboardingTestSearchAccepted)
+        result = execute_next_onboarding_test_search(
+            connection,
+            boundaries,
+            implementation_ref="commit-1",
+            openrouter_api_key="unused",
+            typesafe_api_key=None,
+            owner_token=uuid4(),
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=1),
+            enable_ats_enrichment=False,
+            fetch_rates=lambda: rates,
+            now=lambda: now,
+        )
+        stored = load_onboarding_test_search(connection, "owner-setup")
+        assert stored is not None
+        work = connection.execute(
+            """
+            SELECT state FROM job_work_items WHERE onboarding_request_key = %s
+            """,
+            ("owner-setup",),
+        ).fetchone()
+        run = connection.execute(
+            "SELECT status FROM pipeline_runs WHERE id = %s", (created.request.run_id,)
+        ).fetchone()
+        reservation = connection.execute(
+            "SELECT status FROM execution_budget_reservations WHERE idempotency_key = %s",
+            (created.request.budget_reservation_key,),
+        ).fetchone()
+
+    assert result.state == "waiting_for_retry"
+    assert stored.state == "leased"
+    assert work == ("failed",)
+    assert run == ("running",)
+    assert reservation == ("reserved",)
