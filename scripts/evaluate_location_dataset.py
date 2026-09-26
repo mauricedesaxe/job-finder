@@ -31,6 +31,7 @@ _CRITERION = "remote-europe-eligible"
 class Arguments(argparse.Namespace):
     dataset: str = ""
     run_name: str = ""
+    minimum_rejection_rate: float = 0.8
 
 
 class LocationDatasetInput(BaseModel):
@@ -50,7 +51,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate remote-from-Romania Langfuse cases")
     _ = parser.add_argument("--dataset", required=True)
     _ = parser.add_argument("--run-name", required=True)
+    _ = parser.add_argument("--minimum-rejection-rate", type=float, default=0.8)
     arguments = parser.parse_args(argv, namespace=Arguments())
+    if not 0 <= arguments.minimum_rejection_rate <= 1:
+        parser.error("--minimum-rejection-rate must be between 0 and 1")
 
     client = Langfuse(
         public_key=_required_environment("LANGFUSE_PUBLIC_KEY"),
@@ -90,7 +94,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"Remote-eligible controls kept: {positive_kept}/{positive_total}",
     )
     _ = sys.stdout.write("\n".join(lines) + "\n")
-    return 0
+    return int(
+        negative_total == 0
+        or negative_caught / negative_total < arguments.minimum_rejection_rate
+        or positive_kept != positive_total
+    )
 
 
 def _classify(
