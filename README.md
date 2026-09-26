@@ -230,6 +230,15 @@ For criteria or profile changes, promote the published prompt release:
 
 Activation requires approval for the exact prompt and relevance release pair.
 
+When a deployment changes a relevance execution file, its source hash changes and
+the old target cannot execute under the new code. Pause discovery and finish a
+baseline evaluation on a frozen manifest before deploying. After deploying,
+create the new target, evaluate it on the same manifest, compare the stored
+baseline and candidate runs, approve the result, and activate the new target
+before resuming discovery. Keep the old release and run records unchanged. The
+baseline cannot be rerun under the new code because its source hash no longer
+matches.
+
 #### Roll back a configuration
 
 Configuration revisions and publications are immutable. To roll back, use

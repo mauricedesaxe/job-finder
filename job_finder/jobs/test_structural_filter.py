@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.structural_filter import structural_filter
 
 

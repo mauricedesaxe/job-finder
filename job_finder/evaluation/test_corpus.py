@@ -50,7 +50,7 @@ from job_finder.evaluation.relevance_releases import (
     build_jev_faithful_policy,
     build_work_culture_candidate_policy,
 )
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from scripts.evaluate_corpus import corpus_run_parameters, parse_arguments
 
 

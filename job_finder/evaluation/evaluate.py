@@ -13,7 +13,7 @@ from job_finder.evaluation.models import (
     Rejected,
 )
 from job_finder.evaluation.prompt_releases import PromptRelease, PromptVersion
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 
 CriterionEvaluator = Callable[[PromptVersion, Mapping[str, str]], CriterionResult]
 _FILTER_EVIDENCE_PATTERNS = {

@@ -200,7 +200,7 @@ from job_finder.jobs.decision_pipeline import (
     process_qualified_job,
 )
 from job_finder.jobs.enrichment import EnrichedJob
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 from job_finder.review.configuration_editor import postgres_configuration_editor_service
 from job_finder.review.feedback import (

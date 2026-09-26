@@ -46,7 +46,7 @@ from job_finder.evaluation.relevance_releases import (
     JevFaithfulExecutionPolicy,
     RelevanceExecutionPolicy,
 )
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 
 
 def run_stored_manifest(

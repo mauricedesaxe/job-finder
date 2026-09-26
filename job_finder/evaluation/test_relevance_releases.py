@@ -98,7 +98,7 @@ def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
     assert policy.provider_adapter == baseline.provider_adapter
     assert policy.decision_composition == baseline.decision_composition
     assert relevance_release.id == (
-        "9e5135438df963af663db714da5138cd52c08e7b4f9b50f8cff2944859abfba1"
+        "9e8b4d5c846a25b40b652498ef008169940589bc24933951fdd6ce71376fdfbb"
     )
     validate_release_target(
         ReleaseTarget(

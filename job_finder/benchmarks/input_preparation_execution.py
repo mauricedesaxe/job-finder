@@ -21,9 +21,13 @@ from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.evaluation.qualification_prompt_compilations import (
     load_compiled_qualification_target,
 )
-from job_finder.jobs.models import JobListing, StructuralDecision, StructuralRejection
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.scraping import parse_job_details
-from job_finder.jobs.structural_filter import structural_filter
+from job_finder.jobs.structural_filter import (
+    StructuralDecision,
+    StructuralRejection,
+    structural_filter,
+)
 from job_finder.pipeline.orchestration import prepare_listing_with_ats
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)

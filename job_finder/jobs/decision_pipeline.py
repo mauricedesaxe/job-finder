@@ -24,7 +24,7 @@ from job_finder.evaluation.models import (
     TerminalOperationalError,
 )
 from job_finder.jobs.enrichment import EnrichedJob
-from job_finder.jobs.models import JobListing
+from job_finder.jobs.listings import JobListing
 from job_finder.jobs.title_deduplication import TitleDuplicate
 
 DecisionOutcome = Literal[
