@@ -48,10 +48,10 @@ jobs:
           import json
           report = json.load(open('basedpyright-report.json'))
           for d in report['generalDiagnostics']:
-              if d['severity'] != 'error':
-                  print(d['severity'], d['file'], d['range']['start']['line'] + 1, d.get('message', '')[:300])
+              print(d['severity'], d['file'], d['range']['start']['line'] + 1, d.get('message', '')[:300])
+          if report['summary']['errorCount']:
+              raise SystemExit(1)
           "
-          uv run basedpyright --level error
           uv run vulture
           uv run xenon --max-absolute C --max-modules B --max-average A job_finder
           uv lock --check
