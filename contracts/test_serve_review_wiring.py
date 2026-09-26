@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from fasthtml.common import FastHTML
 from psycopg import sql
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from job_finder.config import PostgresContractSettings
@@ -66,9 +67,16 @@ def test_serve_review_serves_real_requests_from_the_environment(
         "Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=",
     )
 
+    monkeypatch.setenv("JOB_FINDER_ENABLE_SPLIT_EXECUTION", "true")
+    monkeypatch.setenv("JOB_FINDER_IMPLEMENTATION_ARTIFACT", "/unused/artifact.json")
+
     create_app = _load_serve_review_module()
     app = create_app()
     assert app is not None
+    paths = {route.path for route in app.routes if isinstance(route, Route)}
+    assert "/configuration/acquisition/draft" in paths
+    assert "/configuration/qualification/draft" in paths
+    assert "/configuration/draft" not in paths
 
     client = TestClient(app, base_url="https://testserver")
     assert client.get("/healthz").status_code == 200
@@ -99,3 +107,13 @@ def test_serve_review_serves_real_requests_from_the_environment(
     setup = client.get("/setup/providers")
     assert setup.status_code == 200
     assert "provider" in setup.text.lower()
+
+
+def test_serve_review_requires_split_owner_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", "postgresql://unused")
+    monkeypatch.setenv("JOB_FINDER_REVIEW_SESSION_SECRET", "wiring-test-session-secret-0123456")
+    monkeypatch.delenv("JOB_FINDER_ENABLE_SPLIT_EXECUTION", raising=False)
+
+    create_app = _load_serve_review_module()
+    with pytest.raises(RuntimeError, match="JOB_FINDER_ENABLE_SPLIT_EXECUTION"):
+        _ = create_app()

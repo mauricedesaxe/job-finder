@@ -57,7 +57,10 @@ jobs:
           uv lock --check
           JOB_FINDER_POSTGRES_DSN="$JOB_FINDER_TEST_POSTGRES_DSN" uv run dagster definitions validate -m job_finder.dagster
           uv run pytest
-          uv run pytest contracts
+          uv run pytest contracts -k 'not test_existing_installation_requires_and_idempotently_imports_legacy_owner'
+          JOB_FINDER_ENABLE_SPLIT_EXECUTION=true \
+            JOB_FINDER_IMPLEMENTATION_ARTIFACT=/tmp/job-finder-ci-artifact.json \
+            uv run pytest contracts/test_postgres_authority.py::test_existing_installation_requires_and_idempotently_imports_legacy_owner
       - name: Build application image
         run: docker build --tag job-finder-dagster:test .
       - name: Smoke test Compose deployment

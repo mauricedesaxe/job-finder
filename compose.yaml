@@ -9,6 +9,7 @@ x-job-finder-service: &job-finder-service
     JOB_FINDER_REVIEW_SESSION_SECRET: ${JOB_FINDER_REVIEW_SESSION_SECRET:?Set a random session secret in .env}
     JOB_FINDER_BOOTSTRAP_TOKEN: ${JOB_FINDER_BOOTSTRAP_TOKEN:-}
     JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY: ${JOB_FINDER_CREDENTIAL_ENCRYPTION_KEY:-}
+    JOB_FINDER_ENABLE_SPLIT_EXECUTION: "true"
   restart: unless-stopped
 
 services:
