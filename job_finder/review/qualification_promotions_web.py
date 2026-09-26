@@ -164,12 +164,12 @@ def register_qualification_promotion_routes(
         )
 
 
-def _targets(form: FormData) -> tuple[QualificationTargetId, QualificationTargetId]:
+def _targets(form: FormData) -> tuple[QualificationTargetId | None, QualificationTargetId]:
     baseline = str(form.get("baseline_target_id", ""))
     candidate = str(form.get("candidate_target_id", ""))
-    if len(baseline) != 64 or len(candidate) != 64:
-        raise ValueError("Choose a baseline and a candidate target.")
-    return QualificationTargetId(baseline), QualificationTargetId(candidate)
+    if (baseline and len(baseline) != 64) or len(candidate) != 64:
+        raise ValueError("Choose a candidate and a valid baseline target.")
+    return QualificationTargetId(baseline) if baseline else None, QualificationTargetId(candidate)
 
 
 def _evidence(form: FormData) -> PromotionEvidenceSelection:
@@ -213,7 +213,7 @@ def _page(
             Small("Qualification promotion"),
             H1("Review evidence and activate"),
             P(
-                "Use canonical benchmark evidence to approve a complete candidate. The first activation also needs a distinct stored baseline candidate."
+                "Use canonical evidence to approve a complete candidate. For the first activation, choose No active baseline and provide passed evidence for every phase."
             ),
             P(notice, role="status") if notice else None,
             P(f"Active target: {active.target_id or 'none'}. Generation {active.generation}."),
@@ -244,6 +244,11 @@ def _decision_form(token: str, targets: tuple[str, ...], submitted: FormData | N
         Label(
             "Baseline target",
             Select(
+                Option(
+                    "No active baseline (first activation)",
+                    value="",
+                    selected=selected("baseline_target_id") == "",
+                ),
                 *(
                     Option(value, value=value, selected=value == selected("baseline_target_id"))
                     for value in targets

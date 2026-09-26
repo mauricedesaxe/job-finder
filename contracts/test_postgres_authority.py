@@ -352,6 +352,7 @@ EXPECTED_MIGRATIONS = (
     "0048_split_run_execution_projections.sql",
     "0049_split_onboarding_request_authority.sql",
     "0050_qualification_evidence_executions.sql",
+    "0051_qualification_first_activation.sql",
 )
 
 
@@ -701,6 +702,14 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                 connection, candidate, created_at=now, created_by="owner"
             )
             baseline_id = qualification_target_id(baseline)
+            _ = connection.execute(
+                """
+                UPDATE active_qualification_target
+                SET target_id = %s, generation = 1, activated_at = %s, activated_by = 'owner'
+                WHERE singleton_id = 1
+                """,
+                (baseline_id, now),
+            )
             fixture_case = FixtureCase(input={}, expected={}, input_path="direct")
             input_fixture_id = store_fixture_set(
                 connection,
@@ -826,19 +835,19 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
             )
             assert approved.decision == "approved"
             initial = get_active_qualification_target(connection)
-            assert initial.target_id is None and initial.generation == 0
+            assert initial.target_id == baseline_id and initial.generation == 1
             activation = ActivateQualificationTargetCommand(
                 idempotency_key="activate-composite-preview",
                 promotion_decision_id=approved.id,
-                expected_target_id=None,
-                expected_generation=0,
+                expected_target_id=baseline_id,
+                expected_generation=1,
                 actor="owner",
                 timestamp=now,
             )
             activated = activate_qualification_target(connection, activation, artifact_path)
             assert activated.outcome == "activated"
             assert activated.observed == initial
-            assert activated.resulting_generation == 1
+            assert activated.resulting_generation == 2
             assert get_active_qualification_target(connection).target_id == candidate_id
 
             assert activate_qualification_target(connection, activation, artifact_path).replayed
@@ -855,7 +864,7 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
             )
             assert stale.outcome == "active_changed"
             assert stale.observed.target_id == candidate_id
-            assert stale.resulting_generation == 1
+            assert stale.resulting_generation == 2
             assert (
                 record_qualification_promotion_decision(
                     connection,
@@ -1016,7 +1025,7 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                             "idempotency_key": "activate-rejected-composite-preview",
                             "promotion_decision_id": rejected.id,
                             "expected_target_id": candidate_id,
-                            "expected_generation": 1,
+                            "expected_generation": 2,
                         }
                     ),
                     artifact_path,
@@ -1048,7 +1057,7 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                             "idempotency_key": "activate-direct-sql-composite-preview",
                             "promotion_decision_id": forged_decision_id,
                             "expected_target_id": candidate_id,
-                            "expected_generation": 1,
+                            "expected_generation": 2,
                         }
                     ),
                     artifact_path,

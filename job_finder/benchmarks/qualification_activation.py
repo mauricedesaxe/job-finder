@@ -46,7 +46,7 @@ class QualificationActivationReceipt(_Model):
     idempotency_key: str
     outcome: Literal["activated", "active_changed"]
     promotion_decision_id: _Digest
-    baseline_target_id: QualificationTargetId
+    baseline_target_id: QualificationTargetId | None
     candidate_target_id: QualificationTargetId
     expected_target_id: QualificationTargetId | None
     expected_generation: int
@@ -144,7 +144,7 @@ def _matches_active(
     return (
         observed.target_id == command.expected_target_id
         and observed.generation == command.expected_generation
-        and (observed.target_id is None or observed.target_id == promotion.baseline_target_id)
+        and observed.target_id == promotion.baseline_target_id
     )
 
 
