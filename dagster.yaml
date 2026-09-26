@@ -3,6 +3,7 @@ run_monitoring:
   poll_interval_seconds: 120
   start_timeout_seconds: 300
   max_runtime_seconds: 14400
+  free_slots_after_run_end_seconds: 900
 storage:
   postgres:
     postgres_url:
