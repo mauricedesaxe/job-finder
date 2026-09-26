@@ -37,6 +37,10 @@ first-run check.
 
 ## Deploy a hosted instance for an owner
 
+Follow the [hosted owner onboarding runbook](docs/hosted-owner-onboarding.md)
+for the exact sequence to provision an instance, run the setup call, test the
+search, and enable daily discovery.
+
 The operator command creates one Railway project per owner. It provisions
 managed PostgreSQL, a private Dagster webserver and daemon, and a public review
 app. It generates the session, credential-encryption, and first-owner secrets
