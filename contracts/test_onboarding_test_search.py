@@ -34,8 +34,11 @@ from job_finder.evaluation.prompt_releases import (
 from job_finder.evaluation.release_targets import get_active_release_target
 from job_finder.execution_budget import (
     BudgetSaved,
+    ExecutionAdmitted,
     ExecutionBlocked,
+    admit_onboarding_test_execution,
     postgres_budget_setup_service,
+    settle_execution_budget,
 )
 from job_finder.jobs.decision_pipeline import job_id_for_url
 from job_finder.onboarding_test_search import (
@@ -51,6 +54,7 @@ from job_finder.onboarding_test_search import (
     finish_onboarding_search_query,
     finish_onboarding_provider_dispatch,
     load_onboarding_test_search,
+    onboarding_test_search_reservation_key,
     prepare_onboarding_provider_dispatch,
     reserve_onboarding_search_query,
 )
@@ -1280,3 +1284,98 @@ def _connection(
     with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
         yield connection
+
+
+def _prepare_owner_with_tight_budget(schema_name: str, timestamp: datetime) -> None:
+    with _connection(schema_name) as connection:
+        apply_migrations(connection)
+        _ = load_active_search_configuration(connection)
+    owner = postgres_owner_access_service(lambda: _connection(schema_name))
+    bootstrapped = owner.bootstrap("first secure owner password")
+    assert isinstance(bootstrapped, OwnerBootstrapped)
+    with _connection(schema_name) as connection:
+        for stage in ("preferences", "budget"):
+            _ = connection.execute(
+                """
+                UPDATE owner_onboarding
+                SET stage = %s, updated_at = %s
+                WHERE singleton_id = 1
+                """,
+                (stage, timestamp),
+            )
+    saved = postgres_budget_setup_service(lambda: _connection(schema_name)).save(
+        0,
+        Decimal("110"),
+        Decimal("50"),
+        10,
+        "owner",
+        timestamp,
+    )
+    assert isinstance(saved, BudgetSaved)
+    with _connection(schema_name) as connection:
+        _ = connection.execute(
+            """
+            UPDATE owner_onboarding
+            SET stage = 'test_search', updated_at = %s
+            WHERE singleton_id = 1
+            """,
+            (timestamp,),
+        )
+
+
+def test_budget_guards_block_replays_and_exhausted_months(authority_schema: str) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    _prepare_owner_with_tight_budget(authority_schema, now)
+    with _connection(authority_schema) as connection:
+        crashed_key = onboarding_test_search_reservation_key("crash-window")
+        admitted = admit_onboarding_test_execution(
+            connection,
+            idempotency_key=crashed_key,
+            requested_at=now,
+        )
+        assert isinstance(admitted, ExecutionAdmitted)
+        recovered = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="crash-window", actor="owner", timestamp=now
+            ),
+        )
+        assert isinstance(recovered, OnboardingTestSearchAccepted)
+        assert recovered.request.budget_reservation_key == crashed_key
+        settle_execution_budget(
+            connection,
+            idempotency_key=crashed_key,
+            pipeline_run_id=None,
+            settled_at=now + timedelta(minutes=1),
+            consume_allowance=True,
+        )
+
+        settled_key = onboarding_test_search_reservation_key("settled-before-request")
+        settled_admission = admit_onboarding_test_execution(
+            connection,
+            idempotency_key=settled_key,
+            requested_at=now + timedelta(minutes=1),
+        )
+        assert isinstance(settled_admission, ExecutionAdmitted)
+        settle_execution_budget(
+            connection,
+            idempotency_key=settled_key,
+            pipeline_run_id=None,
+            settled_at=now + timedelta(minutes=2),
+            consume_allowance=True,
+        )
+        replayed_after_settle = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="settled-before-request", actor="owner", timestamp=now
+            ),
+        )
+        assert replayed_after_settle == ExecutionBlocked(reason="already_consumed")
+
+        exhausted = create_onboarding_test_search(
+            connection,
+            CreateOnboardingTestSearch(
+                idempotency_key="third-search", actor="owner", timestamp=now + timedelta(minutes=3)
+            ),
+        )
+        assert exhausted == ExecutionBlocked(reason="monthly_budget_exhausted")
