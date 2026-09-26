@@ -46,6 +46,7 @@ _EXPECTED_TOOLS = {
     "qualification_definition_revision_get",
     "qualification_evidence_list",
     "qualification_evidence_get",
+    "qualification_evidence_execute",
     "qualification_fixture_set_store",
     "qualification_fixture_set_get",
     "qualification_relevance_input_store",

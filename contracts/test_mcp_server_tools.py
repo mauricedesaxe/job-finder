@@ -77,6 +77,7 @@ _TOOL_NAMES = {
     "qualification_definition_revision_get",
     "qualification_evidence_list",
     "qualification_evidence_get",
+    "qualification_evidence_execute",
     "qualification_fixture_set_store",
     "qualification_fixture_set_get",
     "qualification_relevance_input_store",
@@ -212,6 +213,16 @@ def test_mcp_qualification_evidence_catalog_freezes_and_reads_fixture_sets(
             assert QualificationEvidencePage.model_validate(listed.structured_content).items == ()
             with pytest.raises(ToolError, match="Qualification evidence does not exist"):
                 _ = await client.call_tool("qualification_evidence_get", {"evidence_id": "0" * 64})
+            with pytest.raises(ToolError, match="Executing build artifact is not configured"):
+                _ = await client.call_tool(
+                    "qualification_evidence_execute",
+                    {
+                        "idempotency_key": "unconfigured:qualification",
+                        "target_id": "0" * 64,
+                        "phase": "input_preparation",
+                        "input_id": fixture_set_id(fixture),
+                    },
+                )
 
     asyncio.run(exercise())
 
