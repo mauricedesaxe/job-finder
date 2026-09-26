@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Callable
 from uuid import UUID
 
@@ -47,11 +48,11 @@ def run_reprocess_command(
             _print_preview(connection, job_ids)
             return
         reset = reset_jobs(connection, job_ids)
-        print(f"Requeued {reset} job(s) on {connection.info.dsn}")
+        _ = sys.stdout.write(f"Requeued {reset} job(s)\n")
 
 
 def _print_preview(connection: Connection, job_ids: tuple[UUID, ...]) -> None:
-    print(f"Dry run: {len(job_ids)} job(s) would be requeued")
+    _ = sys.stdout.write(f"Dry run: {len(job_ids)} job(s) would be requeued\n")
     for job_id in job_ids[:20]:
         row = connection.execute(
             """
@@ -65,6 +66,6 @@ def _print_preview(connection: Connection, job_ids: tuple[UUID, ...]) -> None:
             (job_id,),
         ).fetchone()
         if row is not None:
-            print(f"  {str(job_id)[:8]}  {row[0]}  |  {row[1]}")
+            _ = sys.stdout.write(f"  {str(job_id)[:8]}  {row[0]}  |  {row[1]}\n")
     if len(job_ids) > 20:
-        print(f"  ... and {len(job_ids) - 20} more")
+        _ = sys.stdout.write(f"  ... and {len(job_ids) - 20} more\n")
