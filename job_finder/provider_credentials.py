@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from job_finder.discovery.jina import JinaReaderEnvelope, JinaSearchEnvelope
 from job_finder.evaluation.jev import JevSystemOneResponse
 from job_finder.evaluation.openrouter import OpenRouterCompletion
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
+
+_logger = logging.getLogger(__name__)
 
 
 class ProviderKind(StrEnum):
@@ -428,6 +431,7 @@ def production_provider_validators(
         search, failure = _provider_json_request(
             jina_search_url,
             secret,
+            provider="Jina search",
             body={"q": "site:boards.greenhouse.io software engineer"},
         )
         if failure is not None:
@@ -435,12 +439,15 @@ def production_provider_validators(
         try:
             search_envelope = JinaSearchEnvelope.model_validate(search)
         except ValidationError:
+            _logger.warning("Jina search validation returned an invalid response")
             return ProviderValidation()
         if search_envelope.code != 200:
+            _logger.warning("Jina search validation returned API code %s", search_envelope.code)
             return ProviderValidation()
         reader, failure = _provider_json_request(
             jina_reader_url,
             secret,
+            provider="Jina reader",
             body={"url": "https://example.com"},
         )
         if failure is not None:
@@ -448,8 +455,10 @@ def production_provider_validators(
         try:
             reader_envelope = JinaReaderEnvelope.model_validate(reader)
         except ValidationError:
+            _logger.warning("Jina reader validation returned an invalid response")
             return ProviderValidation()
         if reader_envelope.code != 200:
+            _logger.warning("Jina reader validation returned API code %s", reader_envelope.code)
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.JINA])
 
@@ -457,6 +466,7 @@ def production_provider_validators(
         response, failure = _provider_json_request(
             openrouter_url,
             secret,
+            provider="OpenRouter",
             body={
                 "model": "google/gemini-2.5-flash-lite",
                 "messages": [{"role": "user", "content": 'Return {"ready":true}.'}],
@@ -491,9 +501,13 @@ def production_provider_validators(
             if tool_call.function.name != "validate_provider":
                 raise ValueError("OpenRouter returned the wrong validation tool")
             _ = _OpenRouterValidationOutput.model_validate_json(tool_call.function.arguments)
-        except (IndexError, ValidationError, ValueError):
+        except (IndexError, ValidationError, ValueError) as error:
+            _logger.warning(
+                "OpenRouter validation returned an invalid response (%s)", type(error).__name__
+            )
             return ProviderValidation()
         if completion.usage is None:
+            _logger.warning("OpenRouter validation returned no usage data")
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.OPENROUTER])
 
@@ -501,6 +515,7 @@ def production_provider_validators(
         response, failure = _provider_json_request(
             typesafe_url,
             secret,
+            provider="Typesafe",
             body={
                 "state": "Provider capability validation.",
                 "model": "jev-1.13.0",
@@ -518,8 +533,10 @@ def production_provider_validators(
         try:
             result = JevSystemOneResponse.model_validate(response)
         except ValidationError:
+            _logger.warning("Typesafe validation returned an invalid response")
             return ProviderValidation()
         if "validation" not in result.answers:
+            _logger.warning("Typesafe validation returned no validation answer")
             return ProviderValidation()
         return ProviderValidation(capabilities=REQUIRED_CAPABILITIES[ProviderKind.TYPESAFE])
 
@@ -534,6 +551,7 @@ def _provider_json_request(
     url: str,
     secret: SecretStr,
     *,
+    provider: str,
     body: dict[str, object],
 ) -> tuple[object | None, ProviderValidation | None]:
     try:
@@ -547,13 +565,16 @@ def _provider_json_request(
             json=body,
             timeout=15,
         )
-    except requests.RequestException:
+    except requests.RequestException as error:
+        _logger.warning("%s validation request failed (%s)", provider, type(error).__name__)
         return None, ProviderValidation()
     if response.status_code in (401, 403):
         return None, ProviderValidation(invalid_credentials=True)
     if not 200 <= response.status_code < 300:
+        _logger.warning("%s validation returned HTTP %s", provider, response.status_code)
         return None, ProviderValidation()
     try:
         return json.loads(response.text), None
     except json.JSONDecodeError:
+        _logger.warning("%s validation returned invalid JSON", provider)
         return None, ProviderValidation()

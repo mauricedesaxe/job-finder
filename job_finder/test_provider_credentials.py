@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socket import socket
 from typing import cast, final, override
+from unittest.mock import patch
 
 import pytest
+import requests
 from pydantic import SecretStr
 
 from job_finder.provider_credentials import (
@@ -228,7 +230,9 @@ def test_provider_auth_failures_map_to_invalid_credentials(
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))
-def test_provider_server_errors_map_to_temporarily_unavailable(provider: ProviderKind) -> None:
+def test_provider_server_errors_map_to_temporarily_unavailable(
+    provider: ProviderKind, caplog: pytest.LogCaptureFixture
+) -> None:
     with _provider_stub([(500, "internal server error")]) as server:
         validators = production_provider_validators(**_stub_urls(server))
 
@@ -236,10 +240,13 @@ def test_provider_server_errors_map_to_temporarily_unavailable(provider: Provide
 
     assert result.capabilities == ()
     assert not result.invalid_credentials
+    assert "validation returned HTTP 500" in caplog.text
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))
-def test_provider_non_json_responses_map_to_no_capabilities(provider: ProviderKind) -> None:
+def test_provider_non_json_responses_map_to_no_capabilities(
+    provider: ProviderKind, caplog: pytest.LogCaptureFixture
+) -> None:
     with _provider_stub([(200, "not-json")]) as server:
         validators = production_provider_validators(**_stub_urls(server))
 
@@ -247,6 +254,21 @@ def test_provider_non_json_responses_map_to_no_capabilities(provider: ProviderKi
 
     assert result.capabilities == ()
     assert not result.invalid_credentials
+    assert "validation returned invalid JSON" in caplog.text
+
+
+def test_provider_request_failure_logs_without_exposing_the_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    validators = production_provider_validators()
+
+    with patch("requests.post", side_effect=requests.RequestException("password=secret-value")):
+        result = validators[ProviderKind.JINA](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert "Jina search validation request failed (RequestException)" in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "valid-secret" not in caplog.text
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))
