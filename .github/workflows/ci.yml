@@ -74,25 +74,32 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:8080/readyz
           curl --fail --silent --cookie-jar /tmp/job-finder-cookies \
             http://127.0.0.1:8080/setup --output /tmp/job-finder-setup.html
-          grep --quiet 'Create the owner password' /tmp/job-finder-setup.html
+          grep --quiet 'Create the first admin' /tmp/job-finder-setup.html
           csrf_token=$(python3 -c "import re; print(re.search(r'name=\"csrf_token\" value=\"([^\"]+)\"', open('/tmp/job-finder-setup.html').read()).group(1))")
           curl --silent --show-error --cookie /tmp/job-finder-cookies \
             --cookie-jar /tmp/job-finder-cookies --dump-header /tmp/job-finder-setup.headers \
             --output /dev/null --data-urlencode "csrf_token=$csrf_token" \
             --data-urlencode "bootstrap_token=$JOB_FINDER_BOOTSTRAP_TOKEN" \
+            --data-urlencode 'email=admin@example.com' \
             --data-urlencode 'password=ci secure owner password' \
             --data-urlencode 'password_confirmation=ci secure owner password' \
             http://127.0.0.1:8080/setup
           grep --quiet '303' /tmp/job-finder-setup.headers
           docker compose exec -T postgres psql -U postgres -d job_finder -Atc \
-            "SELECT password_hash FROM owner_onboarding WHERE singleton_id = 1" \
-            | grep --quiet '^scrypt'
+            "SELECT email FROM review_users WHERE role = 'admin' AND status = 'active'" \
+            | grep --quiet '^admin@example.com$'
           docker compose restart review
           curl --retry 12 --retry-all-errors --retry-delay 2 --fail --silent \
             http://127.0.0.1:8080/readyz
           rm -f /tmp/job-finder-cookies
+          curl --fail --silent --cookie-jar /tmp/job-finder-cookies \
+            http://127.0.0.1:8080/login --output /tmp/job-finder-login.html
+          csrf_token=$(python3 -c "import re; print(re.search(r'name=\"csrf_token\" value=\"([^\"]+)\"', open('/tmp/job-finder-login.html').read()).group(1))")
           curl --silent --show-error --cookie-jar /tmp/job-finder-cookies \
+            --cookie /tmp/job-finder-cookies \
             --dump-header /tmp/job-finder-login.headers --output /dev/null \
+            --data-urlencode "csrf_token=$csrf_token" \
+            --data-urlencode 'email=admin@example.com' \
             --data-urlencode 'password=ci secure owner password' \
             --data-urlencode 'next=/review' http://127.0.0.1:8080/login
           grep --quiet '303' /tmp/job-finder-login.headers
