@@ -544,15 +544,12 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
                 lease_expires_at=now + timedelta(minutes=5),
             )
         )
-        assert guarded.model_call_started is not None
-        assert guarded.generation_sender is not None
         guarded.model_call_started("evaluation:criterion")
         with pytest.raises(requests.Timeout):
             guarded.generation_sender("https://openrouter.test", {}, "generation-1", 30)
         generation_response = guarded.generation_sender(
             "https://openrouter.test", {}, "generation-1", 30
         )
-        assert guarded.model_sender is not None
         malformed = guarded.model_sender("https://openrouter.test", {}, {"model": "test"}, 30)
         recovered, recovered_claim = guard_onboarding_provider_boundaries(
             connection,
@@ -576,8 +573,6 @@ def test_provider_dispatch_replays_response_and_stops_unknown_outcome(
                 lease_expires_at=now + timedelta(minutes=5),
             )
         )
-        assert recovered.model_call_started is not None
-        assert recovered.model_sender is not None
         recovered.model_call_started("evaluation:criterion")
         replayed_malformed = recovered.model_sender(
             "https://openrouter.test", {}, {"model": "test"}, 30

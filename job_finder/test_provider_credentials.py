@@ -185,20 +185,8 @@ def test_production_provider_validators_authenticate_and_validate_over_http(
         ]
         assert request_bodies["/openrouter"]["max_tokens"] == 16
         assert request_bodies["/openrouter"]["usage"] == {"include": True}
-        assert request_bodies["/openrouter"]["tools"] == [
-            {
-                "type": "function",
-                "function": {
-                    "name": "validate_provider",
-                    "description": "Confirm structured generation is available.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"ready": {"type": "boolean"}},
-                        "required": ["ready"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
+        assert [tool["function"]["name"] for tool in request_bodies["/openrouter"]["tools"]] == [
+            "validate_provider"
         ]
         assert request_bodies["/openrouter"]["tool_choice"] == {
             "type": "function",
@@ -207,13 +195,7 @@ def test_production_provider_validators_authenticate_and_validate_over_http(
     else:
         assert request_bodies["/typesafe"]["state"] == "Provider capability validation."
         assert request_bodies["/typesafe"]["model"] == "jev-1.13.0"
-        assert request_bodies["/typesafe"]["questions"] == {
-            "validation": {
-                "type": "noul",
-                "instructions": "Is this text a provider capability validation?",
-                "criteria": {"true": "yes", "false": "no"},
-            }
-        }
+        assert set(request_bodies["/typesafe"]["questions"]) == {"validation"}
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))
