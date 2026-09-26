@@ -61,8 +61,10 @@ owner on the first visit to create their account. Enter your provider keys in
 the app, not in Railway. Save and publish the acquisition policy and
 qualification definition separately, activate acquisition, set the budget,
 then run the bounded test search. The test search uses a candidate qualification
-target without activating it for scheduled runs. After reviewing its evidence,
-use the qualification MCP tools to approve and activate that target. Scheduled
+target without activating it for scheduled runs. After reviewing its results,
+an operator must [prepare canonical qualification evidence](docs/qualification-evidence-operator.md)
+for every phase. Use the qualification promotion tools to approve and activate
+that target only after the evidence preview passes. Scheduled
 discovery waits for this activation. The app's `/readyz` endpoint is the Railway
 health check; only the review service receives a public domain.
 
