@@ -33,6 +33,11 @@ from job_finder.web.security import csrf_token, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page
 
 
+_TARGET_NOTICES = {
+    "candidate-created": "Candidate created.",
+}
+
+
 def register_qualification_target_routes(
     app: FastHTML,
     *,
@@ -46,7 +51,7 @@ def register_qualification_target_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(connect, token, request.query_params.get("notice"))
+        return _page(connect, token, _TARGET_NOTICES.get(request.query_params.get("notice", "")))
 
     @app.route("/configuration/qualification-targets/candidate", methods=["POST"])
     async def create_candidate(request: Request) -> HTMLResponse | RedirectResponse:
@@ -69,7 +74,7 @@ def register_qualification_target_routes(
             )
             return _page(connect, token, message, status_code=422)
         return RedirectResponse(
-            f"/configuration/qualification-targets?notice=Candidate+{candidate.id}+created",
+            "/configuration/qualification-targets?notice=candidate-created",
             status_code=303,
         )
 
