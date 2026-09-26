@@ -20,6 +20,7 @@ from job_finder.configuration_service import (
     ActivateConfigurationCommand,
     ConfigurationActivated,
     activate_search_configuration,
+    load_active_search_configuration,
     load_published_active_search_configuration,
 )
 from job_finder.database import apply_migrations
@@ -29,9 +30,14 @@ from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import ScrapeSucceeded, SearchSucceeded
 from job_finder.evaluation.openrouter import HttpResponse, RetryPolicy
 from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse, JevRetryPolicy
-from job_finder.evaluation.prompt_releases import build_prompt_release, store_prompt_release
+from job_finder.evaluation.prompt_releases import (
+    build_prompt_release,
+    load_prompt_release,
+    store_prompt_release,
+)
 from job_finder.evaluation.release_targets import get_active_release_target
-from job_finder.execution_budget import postgres_budget_setup_service
+from job_finder.evaluation.relevance_releases import load_relevance_release
+from job_finder.execution_budget import estimate_execution, postgres_budget_setup_service
 from job_finder.pipeline.orchestration import (
     PipelineBoundaries,
     ProcessingSummary,
@@ -469,6 +475,12 @@ def test_dagster_job_executes_the_domain_cycle(
         ).fetchone()
         publication = load_published_active_search_configuration(connection).publication
         active_target = get_active_release_target(connection)
+        configuration = load_active_search_configuration(connection).revision.configuration
+        prompt_release = load_prompt_release(connection, publication.prompt_release_id)
+        relevance_policy = load_relevance_release(
+            connection, active_target.target.relevance_release_id
+        ).policy
+        estimate = estimate_execution(configuration, prompt_release, relevance_policy, max_jobs=25)
         reservation = connection.execute(
             """
             SELECT reservation.configuration_revision_id,
@@ -494,9 +506,9 @@ def test_dagster_job_executes_the_domain_cycle(
         publication.revision_id,
         active_target.target.prompt_release_id,
         active_target.target.relevance_release_id,
-        128,
-        8,
-        1000,
+        estimate.search_queries,
+        estimate.logical_model_calls_per_job,
+        estimate.maximum_provider_attempts,
         True,
     )
 

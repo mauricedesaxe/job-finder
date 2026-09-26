@@ -5,6 +5,8 @@ from job_finder.execution_budget import (
     owner_may_run_onboarding_test_search,
     owner_may_run_scheduled_execution,
 )
+from job_finder.evaluation.jev import JevRetryPolicy
+from job_finder.evaluation.openrouter import RetryPolicy as OpenRouterRetryPolicy
 from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.evaluation.relevance_releases import (
     build_gemini_policy,
@@ -35,8 +37,17 @@ def test_execution_estimate_bounds_queries_and_provider_retries() -> None:
         len(configuration.search_keywords) * len(configuration.enabled_sources)
     )
     assert jev_estimate.logical_model_calls_per_job == len(prompt_release.versions)
-    assert jev_estimate.maximum_provider_attempts == 40 * 25
-    assert gemini_estimate.maximum_provider_attempts == 64 * 25
+    relevance_calls = sum(
+        version.definition.phase in ("filter", "profile") for version in prompt_release.versions
+    )
+    openrouter_calls = len(prompt_release.versions) - relevance_calls
+    per_job_attempts = relevance_calls * JevRetryPolicy().max_attempts + openrouter_calls * (
+        OpenRouterRetryPolicy().max_attempts * 2
+    )
+    assert jev_estimate.maximum_provider_attempts == per_job_attempts * 25
+    assert gemini_estimate.maximum_provider_attempts == (
+        (relevance_calls + openrouter_calls) * OpenRouterRetryPolicy().max_attempts * 2 * 25
+    )
 
 
 def test_execution_estimate_uses_prompt_release_instead_of_configuration_prompts() -> None:
