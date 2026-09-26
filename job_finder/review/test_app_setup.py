@@ -545,6 +545,180 @@ def test_budget_inspection_failure_reports_the_cause_without_exposing_secrets(
         assert "secret-password" not in caplog.text
 
 
+def test_owner_state_failure_is_logged_without_claiming_the_database_is_down(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def load_state() -> Never:
+        raise RuntimeError("secret-password")
+
+    owner = OwnerAccessService(
+        load_state=load_state,
+        authenticate=lambda _password: False,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=owner,
+        )
+    )
+
+    response = client.get("/review")
+
+    assert response.status_code == 503
+    assert "Installation state could not be loaded" in response.text
+    assert "database" not in response.text.lower()
+    assert "Installation state could not be loaded: RuntimeError" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
+
+
+@pytest.mark.parametrize(
+    ("error", "database_error"),
+    [
+        (psycopg.OperationalError("secret-password"), True),
+        (RuntimeError("secret-password"), False),
+    ],
+)
+def test_provider_state_failure_names_only_the_actual_cause(
+    error: psycopg.Error | RuntimeError,
+    database_error: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def inspect() -> Never:
+        raise error
+
+    def replace(
+        _provider: ProviderKind,
+        _secret: SecretStr,
+        _generation: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> Never:
+        pytest.fail("provider credential was unexpectedly replaced")
+
+    owner = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=True),
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    provider = ProviderSetupService(
+        inspect=inspect,
+        replace=replace,
+        advance=lambda: pytest.fail("provider setup unexpectedly advanced"),
+        resolve=lambda _provider: pytest.fail("provider credential was unexpectedly resolved"),
+    )
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=owner,
+            provider_setup_service=provider,
+        )
+    )
+    _authenticate(client)
+
+    response = client.get("/setup/providers")
+
+    assert response.status_code == 503
+    assert "Provider state could not be loaded" in response.text
+    assert ("A database error occurred." in response.text) is database_error
+    assert f"Provider state could not be loaded: {type(error).__name__}" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
+
+
+def test_test_search_state_failure_does_not_claim_the_database_is_down(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def inspect() -> Never:
+        raise RuntimeError("secret-password")
+
+    owner = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(stage=OnboardingStage.TEST_SEARCH, has_password=True),
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=owner,
+            test_search_service=OnboardingSearchService(
+                inspect=inspect,
+                launch=lambda _actor, _now: pytest.fail("search was unexpectedly launched"),
+            ),
+        )
+    )
+    _authenticate(client)
+
+    response = client.get("/setup/test-search")
+
+    assert response.status_code == 503
+    assert "Test search progress could not be loaded" in response.text
+    assert "database" not in response.text.lower()
+    assert "Test search progress could not be loaded: RuntimeError" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
+
+
+def test_budget_save_release_failure_is_logged_and_actionable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    estimate = ExecutionEstimate(
+        search_queries=1,
+        jobs_per_run=25,
+        logical_model_calls_per_job=1,
+        maximum_provider_attempts=1,
+    )
+
+    def save_budget(
+        _expected_version: int,
+        _monthly_limit: Decimal,
+        _run_allowance: Decimal,
+        _max_jobs: int,
+        _actor: str,
+        _timestamp: datetime,
+    ) -> Never:
+        raise RelevanceReleaseError("Relevance policy implementation artifacts do not match")
+
+    owner = OwnerAccessService(
+        load_state=lambda: OwnerAccessState(stage=OnboardingStage.BUDGET, has_password=True),
+        authenticate=lambda password: password == OWNER_PASSWORD,
+        bootstrap=lambda _password: pytest.fail("owner was unexpectedly bootstrapped"),
+    )
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=owner,
+            budget_setup_service=BudgetSetupService(
+                inspect=lambda _max_jobs: BudgetSetupState(policy=None, estimate=estimate),
+                save=save_budget,
+            ),
+        )
+    )
+    _authenticate(client)
+    _ = client.get("/setup/budget")
+
+    response = client.post(
+        "/setup/budget",
+        data={
+            "csrf_token": _csrf(client),
+            "expected_version": "0",
+            "monthly_limit_usd": "20.00",
+            "run_allowance_usd": "2.00",
+            "max_jobs_per_run": "25",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Activate a release compatible with this deployment" in response.text
+    assert "The budget could not be saved: active relevance release is invalid" in caplog.text
+
+
 def test_legacy_install_fails_closed_until_password_import() -> None:
     legacy = OwnerAccessService(
         load_state=lambda: OwnerAccessState(

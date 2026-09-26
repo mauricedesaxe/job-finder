@@ -37,13 +37,13 @@ from pydantic import SecretStr
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from job_finder.config import ReviewAppSettings
+from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.execution_budget import (
     BudgetChanged,
     BudgetSetupService,
     BudgetSetupState,
     ExecutionBlocked,
 )
-from job_finder.evaluation.relevance_releases import RelevanceReleaseError
 from job_finder.onboarding_test_search import OnboardingTestSearchAccepted
 from job_finder.provider_credentials import (
     ProviderCredentialChanged,
@@ -97,6 +97,24 @@ def _budget_inspection_failure(error: psycopg.Error | RuntimeError) -> HTMLRespo
         logger.error("Budget inspection failed: %s", type(error).__name__)
         message = "Budget state could not be loaded. Check the server logs."
     return state_response("Budget setup is unavailable", message, status_code=503)
+
+
+def _setup_failure(
+    title: str,
+    operation: str,
+    error: psycopg.Error | RuntimeError | ValueError,
+) -> HTMLResponse:
+    if isinstance(error, RelevanceReleaseError):
+        logger.exception("%s: active relevance release is invalid", operation)
+        message = (
+            "The active relevance release could not be validated. "
+            "Activate a release compatible with this deployment, then reload."
+        )
+    else:
+        logger.error("%s: %s", operation, type(error).__name__)
+        cause = " A database error occurred." if isinstance(error, psycopg.Error) else ""
+        message = f"{operation}.{cause} Check the server logs before retrying."
+    return state_response(title, message, status_code=503)
 
 
 def register_access_routes(
@@ -158,11 +176,11 @@ def register_access_routes(
                 document(_setup_content(csrf_token, str(error))),
                 status_code=400,
             )
-        except psycopg.Error:
-            return state_response(
+        except psycopg.Error as error:
+            return _setup_failure(
                 "Owner setup is unavailable",
-                "The password was not confirmed. Reload this page and try again.",
-                status_code=503,
+                "The owner password could not be saved",
+                error,
             )
         if isinstance(result, OwnerBootstrapConflict):
             return state_response(
@@ -184,11 +202,11 @@ def register_access_routes(
             )
         try:
             snapshot = provider_setup_service.inspect()
-        except (psycopg.Error, RuntimeError):
-            return state_response(
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
                 "Provider setup is unavailable",
-                "Provider state could not be loaded. Try again after the database recovers.",
-                status_code=503,
+                "Provider state could not be loaded",
+                error,
             )
         return HTMLResponse(document(_provider_setup_content(ensure_csrf_token(request), snapshot)))
 
@@ -232,19 +250,19 @@ def register_access_routes(
                 "owner",
                 now(),
             )
-        except (psycopg.Error, RuntimeError, ValueError):
-            return state_response(
+        except (psycopg.Error, RuntimeError, ValueError) as error:
+            return _setup_failure(
                 "Provider setup is unavailable",
-                "The credential was not stored. Reload and try again.",
-                status_code=503,
+                "The credential could not be stored",
+                error,
             )
         try:
             snapshot = provider_setup_service.inspect()
-        except (psycopg.Error, RuntimeError):
-            return state_response(
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
                 "Provider state is unavailable",
-                "The credential request finished, but current state could not be reloaded.",
-                status_code=503,
+                "The credential request finished, but current state could not be reloaded",
+                error,
             )
         if isinstance(result, ProviderCredentialRejected):
             message = (
@@ -291,11 +309,11 @@ def register_access_routes(
         try:
             result = provider_setup_service.advance()
             snapshot = provider_setup_service.inspect()
-        except (psycopg.Error, RuntimeError):
-            return state_response(
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
                 "Provider setup is unavailable",
-                "Provider state could not be confirmed. Reload and try again.",
-                status_code=503,
+                "Provider state could not be confirmed",
+                error,
             )
         if isinstance(result, ProviderStageBlocked):
             if result.state.stage is OnboardingStage.PREFERENCES:
@@ -366,20 +384,20 @@ def register_access_routes(
                 "Enter positive amounts; the run allowance cannot exceed the monthly budget.",
                 status_code=400,
             )
-        except (psycopg.Error, RuntimeError):
-            return state_response(
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
                 "Budget setup is unavailable",
-                "The budget was not confirmed. Reload and try again.",
-                status_code=503,
+                "The budget could not be saved",
+                error,
             )
         if isinstance(result, BudgetChanged):
             try:
                 current = budget_setup_service.inspect(max_jobs)
-            except (psycopg.Error, RuntimeError):
-                return state_response(
+            except (psycopg.Error, RuntimeError) as error:
+                return _setup_failure(
                     "Budget setup is unavailable",
-                    "Current budget state could not be reloaded.",
-                    status_code=503,
+                    "Current budget state could not be reloaded",
+                    error,
                 )
             return HTMLResponse(
                 document(
@@ -397,13 +415,15 @@ def register_access_routes(
     def test_search_setup(request: Request) -> HTMLResponse:
         if test_search_service is None:
             return state_response(
-                "Test search is unavailable", "Reload after the service recovers.", status_code=503
+                "Test search is unavailable",
+                "Test search storage is not configured for this deployment.",
+                status_code=503,
             )
         try:
             progress = test_search_service.inspect()
-        except (psycopg.Error, RuntimeError):
-            return state_response(
-                "Test search is unavailable", "Reload after the database recovers.", status_code=503
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
+                "Test search is unavailable", "Test search progress could not be loaded", error
             )
         refresh = (
             (5, "/setup/test-search")
@@ -422,7 +442,9 @@ def register_access_routes(
     async def test_search_submit(request: Request) -> HTMLResponse | RedirectResponse:
         if test_search_service is None:
             return state_response(
-                "Test search is unavailable", "Reload after the service recovers.", status_code=503
+                "Test search is unavailable",
+                "Test search storage is not configured for this deployment.",
+                status_code=503,
             )
         form = await request.form()
         if not valid_csrf(request, form_text(form, "csrf_token")):
@@ -431,11 +453,11 @@ def register_access_routes(
             )
         try:
             result = test_search_service.launch(actor, now())
-        except (psycopg.Error, RuntimeError):
-            return state_response(
+        except (psycopg.Error, RuntimeError) as error:
+            return _setup_failure(
                 "Test search is unavailable",
-                "No new search was started. Reload and try again.",
-                status_code=503,
+                "The test search could not be started",
+                error,
             )
         if isinstance(result, ExecutionBlocked):
             return state_response(
@@ -492,11 +514,11 @@ async def _check_login(
         )
     try:
         authenticated = await to_thread.run_sync(owner_access.authenticate, password)
-    except psycopg.Error:
-        return state_response(
+    except psycopg.Error as error:
+        return _setup_failure(
             "Sign in is unavailable",
-            "The password could not be checked. Reload this page and try again.",
-            status_code=503,
+            "The owner password could not be checked",
+            error,
         )
     if authenticated:
         login_failures.pop(client_id, None)
@@ -532,11 +554,11 @@ def require_owner(
         return Response(status_code=404)
     try:
         state = owner_access.load_state()
-    except (psycopg.Error, RuntimeError):
-        return state_response(
+    except (psycopg.Error, RuntimeError) as error:
+        return _setup_failure(
             "Owner access is unavailable",
-            "The installation state could not be loaded. Try again after the database recovers.",
-            status_code=503,
+            "Installation state could not be loaded",
+            error,
         )
     if state.stage is OnboardingStage.LEGACY_OWNER_IMPORT:
         return state_response(
