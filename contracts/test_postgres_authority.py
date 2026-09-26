@@ -199,10 +199,10 @@ from job_finder.evaluation.models import (
     RelevanceReleaseId,
 )
 from job_finder.evaluation.manifest_execution import run_stored_manifest
-from job_finder.jobs.decision_pipeline import (
+from job_finder.jobs.decision_persistence import postgres_decision_store
+from job_finder.jobs.decisions import (
     DecisionContext,
     PersistedDecision,
-    postgres_decision_store,
     process_qualified_job,
 )
 from job_finder.jobs.enrichment import EnrichedJob

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from job_finder.jobs.decision_pipeline import job_id_for_url
+from job_finder.jobs.listings import job_id_for_url
 from job_finder.pipeline.connection import Connection, require_autocommit
 
 
