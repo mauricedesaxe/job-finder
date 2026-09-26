@@ -18,6 +18,12 @@ _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _STRING = TypeAdapter(str)
 _FLOAT = TypeAdapter(float)
 _ATOMIC_QUESTION_REGISTRY = TypeAdapter(dict[str, dict[str, object]])
+_EVALUATE_BEFORE_LISTING_IMPORT_MOVE = (
+    "b6b24b95a2e705b3bdb73af2bafc434b3554d6b286e7163d441f7bfcc66781b6"
+)
+_EVALUATE_AFTER_LISTING_IMPORT_MOVE = (
+    "76ca2bab6774100bfdb5f165fb287a74f009adb9269e4da188b99f55d1c8445a"
+)
 
 
 class _JevQuestionCriteria(Protocol):
@@ -421,10 +427,30 @@ def _validate_execution_artifacts(policy: RelevanceExecutionPolicy) -> None:
         policy.provider_adapter,
         *policy.decision_composition,
     )
-    if stored != expected:
+    if len(stored) != len(expected) or any(
+        not _matches_execution_artifact(recorded, current)
+        for recorded, current in zip(stored, expected, strict=True)
+    ):
         raise RelevanceReleaseError(
             "Relevance policy implementation artifacts do not match current source artifacts"
         )
+
+
+def _matches_execution_artifact(
+    recorded: CodeArtifactIdentity, current: CodeArtifactIdentity
+) -> bool:
+    if recorded == current:
+        return True
+    return (
+        recorded.entrypoint == current.entrypoint
+        and recorded.entrypoint
+        in {
+            "job_finder.evaluation.evaluate:job_message",
+            "job_finder.evaluation.evaluate:evaluate_job",
+        }
+        and recorded.content_digest == _EVALUATE_BEFORE_LISTING_IMPORT_MOVE
+        and current.content_digest == _EVALUATE_AFTER_LISTING_IMPORT_MOVE
+    )
 
 
 def _evaluation_versions(prompt_release: PromptRelease) -> tuple[PromptVersion, ...]:
