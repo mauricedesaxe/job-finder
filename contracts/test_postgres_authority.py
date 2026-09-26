@@ -48,7 +48,9 @@ from job_finder.benchmarks.manifests import (
     list_manifests,
     preview_manifest,
 )
+from job_finder.benchmarks.manifests import load_manifest
 from job_finder.benchmarks.promotions import record_prompt_promotion_decision
+from job_finder.benchmarks.scoring import EvaluationMetrics, score_results, score_trial
 from job_finder.benchmarks.qualification_activation import (
     ActivateQualificationTargetCommand,
     QualificationActivationError,
@@ -65,6 +67,7 @@ from job_finder.benchmarks.qualification_evidence import (
     PhaseFixtureSet,
     ProviderExperimentSettings,
     QualificationEvidence,
+    QualificationEvidenceId,
     RelevanceExperimentInput,
     qualification_evidence_id,
     record_relevance_comparison,
@@ -125,7 +128,9 @@ from job_finder.evaluation.qualification_components import (
     InputPreparationContent,
     RelevanceContent,
     QualificationTargetContent,
+    QualificationTargetId,
     build_qualification_target,
+    component_release_id,
     load_qualification_target,
     qualification_target_id,
     store_component_release,
@@ -834,6 +839,7 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
             assert activated.observed == initial
             assert activated.resulting_generation == 1
             assert get_active_qualification_target(connection).target_id == candidate_id
+
             assert activate_qualification_target(connection, activation, artifact_path).replayed
             with pytest.raises(QualificationActivationError, match="another activation request"):
                 _ = activate_qualification_target(
@@ -1047,6 +1053,215 @@ def test_composite_promotion_preview_requires_exact_canonical_evidence(
                     artifact_path,
                 )
             assert get_active_qualification_target(connection).target_id == candidate_id
+
+            final_manifest_id, _, final_rates = _seed_evaluation_execution_context(connection, now)
+            frozen = RelevanceExperimentInput(
+                manifest_id=final_manifest_id,
+                exchange_rates=final_rates,
+                provider_settings=ProviderExperimentSettings(
+                    provider="openrouter", temperature=0, retry_limit=0
+                ),
+                input_path="direct",
+            )
+            experiment_id = store_relevance_experiment_input(
+                connection, frozen, created_at=now, created_by="owner"
+            )
+            final_manifest = load_manifest(connection, final_manifest_id)
+            trials = tuple(
+                score_trial(
+                    "0" * 64, case, trial_index, Qualified(reason="matched", profile_name="profile")
+                )
+                for case in final_manifest.cases
+                for trial_index in range(case.trial_count)
+            )
+            metrics = score_results(final_manifest, trials)
+            comparison_relevance = store_relevance_release(
+                connection,
+                build_relevance_release(
+                    build_gemini_policy(load_prompt_release(connection, release_id))
+                ),
+                created_at=now + timedelta(seconds=1),
+                created_by="owner",
+            )
+            second_changed = components[1].model_copy(
+                update={"relevance_release_id": comparison_relevance.id}
+            )
+            _ = store_component_release(
+                connection,
+                second_changed,
+                created_at=now + timedelta(seconds=1),
+                created_by="owner",
+            )
+            comparison_candidate = build_qualification_target(
+                components[0], second_changed, components[2], components[3]
+            )
+            comparison_candidate_id = store_qualification_target(
+                connection,
+                comparison_candidate,
+                created_at=now + timedelta(seconds=1),
+                created_by="owner",
+            )
+            baseline_release_id = bind_qualification_prompt_release(
+                connection, baseline_id, artifact_path, created_at=now, created_by="owner"
+            )
+            candidate_release_id = bind_qualification_prompt_release(
+                connection,
+                comparison_candidate_id,
+                artifact_path,
+                created_at=now + timedelta(seconds=1),
+                created_by="owner",
+            )
+
+            def relevance_attempt_for(compiled_release_id: str) -> ModelCallAttempt:
+                relevance_prompt = next(
+                    version
+                    for version in load_prompt_release(
+                        connection, PromptReleaseId(compiled_release_id)
+                    ).versions
+                    if version.definition.phase == "filter"
+                )
+                return replace(
+                    attempt,
+                    id=uuid4(),
+                    context=ModelCallContext(
+                        processing_attempt_id=uuid4(),
+                        pipeline_run_id=uuid4(),
+                        prompt_release_id=PromptReleaseId(compiled_release_id),
+                        operation_key="relevance",
+                        input_digest=InputDigest("c" * 64),
+                    ),
+                    prompt_name=relevance_prompt.definition.name,
+                    prompt_version_id=relevance_prompt.id,
+                )
+
+            baseline_attempt = relevance_attempt_for(baseline_release_id)
+            candidate_attempt = relevance_attempt_for(candidate_release_id)
+
+            def relevance_evidence(
+                target: QualificationTargetId, attempt_item: ModelCallAttempt
+            ) -> QualificationEvidence:
+                component = components[1] if target == baseline_id else second_changed
+                return QualificationEvidence(
+                    target_id=target,
+                    phase="relevance",
+                    component_release_id=component_release_id(component),
+                    experiment_input_id=experiment_id,
+                    executor_artifact_id=artifact.id,
+                    origin="canonical",
+                    outcome="passed",
+                    result={
+                        "metrics": metrics.model_dump(mode="json"),
+                        "trials": [trial.model_dump(mode="json") for trial in trials],
+                    },
+                    attempts=(provider_attempt_evidence(attempt_item),),
+                    completed_at=now,
+                )
+
+            baseline_relevance = relevance_evidence(baseline_id, baseline_attempt)
+            candidate_relevance = relevance_evidence(comparison_candidate_id, candidate_attempt)
+            baseline_relevance_id = store_qualification_evidence(
+                connection, baseline_relevance, created_at=now, created_by="owner"
+            )
+            candidate_relevance_id = store_qualification_evidence(
+                connection, candidate_relevance, created_at=now, created_by="owner"
+            )
+            store_provider_attempts(
+                connection,
+                baseline_relevance,
+                (baseline_attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            store_provider_attempts(
+                connection,
+                candidate_relevance,
+                (candidate_attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            comparison_id = record_relevance_comparison(
+                connection,
+                baseline_relevance,
+                candidate_relevance,
+                created_at=now,
+                created_by="owner",
+            )
+            assert baseline_relevance_id != candidate_relevance_id
+            relevance_candidate_input_evidence = input_evidence.model_copy(
+                update={
+                    "target_id": comparison_candidate_id,
+                    "component_release_id": component_release_id(components[0]),
+                }
+            )
+            relevance_candidate_attempt = replace(attempt, id=uuid4())
+            relevance_candidate_composition_evidence = composition_evidence.model_copy(
+                update={
+                    "target_id": comparison_candidate_id,
+                    "attempts": (provider_attempt_evidence(relevance_candidate_attempt),),
+                    "completed_at": now + timedelta(seconds=2),
+                }
+            )
+            relevance_candidate_input_id = store_qualification_evidence(
+                connection,
+                relevance_candidate_input_evidence,
+                created_at=now,
+                created_by="owner",
+            )
+            relevance_candidate_composition_id = store_qualification_evidence(
+                connection,
+                relevance_candidate_composition_evidence,
+                created_at=now,
+                created_by="owner",
+            )
+            store_provider_attempts(
+                connection,
+                relevance_candidate_composition_evidence,
+                (relevance_candidate_attempt,),
+                provider="openrouter",
+                created_at=now,
+                created_by="owner",
+            )
+            with_comparison = preview_qualification_promotion(
+                connection,
+                baseline_id,
+                comparison_candidate_id,
+                PromotionEvidenceSelection(
+                    input_preparation_evidence_id=QualificationEvidenceId(
+                        relevance_candidate_input_id
+                    ),
+                    composition_evidence_id=QualificationEvidenceId(
+                        relevance_candidate_composition_id
+                    ),
+                    relevance_evidence_id=QualificationEvidenceId(candidate_relevance_id),
+                    relevance_comparison_id=comparison_id,
+                ),
+                artifact_path,
+            )
+            assert with_comparison.eligible, with_comparison.failures
+            approved_comparison = record_qualification_promotion_decision(
+                connection,
+                baseline_target_id=baseline_id,
+                candidate_target_id=comparison_candidate_id,
+                evidence=PromotionEvidenceSelection(
+                    input_preparation_evidence_id=QualificationEvidenceId(
+                        relevance_candidate_input_id
+                    ),
+                    composition_evidence_id=QualificationEvidenceId(
+                        relevance_candidate_composition_id
+                    ),
+                    relevance_evidence_id=QualificationEvidenceId(candidate_relevance_id),
+                    relevance_comparison_id=comparison_id,
+                ),
+                artifact_path=artifact_path,
+                decision="approved",
+                reason="Frozen comparison passed",
+                actor="owner",
+                created_at=now,
+                idempotency_key="approved-changed-relevance",
+            )
+            assert approved_comparison.decision == "approved"
 
 
 def _store_default_qualification_target(
@@ -7636,3 +7851,88 @@ def _insert_run(
         """,
         (run_id, f"run:{run_id}", now, now),
     )
+
+
+def test_direct_relevance_experiment_records_a_failing_threshold_outcome(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    artifact_path = Path(__file__).resolve().parents[1] / "implementation-artifact.json"
+    with _connection(authority_schema) as connection:
+        manifest_id, legacy_target, rates = _seed_evaluation_execution_context(connection, now)
+        artifact, _, target = _store_default_qualification_target(
+            connection, now, relevance_release_id=legacy_target.relevance_release_id
+        )
+        target_id = qualification_target_id(target)
+        frozen = RelevanceExperimentInput(
+            manifest_id=manifest_id,
+            exchange_rates=rates,
+            provider_settings=ProviderExperimentSettings(
+                provider="openrouter", temperature=0, retry_limit=0
+            ),
+            input_path="direct",
+        )
+        input_id = store_relevance_experiment_input(
+            connection, frozen, created_at=now, created_by="owner"
+        )
+
+        def send(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout: float,
+        ) -> HttpResponse:
+            return HttpResponse(
+                status_code=200,
+                body=json.dumps(
+                    {
+                        "id": "generation-failed",
+                        "model": "google/gemini-2.5-flash-001",
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {
+                                            "type": "function",
+                                            "function": {
+                                                "name": "evaluate_job",
+                                                "arguments": json.dumps(
+                                                    {"pass": False, "reason": "not a match"}
+                                                ),
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "cost": 0.00012},
+                    }
+                ),
+            )
+
+        try:
+            assert write_implementation_artifact(artifact_path.parent, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=now, created_by="owner"
+            )
+            evidence_id = execute_relevance_experiment(
+                connection,
+                target_id,
+                input_id,
+                artifact_path,
+                api_key="fixture-key",
+                completed_at=now,
+                created_by="owner",
+                openrouter_sender=send,
+            )
+            row = connection.execute(
+                "SELECT content FROM qualification_phase_evidence WHERE id = %s",
+                (evidence_id,),
+            ).fetchone()
+            assert row is not None
+            evidence = QualificationEvidence.model_validate(row[0])
+            assert evidence.outcome == "failed"
+            metrics = EvaluationMetrics.model_validate(evidence.result["metrics"])
+            assert metrics.false_negative_rate > 0
+        finally:
+            artifact_path.unlink(missing_ok=True)

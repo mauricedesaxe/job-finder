@@ -499,15 +499,20 @@ def test_split_pages_do_not_reflect_unknown_notices(authority_schema: str) -> No
         targets = client.get(f"/configuration/qualification-targets?notice={hostile}")
         assert targets.status_code == 200
         assert "<script>alert(1)</script>" not in targets.text
-        assert "Candidate created." in client.get(
-            "/configuration/qualification-targets?notice=candidate-created"
-        ).text
+        assert (
+            "Candidate created."
+            in client.get("/configuration/qualification-targets?notice=candidate-created").text
+        )
         promotion = client.get(f"/configuration/qualification-promotion?notice={hostile}")
         assert promotion.status_code == 200
         assert "<script>alert(1)</script>" not in promotion.text
-        assert "Decision recorded." in client.get(
-            "/configuration/qualification-promotion?notice=decision-recorded"
-        ).text
-        assert "Qualification activated." in client.get(
-            "/configuration/qualification-promotion?notice=qualification-activated"
-        ).text
+        assert (
+            "Decision recorded."
+            in client.get("/configuration/qualification-promotion?notice=decision-recorded").text
+        )
+        assert (
+            "Qualification activated."
+            in client.get(
+                "/configuration/qualification-promotion?notice=qualification-activated"
+            ).text
+        )

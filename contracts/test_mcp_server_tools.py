@@ -197,9 +197,10 @@ def test_mcp_qualification_evidence_catalog_freezes_and_reads_fixture_sets(
                 "qualification_relevance_input_get",
                 {"input_id": experiment_input_id(experiment)},
             )
-            assert RelevanceExperimentInput.model_validate(
-                fetched_experiment.structured_content
-            ) == experiment
+            assert (
+                RelevanceExperimentInput.model_validate(fetched_experiment.structured_content)
+                == experiment
+            )
             with pytest.raises(ToolError, match="Relevance experiment input does not exist"):
                 _ = await client.call_tool(
                     "qualification_relevance_input_get", {"input_id": "0" * 64}
@@ -446,9 +447,7 @@ def test_serve_mcp_builds_a_working_server_from_the_environment(
             )
             assert published.active.generation == 0
             with pytest.raises(ToolError, match="Search configuration revision does not exist"):
-                _ = await client.call_tool(
-                    "configuration_revision_get", {"revision_id": "a" * 64}
-                )
+                _ = await client.call_tool("configuration_revision_get", {"revision_id": "a" * 64})
 
     asyncio.run(exercise())
     with _connection(authority_schema) as connection:

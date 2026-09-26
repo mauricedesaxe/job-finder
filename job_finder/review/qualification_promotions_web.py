@@ -114,7 +114,7 @@ def register_qualification_promotion_routes(
                 "approved" if decision == "approved" else "rejected"
             )
             with connect() as connection:
-                result = record_qualification_promotion_decision(
+                _ = record_qualification_promotion_decision(
                     connection,
                     baseline_target_id=baseline,
                     candidate_target_id=candidate,
