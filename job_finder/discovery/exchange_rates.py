@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
+import logging
 from typing import ClassVar, Literal
 
 import requests
 from pydantic import BaseModel, ConfigDict, ValidationError
+
+_logger = logging.getLogger(__name__)
 
 FRANKFURTER_URL = "https://api.frankfurter.app/latest?from=USD"
 DEFAULT_RATES: dict[str, Decimal] = {
@@ -74,7 +77,10 @@ def fetch_exchange_rates(
             source="frankfurter",
             observed_at=observed_at,
         )
-    except (requests.RequestException, ValidationError, ValueError, ZeroDivisionError):
+    except (requests.RequestException, ValidationError, ValueError, ZeroDivisionError) as error:
+        _logger.warning(
+            "Exchange rate fetch failed (%s); using fallback rates", type(error).__name__
+        )
         return ExchangeRateSnapshot(
             rates=DEFAULT_RATES,
             source="fallback",

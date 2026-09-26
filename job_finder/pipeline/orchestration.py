@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+import logging
 from typing import ClassVar, Literal, assert_never
 from uuid import UUID
 
@@ -95,6 +97,7 @@ from job_finder.review.queue import enqueue_qualified_review_item
 from job_finder.search_configuration import load_search_configuration_revision
 
 POLICY_VERSION = "orchestration-v1"
+_logger = logging.getLogger(__name__)
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _KEYWORDS: TypeAdapter[tuple[str, ...]] = TypeAdapter(tuple[str, ...])
 _ATS_EVIDENCE: TypeAdapter[AtsEvidence] = TypeAdapter(AtsEvidence)
@@ -128,7 +131,9 @@ class DiscoverySummary(PipelineServiceModel):
     new_work_count: int
 
     def require_complete(self, *, max_unavailable_ratio: float = 0.2) -> None:
-        if self.query_count == 0 or self.unavailable_query_count == self.query_count:
+        if self.query_count == 0:
+            raise RuntimeError("No discovery queries were generated")
+        if self.unavailable_query_count == self.query_count:
             raise RuntimeError("Every discovery query remained unavailable")
         if self.unavailable_query_count / self.query_count > max_unavailable_ratio:
             raise RuntimeError(
@@ -190,11 +195,13 @@ def discover_jobs(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = tuple(executor.map(run_search, queries))
     unavailable_count = 0
+    unavailable_codes: Counter[str] = Counter()
     discovered_count = 0
     new_work_count = 0
     for query, result in zip(queries, results, strict=True):
         if isinstance(result, JinaUnavailable):
             unavailable_count += 1
+            unavailable_codes[result.error_code] += 1
             continue
         registration = register_discoveries(
             connection,
@@ -206,6 +213,11 @@ def discover_jobs(
         )
         discovered_count += registration.discovered_count
         new_work_count += registration.new_work_count
+    if unavailable_codes:
+        _logger.warning(
+            "Discovery queries unavailable: %s",
+            ", ".join(f"{code}={count}" for code, count in sorted(unavailable_codes.items())),
+        )
     return DiscoverySummary(
         query_count=len(queries),
         unavailable_query_count=unavailable_count,

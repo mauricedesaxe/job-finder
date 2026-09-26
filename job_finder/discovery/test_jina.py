@@ -58,7 +58,7 @@ def test_rejects_a_discovery_summary_without_queries() -> None:
         new_work_count=0,
     )
 
-    with pytest.raises(RuntimeError, match="Every discovery query remained unavailable"):
+    with pytest.raises(RuntimeError, match="No discovery queries were generated"):
         summary.require_complete()
 
 
