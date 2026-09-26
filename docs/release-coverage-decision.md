@@ -105,11 +105,11 @@ closure does not qualify as replay support.
    only after no active target requires it and its execution-availability policy
    is satisfied. Never rewrite a persisted digest.
 
-The `evaluate.py`, `jev.py`, and `openrouter.py` byte-preservation rule remains in
-force until composite execution replaces those legacy artifacts. The job-model
-move in `job-finder-rac.2.1` must wait for that cutover because `evaluate.py`
-imports the legacy model. The old model remains a real legacy executor dependency,
-not a compatibility facade.
+The job-model move changes an import in `evaluate.py` and therefore changes the
+legacy relevance release's source hash. A deployment using legacy execution must
+evaluate and activate a new release target before resuming discovery. Historical
+release and run records stay unchanged; the old release cannot execute under the
+new source hash. `jev.py` and `openrouter.py` remain unchanged.
 
 ## Rejected choices
 
