@@ -6,6 +6,7 @@ import re
 from uuid import UUID
 
 import psycopg
+import pytest
 from starlette.testclient import TestClient
 
 from job_finder.operations.spend import (
@@ -97,6 +98,30 @@ def test_the_activity_page_passes_filters_to_the_query() -> None:
     empty = client.get("/operations/runs")
 
     assert "No activity recorded yet." in empty.text
+
+
+def test_unconfigured_operations_pages_name_the_missing_service(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _client(_queue())
+
+    activity = client.get("/operations/runs")
+    run = client.get(f"/operations/runs/{UUID(int=2)}")
+    detail = client.get(f"/operations/work/{UUID(int=31)}")
+    analytics = client.get("/operations/analytics")
+
+    assert activity.status_code == 503
+    assert "Recent activity is not configured for this deployment" in activity.text
+    assert run.status_code == 503
+    assert "Pipeline run details are not configured for this deployment" in run.text
+    assert detail.status_code == 503
+    assert "Work item details are not configured for this deployment" in detail.text
+    assert analytics.status_code == 503
+    assert "Model spend analytics are not configured for this deployment" in analytics.text
+    assert "Recent activity load failed: OperationsUnavailable" in caplog.text
+    assert "Pipeline run detail load failed: OperationsUnavailable" in caplog.text
+    assert "Work item detail load failed: OperationsUnavailable" in caplog.text
+    assert "Model spend analytics load failed: OperationsUnavailable" in caplog.text
 
 
 def test_the_activity_page_falls_back_to_the_first_page_for_a_broken_cursor() -> None:
@@ -354,6 +379,29 @@ def test_dismissal_from_the_detail_page_returns_to_the_detail_page() -> None:
     )
 
 
+def test_unconfigured_dismissal_does_not_report_a_dagster_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _client(_queue(), operations=OperationsService(load=lambda: _operations_snapshot()))
+
+    response = client.post(
+        "/operations/dismiss",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "dismiss",
+            "expected_attempt_count": "3",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Work dismissal is not configured for this deployment" in response.text
+    assert "Dagster control is unavailable" not in response.text
+    assert "Work dismissal failed: OperationsUnavailable" in caplog.text
+    assert "private-key" not in caplog.text
+
+
 def test_the_run_detail_page_links_attempts_to_work_detail() -> None:
     runs = RunsService(
         detail=lambda _run_id: RunDetail(
@@ -546,7 +594,9 @@ def test_the_analytics_page_renders_an_empty_state_without_calls() -> None:
     assert "latency-per-day-chart" not in response.text
 
 
-def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
+def test_the_analytics_page_degrades_when_the_database_is_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     def broken() -> SpendAnalytics:
         raise psycopg.Error("connection refused")
 
@@ -556,6 +606,7 @@ def test_the_analytics_page_degrades_when_the_database_is_unreachable() -> None:
 
     assert response.status_code == 503
     assert "Model spend analytics are unavailable" in response.text
+    assert "Model spend analytics load failed: Error" in caplog.text
 
 
 def test_the_operations_pages_link_to_each_other() -> None:

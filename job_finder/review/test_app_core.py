@@ -295,7 +295,9 @@ def test_the_control_plane_page_names_a_missing_configuration() -> None:
     assert len(re.findall(r"<button[^>]+disabled", response.text)) == 10
 
 
-def test_the_control_plane_page_reports_an_unreachable_dagster() -> None:
+def test_the_control_plane_page_reports_an_unreachable_dagster(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     def unavailable() -> ControlPlaneSnapshot:
         raise ControlPlaneUnavailable("Dagster GraphQL request failed")
 
@@ -313,6 +315,7 @@ def test_the_control_plane_page_reports_an_unreachable_dagster() -> None:
     assert "Dagster GraphQL request failed" in response.text
     assert "Schedule controls are off" in response.text
     assert "Pipeline evidence elsewhere stays current" in response.text
+    assert "Dagster control load failed: Dagster GraphQL request failed" in caplog.text
 
 
 def test_run_now_requires_csrf_before_calling_the_control_service() -> None:
@@ -675,6 +678,29 @@ def test_work_recovery_passes_an_exact_typed_command_and_redirects() -> None:
             requested_at=NOW,
         )
     ]
+
+
+def test_unconfigured_work_recovery_names_the_missing_service(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _client(_queue(), operations=OperationsService(load=lambda: _operations_snapshot()))
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Work recovery is not configured for this deployment" in response.text
+    assert "database" not in response.text.lower()
+    assert "Work recovery failed: OperationsUnavailable" in caplog.text
 
 
 def test_work_recovery_rejects_malformed_identity_before_calling_the_service() -> None:

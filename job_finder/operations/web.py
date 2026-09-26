@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -120,6 +121,13 @@ from job_finder.web.shell import (
 )
 
 DateTimeClock = Callable[[], datetime]
+_logger = logging.getLogger(__name__)
+
+
+def _log_failure(operation: str, error: Exception) -> None:
+    detail = str(error) if isinstance(error, ControlPlaneUnavailable) else type(error).__name__
+    _logger.error("%s: %s", operation, detail)
+
 
 _OPERATIONS_NOTICES = {
     "run-started": "Run submitted to Dagster.",
@@ -166,6 +174,7 @@ def register_operations_routes(
         try:
             control_snapshot = controls.load()
         except ControlPlaneUnavailable as error:
+            _log_failure("Dagster control load failed", error)
             control_snapshot = None
             control_error = str(error)
         else:
@@ -211,20 +220,22 @@ def register_operations_routes(
                 )
             )
         except ControlPlaneUnavailable as error:
-            return _operations_unavailable_response(str(error))
+            _log_failure("Dagster run launch failed", error)
+            return _dagster_unavailable_response(str(error))
         if isinstance(result, RunStarted):
             notice = "run-replayed" if result.replayed else "run-started"
             return RedirectResponse(f"/operations/control?notice={notice}", status_code=303)
         if isinstance(result, ControlConflict):
             return _operations_conflict_response(result.reason)
         if isinstance(result, RunLaunchUncertain):
+            _logger.warning("Dagster run launch could not be confirmed: %s", result.reason)
             return _uncertain_run_response(
                 csrf_token,
                 job_name=job_name,
                 idempotency_key=idempotency_key,
                 detail=result.reason,
             )
-        return _operations_unavailable_response(result.reason)
+        return _dagster_unavailable_response(result.reason)
 
     @app.route("/operations/schedule", methods=["POST"], name="create_review_app_change_schedule")
     async def change_schedule(request: Request) -> HTMLResponse | RedirectResponse:
@@ -248,7 +259,8 @@ def register_operations_routes(
                 )
             )
         except ControlPlaneUnavailable as error:
-            return _operations_unavailable_response(str(error))
+            _log_failure("Dagster schedule change failed", error)
+            return _dagster_unavailable_response(str(error))
         if isinstance(result, ScheduleChanged):
             notice = (
                 "schedule-replayed"
@@ -265,7 +277,7 @@ def register_operations_routes(
             )
         if isinstance(result, ControlConflict):
             return _operations_conflict_response(result.reason)
-        return _operations_unavailable_response(result.reason)
+        return _dagster_unavailable_response(result.reason)
 
     @app.route("/operations/recovery", methods=["POST"], name="create_review_app_recover_operation")
     async def recover_operation(request: Request) -> HTMLResponse | RedirectResponse:
@@ -292,8 +304,9 @@ def register_operations_routes(
             return _malformed_operations_response(str(error))
         try:
             result = operations.recover(command)
-        except (OperationsUnavailable, psycopg.Error):
-            return _work_recovery_unavailable_response()
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Work recovery failed", error)
+            return _work_recovery_unavailable_response(error)
         match result:
             case WorkRecoveryApplied():
                 notice = (
@@ -329,10 +342,15 @@ def register_operations_routes(
         query = _activity_query_from_params(request.query_params)
         try:
             page = activity.list(query)
-        except (OperationsUnavailable, psycopg.Error):
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Recent activity load failed", error)
             return state_response(
                 "Recent activity is unavailable",
-                "The database could not be reached. Reload this page to try again.",
+                (
+                    "The database could not be reached. Reload this page to try again."
+                    if isinstance(error, psycopg.Error)
+                    else "Recent activity is not configured for this deployment."
+                ),
                 status_code=503,
             )
         token = csrf_token(request)
@@ -373,10 +391,15 @@ def register_operations_routes(
             detail = runs.detail(parsed_id)
         except RunNotFound:
             return _run_not_found_response()
-        except psycopg.Error:
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Pipeline run detail load failed", error)
             return state_response(
                 "Pipeline runs are unavailable",
-                "The database could not be reached. Reload this page to try again.",
+                (
+                    "The database could not be reached. Reload this page to try again."
+                    if isinstance(error, psycopg.Error)
+                    else "Pipeline run details are not configured for this deployment."
+                ),
                 status_code=503,
             )
         token = csrf_token(request)
@@ -405,10 +428,15 @@ def register_operations_routes(
             detail = operations.work_detail(parsed_id)
         except WorkItemNotFound:
             return _work_item_not_found_response()
-        except (OperationsUnavailable, psycopg.Error):
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Work item detail load failed", error)
             return state_response(
                 "Work item detail is unavailable",
-                "The database could not be reached. Reload this page to try again.",
+                (
+                    "The database could not be reached. Reload this page to try again."
+                    if isinstance(error, psycopg.Error)
+                    else "Work item details are not configured for this deployment."
+                ),
                 status_code=503,
             )
         token = csrf_token(request)
@@ -440,10 +468,15 @@ def register_operations_routes(
     def spend_analytics_page(request: Request) -> HTMLResponse:
         try:
             spend = analytics.load()
-        except psycopg.Error:
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Model spend analytics load failed", error)
             return state_response(
                 "Model spend analytics are unavailable",
-                "The database could not be reached. Reload this page to try again.",
+                (
+                    "The database could not be reached. Reload this page to try again."
+                    if isinstance(error, psycopg.Error)
+                    else "Model spend analytics are not configured for this deployment."
+                ),
                 status_code=503,
             )
         token = csrf_token(request)
@@ -486,8 +519,17 @@ def register_operations_routes(
             return _malformed_operations_response(str(error))
         try:
             result = operations.dismiss(command)
-        except (OperationsUnavailable, psycopg.Error):
-            return _operations_unavailable_response("Work dismissal is unavailable")
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Work dismissal failed", error)
+            return state_response(
+                "Work dismissal is unavailable",
+                (
+                    "The dismissal result could not be confirmed. Reload the work item before retrying."
+                    if isinstance(error, psycopg.Error)
+                    else "Work dismissal is not configured for this deployment."
+                ),
+                status_code=503,
+            )
         match result:
             case WorkDismissalApplied():
                 if command.action is DismissalAction.DISMISS:
@@ -536,8 +578,9 @@ def register_operations_routes(
             return _malformed_operations_response(str(error))
         try:
             result = operations.reevaluate(command)
-        except (OperationsUnavailable, psycopg.Error):
-            return _reevaluation_unavailable_response(csrf_token, command)
+        except (OperationsUnavailable, psycopg.Error) as error:
+            _log_failure("Reevaluation request failed", error)
+            return _reevaluation_unavailable_response(csrf_token, command, error)
         match result:
             case JobReevaluationAccepted():
                 notice = "reevaluation-replayed" if result.replayed else "reevaluation-requested"
@@ -1451,7 +1494,7 @@ def _operations_conflict_response(detail: str) -> HTMLResponse:
     )
 
 
-def _operations_unavailable_response(detail: str) -> HTMLResponse:
+def _dagster_unavailable_response(detail: str) -> HTMLResponse:
     return state_response(
         "Dagster control is unavailable",
         detail,
@@ -1460,10 +1503,16 @@ def _operations_unavailable_response(detail: str) -> HTMLResponse:
     )
 
 
-def _work_recovery_unavailable_response() -> HTMLResponse:
+def _work_recovery_unavailable_response(
+    error: OperationsUnavailable | psycopg.Error,
+) -> HTMLResponse:
     return state_response(
         "Work recovery is unavailable",
-        "The database could not apply this command. Reload operations and try again.",
+        (
+            "The recovery result could not be confirmed. Reload the work item before retrying."
+            if isinstance(error, psycopg.Error)
+            else "Work recovery is not configured for this deployment."
+        ),
         action=A("Reload operations", href="/", cls="retry"),
         status_code=503,
     )
@@ -1736,8 +1785,16 @@ def _reevaluation_not_found_response() -> HTMLResponse:
 
 
 def _reevaluation_unavailable_response(
-    csrf_token: str, command: JobReevaluationCommand
+    csrf_token: str,
+    command: JobReevaluationCommand,
+    error: OperationsUnavailable | psycopg.Error,
 ) -> HTMLResponse:
+    if isinstance(error, OperationsUnavailable):
+        return state_response(
+            "Reevaluation is unavailable",
+            "Reevaluation is not configured for this deployment.",
+            status_code=503,
+        )
     retry_form = Form(
         Input(type="hidden", name="csrf_token", value=csrf_token),
         Input(

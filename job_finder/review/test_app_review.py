@@ -148,8 +148,38 @@ def test_job_reevaluation_passes_an_exact_typed_command_and_redirects() -> None:
     ]
 
 
-def test_uncertain_job_reevaluation_preserves_the_exact_retry_command() -> None:
+def test_unconfigured_job_reevaluation_reports_missing_service(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     client = _client(_queue())
+
+    response = client.post(
+        "/operations/reevaluation",
+        data={
+            "csrf_token": _csrf(client),
+            "expected_decision_id": "1" * 64,
+            "expected_snapshot_id": "2" * 64,
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Reevaluation is not configured for this deployment" in response.text
+    assert "Reevaluation status is uncertain" not in response.text
+    assert "Reevaluation request failed: OperationsUnavailable" in caplog.text
+    assert "private-key" not in caplog.text
+
+
+def test_uncertain_job_reevaluation_preserves_the_exact_retry_command(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def reevaluate(_command: JobReevaluationCommand) -> JobReevaluationResult:
+        raise psycopg.OperationalError("secret-password")
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), reevaluate=reevaluate),
+    )
 
     response = client.post(
         "/operations/reevaluation",
@@ -167,6 +197,8 @@ def test_uncertain_job_reevaluation_preserves_the_exact_retry_command() -> None:
     assert response.text.count('name="idempotency_key" value="the-same-private-key"') == 1
     assert 'name="expected_decision_id" value="' + "1" * 64 + '"' in response.text
     assert 'name="expected_snapshot_id" value="' + "2" * 64 + '"' in response.text
+    assert "Reevaluation request failed: OperationalError" in caplog.text
+    assert "secret-password" not in response.text + caplog.text
 
 
 def test_the_queue_renders_day_sections_newest_first() -> None:
