@@ -7,7 +7,9 @@ from typing import assert_never
 from uuid import uuid4
 
 import psycopg
+from pydantic import TypeAdapter
 
+from job_finder.ats.models import AtsEvidence
 from job_finder.benchmarks.manifests import EvaluationManifestCase
 from job_finder.benchmarks.executions import (
     CaseEvaluator,
@@ -47,6 +49,8 @@ from job_finder.evaluation.relevance_releases import (
     RelevanceExecutionPolicy,
 )
 from job_finder.jobs.listings import JobListing
+
+_ATS_EVIDENCE: TypeAdapter[AtsEvidence] = TypeAdapter(AtsEvidence)
 
 
 def run_stored_manifest(
@@ -160,6 +164,13 @@ def _case_evaluator(
                 return result.result
             return result
 
-        return evaluate_job(job, release, evaluate_criterion, rates=rates)
+        ats_evidence = (
+            _ATS_EVIDENCE.validate_python(case.input.ats_evidence)
+            if case.input.ats_evidence is not None
+            else None
+        )
+        return evaluate_job(
+            job, release, evaluate_criterion, rates=rates, ats_evidence=ats_evidence
+        )
 
     return evaluate_case

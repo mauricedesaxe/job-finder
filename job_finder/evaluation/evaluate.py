@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 
+from job_finder.ats.models import AtsAvailable, AtsEvidence
+from job_finder.ats.policy import format_location_context
 from job_finder.evaluation.models import (
     CriterionAccepted,
     CriterionResult,
@@ -37,6 +39,7 @@ def evaluate_job(
     evaluate: CriterionEvaluator,
     *,
     rates: str,
+    ats_evidence: AtsEvidence | None = None,
 ) -> EvaluationResult:
     job_input = job_message(job)
     filters = tuple(version for version in release.versions if version.definition.phase == "filter")
@@ -46,7 +49,12 @@ def evaluate_job(
     if not filters or not profiles:
         raise ValueError("Evaluation requires at least one filter and one profile")
 
-    filter_decision = _evaluate_filters(job_input, rates, filters, evaluate)
+    location_context = (
+        format_location_context(ats_evidence, job.description)
+        if isinstance(ats_evidence, AtsAvailable)
+        else ""
+    )
+    filter_decision = _evaluate_filters(job_input, rates, filters, evaluate, location_context)
     if filter_decision is not None:
         return filter_decision
     return _evaluate_profiles(job_input, rates, profiles, evaluate)
@@ -68,9 +76,11 @@ def _evaluate_filters(
     rates: str,
     filters: tuple[PromptVersion, ...],
     evaluate: CriterionEvaluator,
+    location_context: str,
 ) -> Rejected | OperationalFailure | None:
     filter_results = tuple(
-        evaluate(version, _prompt_values(version, job_input, rates)) for version in filters
+        evaluate(version, _prompt_values(version, job_input, rates, location_context))
+        for version in filters
     )
     for result in filter_results:
         if isinstance(result, OperationalError):
@@ -106,14 +116,18 @@ def _evaluate_profiles(
     return Rejected(reason="No profiles matched")
 
 
-def _prompt_values(version: PromptVersion, job_input: str, rates: str) -> Mapping[str, str]:
-    values = {"job": _filter_evidence(version.definition.criterion, job_input)}
+def _prompt_values(
+    version: PromptVersion, job_input: str, rates: str, location_context: str = ""
+) -> Mapping[str, str]:
+    values = {"job": _filter_evidence(version.definition.criterion, job_input, location_context)}
     if "rates" in version.definition.inputs:
         values["rates"] = rates
     return values
 
 
-def _filter_evidence(criterion: str, job_input: str) -> str:
+def _filter_evidence(criterion: str, job_input: str, location_context: str = "") -> str:
+    if criterion == "remote-europe-eligible":
+        return f"{job_input}\n\n{location_context}" if location_context else job_input
     pattern = _FILTER_EVIDENCE_PATTERNS.get(criterion)
     if pattern is None:
         return job_input

@@ -426,6 +426,7 @@ def _process_claim(
             now,
         ),
         rates=format_compensation_rates(run.exchange_rates.rates),
+        ats_evidence=ats_evidence,
     )
     if isinstance(evaluation, RetryableOperationalError):
         return _schedule_retry(

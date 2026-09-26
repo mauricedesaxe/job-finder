@@ -98,7 +98,7 @@ def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
     assert policy.provider_adapter == baseline.provider_adapter
     assert policy.decision_composition == baseline.decision_composition
     assert relevance_release.id == (
-        "9e8b4d5c846a25b40b652498ef008169940589bc24933951fdd6ce71376fdfbb"
+        "c5af1a0a2dff819057597edc5951ee78bf77f4295f6a9778fa84a9db536139d9"
     )
     validate_release_target(
         ReleaseTarget(
@@ -149,17 +149,10 @@ def test_policies_identify_the_actual_checked_in_execution_sources() -> None:
     }
 
 
-def test_existing_release_survives_the_listing_import_move() -> None:
+def test_prior_release_cannot_execute_after_location_semantics_change() -> None:
     prompt_release = build_prompt_release()
     policy = build_jev_atomic_policy()
-    old_digest = "b6b24b95a2e705b3bdb73af2bafc434b3554d6b286e7163d441f7bfcc66781b6"
-    assert (
-        source_artifact_identity(
-            "job_finder.evaluation.evaluate:job_message",
-            Path(__file__).with_name("evaluate.py"),
-        ).content_digest
-        == "76ca2bab6774100bfdb5f165fb287a74f009adb9269e4da188b99f55d1c8445a"
-    )
+    old_digest = "76ca2bab6774100bfdb5f165fb287a74f009adb9269e4da188b99f55d1c8445a"
     legacy_policy = policy.model_copy(
         update={
             "input_serialization": policy.input_serialization.model_copy(
@@ -173,14 +166,15 @@ def test_existing_release_survives_the_listing_import_move() -> None:
     )
     release = build_relevance_release(legacy_policy)
 
-    validate_release_target(
-        ReleaseTarget(
-            prompt_release_id=prompt_release.id,
-            relevance_release_id=release.id,
-        ),
-        prompt_release,
-        release,
-    )
+    with pytest.raises(RelevanceReleaseError, match="implementation artifacts"):
+        validate_release_target(
+            ReleaseTarget(
+                prompt_release_id=prompt_release.id,
+                relevance_release_id=release.id,
+            ),
+            prompt_release,
+            release,
+        )
 
 
 def test_source_content_changes_release_identity_without_rewriting_project_sources(

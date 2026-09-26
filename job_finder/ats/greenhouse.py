@@ -6,7 +6,7 @@ from typing import ClassVar, override
 
 from pydantic import BaseModel, ConfigDict, StrictInt
 
-from job_finder.ats.models import AtsAvailable, unique_locations
+from job_finder.ats.models import ApplicationQuestion, AtsAvailable, unique_locations
 from job_finder.urls import parse_http_url
 
 
@@ -23,11 +23,26 @@ class _GreenhouseOffice(_GreenhouseWireModel):
     location: str | None = None
 
 
+class _GreenhouseChoice(_GreenhouseWireModel):
+    label: str
+
+
+class _GreenhouseQuestionField(_GreenhouseWireModel):
+    values: list[_GreenhouseChoice] | None = None
+
+
+class _GreenhouseQuestion(_GreenhouseWireModel):
+    label: str
+    required: bool = False
+    fields: list[_GreenhouseQuestionField] | None = None
+
+
 class _GreenhouseJob(_GreenhouseWireModel):
     id: StrictInt
     location: _GreenhouseLocation | None = None
     offices: list[_GreenhouseOffice] | None = None
     content: str | None = None
+    questions: list[_GreenhouseQuestion] | None = None
 
 
 def parse_greenhouse_url(url: str) -> tuple[str, str] | None:
@@ -62,6 +77,16 @@ def parse_greenhouse_job(payload: object) -> AtsAvailable:
         workplace_type=None,
         country=country,
         description=_strip_html(unescape(job.content)) if job.content else None,
+        application_questions=tuple(
+            ApplicationQuestion(
+                label=question.label,
+                required=question.required,
+                choices=tuple(
+                    choice.label for field in question.fields or () for choice in field.values or ()
+                ),
+            )
+            for question in job.questions or ()
+        ),
     )
 
 
