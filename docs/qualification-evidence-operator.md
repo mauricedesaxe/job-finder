@@ -2,9 +2,10 @@
 
 Use this procedure after the owner publishes an acquisition policy and a
 qualification definition, creates a candidate at
-`/configuration/qualification-targets`, and enters provider credentials. The
-bounded test search helps the owner inspect results, but it does not create the
-five evidence records needed for qualification promotion.
+`/configuration/qualification-targets`, and enters Jina, OpenRouter, and
+Typesafe credentials. The bounded test search helps the owner inspect results,
+but it does not create the five evidence records needed for qualification
+promotion.
 
 The operator needs access to the owner's Railway project and its review service.
 Evidence execution calls providers and can incur charges. Agree on a cost limit

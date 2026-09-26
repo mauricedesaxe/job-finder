@@ -25,8 +25,8 @@ for each person whose data should be isolated.
 ### Deployment Dependencies
 
 - A Railway account with a workspace that can deploy four services.
-- A Jina API key and an OpenRouter API key for searches and evaluations. Enter
-  these in the app during setup, rather than in Railway variables.
+- Jina, OpenRouter, and Typesafe API keys for searches and evaluations. Enter
+  all three in the app during setup, rather than in Railway variables.
 
 ## First-time setup
 
@@ -35,8 +35,8 @@ for each person whose data should be isolated.
 3. In Railway, open the `review` service's Variables tab and reveal or copy the
    generated `JOB_FINDER_BOOTSTRAP_TOKEN`. Keep it private. Use it to create the
    first owner account on `/setup`.
-4. In the app, add your Jina and OpenRouter keys, choose job preferences, set a
-   spend budget, and run the bounded test search.
+4. In the app, add your Jina, OpenRouter, and Typesafe keys, choose job
+   preferences, set a spend budget, and run the bounded test search.
 5. After the owner account exists, remove `JOB_FINDER_BOOTSTRAP_TOKEN` from the
    `review` service. Check `/operations/control` for the background schedules.
 
