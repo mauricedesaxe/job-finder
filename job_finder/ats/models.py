@@ -20,6 +20,12 @@ class CompensationObservation(AtsModel):
     period: CompensationPeriod | None = None
 
 
+class ApplicationQuestion(AtsModel):
+    label: str
+    required: bool
+    choices: tuple[str, ...] = ()
+
+
 class AtsAvailable(AtsModel):
     kind: Literal["available"] = "available"
     source: AtsSource
@@ -29,6 +35,7 @@ class AtsAvailable(AtsModel):
     country: str | None
     description: str | None = None
     compensation: CompensationObservation | None = None
+    application_questions: tuple[ApplicationQuestion, ...] = ()
 
 
 class AtsUnavailable(AtsModel):

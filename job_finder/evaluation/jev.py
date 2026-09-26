@@ -208,8 +208,8 @@ ATOMIC_QUESTIONS: Mapping[str, Mapping[str, JevNoulQuestionTemplate]] = MappingP
                 "requires_non_europe_residence": _atomic_question(
                     "Does the role require residence or work authorization in a country outside Europe?"
                 ),
-                "lower_compensation_market_skew": _atomic_question(
-                    "Are the allowed locations dominated by lower-compensation markets with only one or two token higher-compensation European locations?"
+                "remote_excludes_romania": _atomic_question(
+                    "Does the listing or required application form explicitly restrict this fully remote role to residence, work authorization, or permitted remote locations that exclude Romania? Treat a closed list of allowed countries or states without Romania as a restriction. A headquarters address, optional office, preferred time zone, or vague location label alone is not enough."
                 ),
             }
         ),

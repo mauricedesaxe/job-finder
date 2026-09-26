@@ -12,6 +12,7 @@ from job_finder.ats.client import JsonHttpResponse, fetch_ats_data
 from job_finder.ats.greenhouse import parse_greenhouse_job, parse_greenhouse_url
 from job_finder.ats.lever import parse_lever_job, parse_lever_url
 from job_finder.ats.models import (
+    ApplicationQuestion,
     AtsAvailable,
     AtsNotApplicable,
     AtsUnavailable,
@@ -117,6 +118,22 @@ def test_parses_structured_compensation_from_a_recorded_ashby_payload() -> None:
     )
 
 
+def test_ashby_ignores_invalid_compensation_on_unrelated_jobs() -> None:
+    evidence = parse_ashby_job(
+        {
+            "jobs": [
+                {"id": "unrelated", "compensation": {"summaryComponents": [{"minValue": 1.5}]}},
+                {"id": "target", "location": "New York", "workplaceType": "Hybrid"},
+            ]
+        },
+        "target",
+    )
+
+    assert evidence is not None
+    assert evidence.location == "New York"
+    assert evidence.workplace_type == "Hybrid"
+
+
 @pytest.mark.parametrize(
     ("interval", "expected"),
     ((None, None), ("year", None), ("1 fortnight", None), ("  1 YEAR ", "year")),
@@ -188,7 +205,7 @@ def test_models_unavailable_and_unsupported_sources_explicitly() -> None:
     assert detect_ats_source("https://example.com/?next=jobs.lever.co/x/y") is None
 
 
-def test_rejects_only_explicit_on_site_evidence() -> None:
+def test_rejects_explicit_office_attendance() -> None:
     onsite = AtsAvailable(
         source="ashby",
         location="New York",
@@ -201,7 +218,34 @@ def test_rejects_only_explicit_on_site_evidence() -> None:
     decision = ats_structural_filter(onsite)
     assert decision.kind == "rejected"
     assert "New York" in decision.reason
+    hybrid = onsite.model_copy(update={"workplace_type": "Hybrid"})
+    assert ats_structural_filter(hybrid).kind == "rejected"
     assert ats_structural_filter(unavailable).kind == "pass"
+
+
+def test_greenhouse_form_preserves_location_choices() -> None:
+    evidence = parse_greenhouse_job(
+        {
+            "id": 1,
+            "location": {"name": "Remote"},
+            "questions": [
+                {
+                    "label": "Do you live in one of these states?",
+                    "required": True,
+                    "fields": [{"values": [{"label": "California"}, {"label": "Oregon"}]}],
+                },
+            ],
+        }
+    )
+
+    assert evidence.application_questions == (
+        ApplicationQuestion(
+            label="Do you live in one of these states?",
+            required=True,
+            choices=("California", "Oregon"),
+        ),
+    )
+    assert "Choices: California, Oregon" in format_ats_block(evidence)
 
 
 def test_formats_structured_evidence_for_the_evaluator() -> None:
@@ -319,7 +363,7 @@ def test_posts_the_title_to_workable() -> None:
             "greenhouse-openup-senior-ai-engineer.json",
             (
                 "GET",
-                "https://boards-api.greenhouse.io/v1/boards/openup/jobs/4847917101",
+                "https://boards-api.greenhouse.io/v1/boards/openup/jobs/4847917101?questions=true",
                 None,
             ),
         ),

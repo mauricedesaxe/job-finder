@@ -41,7 +41,7 @@ def test_keeps_filters_and_profiles_eager_and_ordered() -> None:
 
     def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
         calls.append(version.definition.criterion)
-        if version.definition.criterion in ("remote-europe-eligible", "compensation-minimum"):
+        if version.definition.criterion == "compensation-minimum":
             assert values["job"].endswith("Description:\nNo relevant evidence stated.")
         else:
             assert values["job"] == job_message(JOB)
@@ -124,7 +124,7 @@ Build customer-facing AI features."""
     _ = evaluate_job(job, release, evaluate, rates=RATES)
 
     assert "Remote across Europe." in inputs["remote-europe-eligible"]
-    assert "compensation reflects" not in inputs["remote-europe-eligible"]
+    assert "compensation reflects" in inputs["remote-europe-eligible"]
     assert "compensation reflects" in inputs["compensation-minimum"]
     assert "Remote across Europe." not in inputs["compensation-minimum"]
     assert "Build customer-facing AI features." in inputs["early-stage-product-engineer"]

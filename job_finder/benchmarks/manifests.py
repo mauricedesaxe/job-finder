@@ -6,7 +6,7 @@ from typing import Annotated, ClassVar, Literal, Self
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 import job_finder.projections.outbox as _projection_outbox
 from job_finder.benchmarks.identity import canonical_digest
@@ -52,6 +52,7 @@ class EvaluationCaseInput(_ManifestModel):
     original_outcome: EvaluationOutcome
     review_decision: Literal["pursue", "reject"]
     target_profile: str | None
+    ats_evidence: JsonValue | None = None
 
 
 class CuratedReviewEvent(_ManifestModel):
@@ -416,7 +417,7 @@ def _load_current_cases(
                s.title, s.company, s.raw_url, s.source,
                COALESCE(sc.description, s.description), s.location,
                s.keywords, s.date_posted, s.observed_at, d.outcome,
-               e.decision, e.target_profile
+               e.decision, e.target_profile, s.ats_evidence
         FROM current_curations c
         JOIN review_events e ON e.id = c.review_event_id
         JOIN review_items i ON i.id = e.review_item_id
@@ -459,6 +460,7 @@ def _load_current_cases(
                         "original_outcome": row[13],
                         "review_decision": row[14],
                         "target_profile": row[15],
+                        "ats_evidence": row[16],
                     },
                 }
             )

@@ -60,7 +60,7 @@ def fetch_ats_data(
             org, job_id = parsed
             response = fetch(
                 "GET",
-                f"https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{job_id}",
+                f"https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{job_id}?questions=true",
                 None,
             )
             if response.status_code != 200:

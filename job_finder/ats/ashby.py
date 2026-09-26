@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictInt
 
 from job_finder.ats.models import (
     AtsAvailable,
@@ -76,7 +76,7 @@ class _AshbyJob(_AshbyWireModel):
 
 
 class _AshbyResponse(_AshbyWireModel):
-    jobs: list[_AshbyJob]
+    jobs: list[dict[str, JsonValue]]
 
 
 def parse_ashby_url(url: str) -> tuple[str, str] | None:
@@ -93,9 +93,12 @@ def parse_ashby_url(url: str) -> tuple[str, str] | None:
 
 def parse_ashby_job(payload: object, job_id: str) -> AtsAvailable | None:
     response = _AshbyResponse.model_validate(payload)
-    job = next((candidate for candidate in response.jobs if candidate.id == job_id), None)
-    if job is None:
+    raw_job = next(
+        (candidate for candidate in response.jobs if candidate.get("id") == job_id), None
+    )
+    if raw_job is None:
         return None
+    job = _AshbyJob.model_validate(raw_job)
     primary = job.location or ""
     secondary = tuple(location.location for location in job.secondary_locations or ())
     country = (
