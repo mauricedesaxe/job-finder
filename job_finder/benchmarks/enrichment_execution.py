@@ -14,11 +14,10 @@ from job_finder.benchmarks.provider_attempts import (
 )
 from job_finder.benchmarks.qualification_evidence import (
     FixtureSetId,
-    PhaseFixtureSet,
     ProviderExperimentSettings,
     QualificationEvidence,
     QualificationEvidenceId,
-    fixture_set_id,
+    load_fixture_set,
     store_qualification_evidence,
 )
 from job_finder.evaluation.models import (
@@ -65,15 +64,7 @@ def execute_enrichment_fixture_set(
     generation_sender: GenerationSender | None = None,
 ) -> QualificationEvidenceId:
     compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
-    row = connection.execute(
-        "SELECT content FROM qualification_fixture_sets WHERE id = %s AND phase = 'enrichment'",
-        (fixture_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("Enrichment fixture set not found")
-    fixtures = PhaseFixtureSet.model_validate(row[0])
-    if fixtures.phase != "enrichment" or fixture_set_id(fixtures) != fixture_id:
-        raise ValueError("Enrichment fixture set has invalid identity")
+    fixtures = load_fixture_set(connection, fixture_id, phase="enrichment")
     prompt = compiled.prompt_release.version("job-finder-enrichment")
     attempts: list[ModelCallAttempt] = []
     results: list[dict[str, JsonValue]] = []

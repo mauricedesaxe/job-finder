@@ -11,10 +11,9 @@ from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable, A
 from job_finder.ats.policy import ats_structural_filter
 from job_finder.benchmarks.qualification_evidence import (
     FixtureSetId,
-    PhaseFixtureSet,
     QualificationEvidence,
     QualificationEvidenceId,
-    fixture_set_id,
+    load_fixture_set,
     store_qualification_evidence,
 )
 from job_finder.evaluation.qualification_components import QualificationTargetId
@@ -85,15 +84,7 @@ def execute_input_preparation_fixture_set(
     created_by: str,
 ) -> QualificationEvidenceId:
     target = load_compiled_qualification_target(connection, target_id, artifact_path).target
-    row = connection.execute(
-        "SELECT content FROM qualification_fixture_sets WHERE id = %s AND phase = 'input_preparation'",
-        (fixture_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("Input preparation fixture set not found")
-    fixtures = PhaseFixtureSet.model_validate(row[0])
-    if fixtures.phase != "input_preparation" or fixture_set_id(fixtures) != fixture_id:
-        raise ValueError("Input preparation fixture set has invalid identity")
+    fixtures = load_fixture_set(connection, fixture_id, phase="input_preparation")
     results: list[dict[str, JsonValue]] = []
     passed_count = 0
     for case in fixtures.cases:
