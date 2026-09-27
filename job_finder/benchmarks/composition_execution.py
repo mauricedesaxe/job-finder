@@ -21,7 +21,7 @@ from job_finder.benchmarks.qualification_evidence import (
     ProviderExperimentSettings,
     QualificationEvidence,
     QualificationEvidenceId,
-    fixture_set_id,
+    load_fixture_set,
     store_qualification_evidence,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
@@ -184,15 +184,7 @@ def _load_composition_inputs(
     compiled: CompiledQualificationTarget,
     fixture_id: FixtureSetId,
 ) -> tuple[PhaseFixtureSet, tuple[CompositionFixtureInput, ...]]:
-    row = connection.execute(
-        "SELECT content FROM qualification_fixture_sets WHERE id = %s AND phase = 'composition'",
-        (fixture_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("Composition fixture set not found")
-    fixtures = PhaseFixtureSet.model_validate(row[0])
-    if fixtures.phase != "composition" or fixture_set_id(fixtures) != fixture_id:
-        raise ValueError("Composition fixture set has invalid identity")
+    fixtures = load_fixture_set(connection, fixture_id, phase="composition")
     inputs = tuple(CompositionFixtureInput.model_validate(case.input) for case in fixtures.cases)
     _validate_shared_inputs(inputs)
     relevance = load_relevance_release(connection, compiled.target.relevance.relevance_release_id)

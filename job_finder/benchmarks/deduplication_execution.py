@@ -18,7 +18,7 @@ from job_finder.benchmarks.qualification_evidence import (
     ProviderExperimentSettings,
     QualificationEvidence,
     QualificationEvidenceId,
-    fixture_set_id,
+    load_fixture_set,
     store_qualification_evidence,
 )
 from job_finder.evaluation.models import (
@@ -69,15 +69,7 @@ def execute_deduplication_fixture_set(
     generation_sender: GenerationSender | None = None,
 ) -> QualificationEvidenceId:
     compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
-    row = connection.execute(
-        "SELECT content FROM qualification_fixture_sets WHERE id = %s AND phase = 'deduplication'",
-        (fixture_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("Deduplication fixture set not found")
-    fixtures = PhaseFixtureSet.model_validate(row[0])
-    if fixtures.phase != "deduplication" or fixture_set_id(fixtures) != fixture_id:
-        raise ValueError("Deduplication fixture set has invalid identity")
+    fixtures = load_fixture_set(connection, fixture_id, phase="deduplication")
     _require_ledger_coverage(fixtures)
     prompt = compiled.prompt_release.version("job-finder-title-deduplication")
     attempts: list[ModelCallAttempt] = []

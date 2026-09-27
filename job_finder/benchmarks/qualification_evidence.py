@@ -20,6 +20,7 @@ ExperimentInputId = NewType("ExperimentInputId", str)
 FixtureSetId = NewType("FixtureSetId", str)
 QualificationEvidenceId = NewType("QualificationEvidenceId", str)
 _DIGEST = r"^[0-9a-f]{64}$"
+FixturePhase = Literal["input_preparation", "enrichment", "deduplication", "composition"]
 Phase = Literal["input_preparation", "relevance", "enrichment", "deduplication", "composition"]
 
 
@@ -50,7 +51,7 @@ class FixtureCase(EvidenceModel):
 
 class PhaseFixtureSet(EvidenceModel):
     schema_version: Literal[1] = 1
-    phase: Literal["input_preparation", "enrichment", "deduplication", "composition"]
+    phase: FixturePhase
     cases: tuple[FixtureCase, ...] = Field(min_length=1)
 
 
@@ -179,6 +180,23 @@ def store_fixture_set(
     if row is None or PhaseFixtureSet.model_validate(row[0]) != content:
         raise ValueError("Stored fixture set differs from its identity")
     return identity
+
+
+def load_fixture_set(
+    connection: psycopg.Connection[tuple[object, ...]],
+    identity: FixtureSetId,
+    *,
+    phase: FixturePhase,
+) -> PhaseFixtureSet:
+    row = connection.execute(
+        "SELECT phase, content FROM qualification_fixture_sets WHERE id = %s", (identity,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"{phase.replace('_', ' ').capitalize()} fixture set not found")
+    content = PhaseFixtureSet.model_validate(row[1])
+    if str(row[0]) != phase or content.phase != phase or fixture_set_id(content) != identity:
+        raise ValueError(f"{phase.replace('_', ' ').capitalize()} fixture set has invalid identity")
+    return content
 
 
 def store_qualification_evidence(

@@ -2,20 +2,90 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast, final
 
+import psycopg
 import pytest
 from pydantic import ValidationError
 
 from job_finder.benchmarks.qualification_evidence import (
+    FixtureCase,
+    FixtureSetId,
+    PhaseFixtureSet,
     ProviderExperimentSettings,
     QualificationEvidence,
     RelevanceExperimentInput,
     experiment_input_id,
+    fixture_set_id,
+    load_fixture_set,
     require_comparable_relevance_evidence,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.qualification_components import ComponentReleaseId, QualificationTargetId
 from job_finder.evaluation.implementation_artifacts import ImplementationArtifactId
+
+
+@final
+class _QueryResult:
+    def __init__(self, row: tuple[object, ...] | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._row
+
+
+@final
+class _FixtureConnection:
+    def __init__(self, row: tuple[object, ...] | None) -> None:
+        self._row = row
+
+    def execute(self, _query: str, _params: tuple[object, ...]) -> _QueryResult:
+        return _QueryResult(self._row)
+
+
+def _fixture_connection(
+    row: tuple[object, ...] | None,
+) -> psycopg.Connection[tuple[object, ...]]:
+    return cast(psycopg.Connection[tuple[object, ...]], cast(object, _FixtureConnection(row)))
+
+
+def _fixture_set() -> PhaseFixtureSet:
+    return PhaseFixtureSet(
+        phase="enrichment",
+        cases=(FixtureCase(input={}, expected={}, input_path="direct"),),
+    )
+
+
+def test_load_fixture_set_checks_stored_content_identity() -> None:
+    fixture = _fixture_set()
+    identity = fixture_set_id(fixture)
+
+    assert (
+        load_fixture_set(
+            _fixture_connection(("enrichment", fixture.model_dump(mode="json"))),
+            identity,
+            phase="enrichment",
+        )
+        == fixture
+    )
+
+    with pytest.raises(ValueError, match="invalid identity"):
+        _ = load_fixture_set(
+            _fixture_connection(("composition", fixture.model_dump(mode="json"))),
+            identity,
+            phase="enrichment",
+        )
+    with pytest.raises(ValueError, match="invalid identity"):
+        _ = load_fixture_set(
+            _fixture_connection(("enrichment", fixture.model_dump(mode="json"))),
+            FixtureSetId("0" * 64),
+            phase="enrichment",
+        )
+
+
+def test_load_fixture_set_rejects_missing_content() -> None:
+    with pytest.raises(ValueError, match="Enrichment fixture set not found"):
+        _ = load_fixture_set(_fixture_connection(None), FixtureSetId("0" * 64), phase="enrichment")
 
 
 def test_relevance_comparison_uses_one_frozen_input() -> None:
