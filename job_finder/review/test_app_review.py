@@ -53,6 +53,17 @@ from job_finder.review.test_app_support import (
 )
 
 
+def _decision_button_states(html: str) -> dict[str, str]:
+    states = {}
+    for tag in re.findall(r'<button[^>]*aria-pressed="(?:true|false)"[^>]*>', html):
+        value = re.search(r'value="([^"]+)"', tag)
+        pressed = re.search(r'aria-pressed="(true|false)"', tag)
+        assert value is not None
+        assert pressed is not None
+        states[value.group(1)] = pressed.group(1)
+    return states
+
+
 def test_work_recovery_reports_a_stale_expected_state_as_conflict() -> None:
     def recover(command: WorkRecoveryCommand) -> WorkRecoveryResult:
         receipt = _recovery_receipt(command, outcome="stale_state", prior_state="completed")
@@ -328,11 +339,11 @@ def test_a_job_page_marks_every_decision_as_not_recorded_before_review() -> None
 
     response = _client(_queue(item)).get(f"/review/item/{item.id}")
 
-    assert re.findall(r'<button[^>]+aria-pressed="(true|false)"', response.text) == [
-        "false",
-        "false",
-        "false",
-    ]
+    assert _decision_button_states(response.text) == {
+        "pursue": "false",
+        "unsure": "false",
+        "reject": "false",
+    }
 
 
 def test_a_job_page_names_the_lane_and_why_it_is_here() -> None:
@@ -389,10 +400,9 @@ def test_a_job_page_renders_the_decision_form_for_a_queued_item() -> None:
     response = _client(_queue(item)).get(f"/review/item/{item.id}")
 
     assert response.status_code == 200
-    assert (
-        f'<form enctype="multipart/form-data" action="/review/{item.id}" method="post">'
-        in response.text
-    )
+    assert f'action="/review/{item.id}"' in response.text
+    assert 'method="post"' in response.text
+    assert 'enctype="multipart/form-data"' in response.text
     assert re.search(r'name="csrf_token" value="[^"]+"', response.text) is not None
     assert 'name="evaluation_id" value="0000' in response.text
     assert 'name="snapshot_id" value="0000' in response.text
@@ -414,7 +424,9 @@ def test_a_day_section_renders_reviewed_jobs_after_the_waiting_ones() -> None:
     assert response.status_code == 200
     assert "1 waiting · 1 reviewed" in response.text
     assert "Reviewed (1)" in response.text
-    assert '<span class="chip decision-chip">reject</span>' in response.text
+    assert re.search(
+        r'<span[^>]*class="[^"]*decision-chip[^"]*"[^>]*>\s*reject\s*</span>', response.text
+    )
     assert 'class="job-list-item reviewed-item"' in response.text
     assert "Applied AI Engineer 2" in response.text
     assert "Acme · Remote" in response.text
@@ -450,15 +462,17 @@ def test_a_reviewed_item_page_opens_in_revision_mode() -> None:
     assert "Revise the recorded decision" in response.text
     assert "<legend>Decision</legend>" not in response.text
     assert "Need salary detail." in response.text
-    assert '<input type="checkbox" name="block_company" checked>' in response.text
+    block_company_input = re.search(r'<input[^>]*name="block_company"[^>]*>', response.text)
+    assert block_company_input is not None
+    assert "checked" in block_company_input.group(0)
     assert 'value="unsure" aria-pressed="true"' in response.text
     assert 'value="pursue" aria-pressed="false"' in response.text
     assert 'value="reject" aria-pressed="false"' in response.text
-    assert re.findall(r'<button[^>]+aria-pressed="(true|false)"', response.text) == [
-        "false",
-        "true",
-        "false",
-    ]
+    assert _decision_button_states(response.text) == {
+        "pursue": "false",
+        "unsure": "true",
+        "reject": "false",
+    }
     assert 'class="workbench"' in response.text
 
 
@@ -756,3 +770,58 @@ def test_review_pages_render_queue_database_failure_as_retryable_unavailable(
     assert "previous decisions are unchanged" in response.text
     assert "OperationalError" in caplog.text
     assert "secret-value" not in caplog.text
+
+
+def test_renders_a_queue_load_failure_during_submission_as_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    item = _item(TODAY, "qualified")
+    submissions: list[ReviewSubmission] = []
+    loads = 0
+
+    def unavailable_after_the_form_was_rendered() -> ReviewQueue:
+        nonlocal loads
+        loads += 1
+        if loads > 1:
+            raise psycopg.OperationalError("password=secret-value")
+        return _queue(item)
+
+    client = TestClient(
+        create_review_app(
+            unavailable_after_the_form_was_rendered,
+            SETTINGS,
+            submit_review=lambda review: (
+                submissions.append(review) or ReviewSaved(review_event_id=UUID(int=9))
+            ),
+            owner_access_service=OWNER_ACCESS,
+            account_service=helper_account_service(),
+            now=lambda: NOW,
+        )
+    )
+    _authenticate(client)
+
+    response = client.post(f"/review/{item.id}", data=_form(item, client))
+
+    assert response.status_code == 503
+    assert "Review is unavailable" in response.text
+    assert "previous decisions are unchanged" in response.text
+    assert "Review result is unknown" not in response.text
+    assert "load review before submission failed (OperationalError)" in caplog.text
+    assert "secret-value" not in caplog.text
+    assert submissions == []
+
+
+def test_review_routes_render_a_malformed_review_id_as_item_not_found() -> None:
+    client = _client(_queue())
+
+    page = client.get("/review/item/not-a-uuid")
+    posted = client.post(
+        "/review/not-a-uuid",
+        data={"csrf_token": _csrf(client), "decision": "reject"},
+    )
+
+    assert page.status_code == 404
+    assert "Review item not found" in page.text
+    assert "This job is not part of the review." in page.text
+    assert posted.status_code == 404
+    assert "Review item not found" in posted.text

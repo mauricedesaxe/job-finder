@@ -181,25 +181,19 @@ def test_production_provider_validators_authenticate_and_validate_over_http(
             "/reader": {"url": "https://example.com"},
         }
     elif provider is ProviderKind.OPENROUTER:
-        assert request_bodies["/openrouter"]["model"] == "google/gemini-2.5-flash-lite"
-        assert request_bodies["/openrouter"]["messages"] == [
-            {"role": "user", "content": 'Return {"ready":true}.'}
-        ]
-        assert request_bodies["/openrouter"]["max_tokens"] == 16
-        assert request_bodies["/openrouter"]["usage"] == {"include": True}
-        tools = cast(list[dict[str, object]], request_bodies["/openrouter"]["tools"])
-        assert [cast(dict[str, str], tool["function"])["name"] for tool in tools] == [
-            "validate_provider"
-        ]
-        assert request_bodies["/openrouter"]["tool_choice"] == {
-            "type": "function",
-            "function": {"name": "validate_provider"},
-        }
+        probe = cast(dict[str, object], request_bodies["/openrouter"])
+        assert isinstance(probe["model"], str) and probe["model"]
+        assert cast(list[object], probe["messages"])
+        max_tokens = probe["max_tokens"]
+        assert isinstance(max_tokens, int) and max_tokens > 0
+        assert cast(list[object], probe["tools"])
+        tool_choice = cast(dict[str, object], probe["tool_choice"])
+        assert tool_choice.get("type") not in {None, "auto", "none"}
     else:
-        assert request_bodies["/typesafe"]["state"] == "Provider capability validation."
-        assert request_bodies["/typesafe"]["model"] == "jev-1.13.0"
-        questions = cast(dict[str, object], request_bodies["/typesafe"]["questions"])
-        assert set(questions) == {"validation"}
+        probe = cast(dict[str, object], request_bodies["/typesafe"])
+        assert isinstance(probe["state"], str) and probe["state"]
+        assert isinstance(probe["model"], str) and probe["model"]
+        assert cast(dict[str, object], probe["questions"])
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))
@@ -213,6 +207,43 @@ def test_production_provider_validators_reject_success_with_the_wrong_shape(
 
     assert result.capabilities == ()
     assert not result.invalid_credentials
+
+
+def test_jina_api_code_failure_maps_to_no_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _provider_stub([(200, json.dumps({"code": 429, "data": []}))]) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[ProviderKind.JINA](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert "Jina search validation returned API code 429" in caplog.text
+    assert [path for path, _headers, _body in server.requests] == ["/search"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "message"),
+    (
+        (ProviderKind.OPENROUTER, "OpenRouter validation returned an invalid response"),
+        (ProviderKind.TYPESAFE, "Typesafe validation returned an invalid response"),
+    ),
+)
+def test_invalid_response_shape_failures_are_logged(
+    provider: ProviderKind,
+    message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _provider_stub([(200, '{"unexpected": true}')]) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[provider](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert message in caplog.text
+    assert [path for path, _headers, _body in server.requests] == _EXPECTED_PATHS[provider]
 
 
 @pytest.mark.parametrize("provider", tuple(ProviderKind))

@@ -56,15 +56,17 @@ def test_model_call_projection_has_one_payload_for_the_same_instant() -> None:
         observed_at=observed_at,
     )
 
-    def capture(item: ModelCallAttempt) -> tuple[str, object]:
+    def capture(item: ModelCallAttempt) -> dict[str, JsonValue]:
         connection = _CaptureConnection()
         enqueue_model_call_projection(
             cast(psycopg.Connection[tuple[object, ...]], cast(object, connection)), item
         )
         assert connection.params is not None
-        return cast(str, connection.params[2]), cast(
-            dict[str, JsonValue], cast(Jsonb, connection.params[3]).obj
-        )
+        payloads = [param for param in connection.params if isinstance(param, Jsonb)]
+        assert len(payloads) == 1
+        payload = cast(dict[str, JsonValue], payloads[0].obj)
+        assert cast(str, payload["observed_at"]).endswith(("Z", "+00:00"))
+        return payload
 
     shifted = replace(attempt, observed_at=observed_at.astimezone(timezone(timedelta(hours=3))))
     assert capture(attempt) == capture(shifted)

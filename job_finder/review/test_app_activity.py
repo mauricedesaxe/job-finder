@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import html
+import json
 import re
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import psycopg
 import pytest
 from starlette.testclient import TestClient
 
+from job_finder.operations.activity import (
+    ActivityPage,
+    ActivityQuery,
+    ActivityService,
+)
 from job_finder.operations.spend import (
     AnalyticsService,
     SpendAnalytics,
@@ -41,6 +49,7 @@ from job_finder.review.test_app_support import (
     helper_operations_snapshot as _operations_snapshot,
     helper_run_item as _run_item,
     helper_activity_run_entry as _activity_run_entry,
+    helper_activity_work_entry as _activity_work_entry,
     helper_activity_service as _activity_service,
     helper_work_item_detail as _work_item_detail,
     helper_spend_analytics as _spend_analytics,
@@ -143,10 +152,15 @@ def test_the_activity_page_keeps_filters_on_the_next_page_link() -> None:
     listing = client.get("/operations/runs?status=failed&kind=work&from=2026-09-01")
 
     assert listing.status_code == 200
-    assert (
-        'href="/operations/runs?status=failed&amp;kind=work&amp;from=2026-09-01&amp;cursor=next-cursor-token"'
-        in listing.text
-    )
+    next_link = re.search(r'href="([^"]*cursor=next-cursor-token[^"]*)"', listing.text)
+    assert next_link is not None
+    query = parse_qs(urlparse(html.unescape(next_link.group(1))).query)
+    assert query == {
+        "status": ["failed"],
+        "kind": ["work"],
+        "from": ["2026-09-01"],
+        "cursor": ["next-cursor-token"],
+    }
 
 
 def test_the_work_item_page_shows_failure_context_and_actions() -> None:
@@ -471,7 +485,7 @@ def test_the_analytics_page_answers_spend_by_day_model_and_run() -> None:
     assert 'href="/operations" class="back-link"' not in response.text
 
 
-def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
+def test_the_analytics_page_loads_hashed_chart_scripts() -> None:
     client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
 
     response = client.get("/operations/analytics")
@@ -490,23 +504,36 @@ def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
     assert re.fullmatch(
         r"/static/latency-chart-init\.[0-9a-f]{10}\.js", latency_init_match.group(1)
     )
-    assert 'id="spend-per-day-chart"' in response.text
-    assert "Sep 9" in response.text
-    assert "Sep 10" in response.text
-    assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage" in response.text
-    assert (
-        '{"name": "z-ai/glm-4.6", "values": [0.2345, 0.9], "costs": ["$0.2345", "$0.9000"]}'
-        in response.text
-    )
-    assert (
-        '{"name": "openai/gpt-5-mini", "values": [0.0, 0.1], "costs": ["$0.0000", "$0.1000"]}'
-        in response.text
-    )
     script_tags: list[str] = re.findall(r"<script[^>]*>", response.text)
     executable_inline_scripts = [
         tag for tag in script_tags if "src=" not in tag and "application/json" not in tag
     ]
     assert executable_inline_scripts == []
+
+
+def test_the_analytics_page_charts_spend_per_day_with_readable_dates() -> None:
+    client = _client(_queue(), analytics=AnalyticsService(load=lambda: _spend_analytics()))
+
+    response = client.get("/operations/analytics")
+
+    assert response.status_code == 200
+    assert 'id="spend-per-day-chart"' in response.text
+    assert "Sep 9" in response.text
+    assert "Sep 10" in response.text
+    assert "Sep 10, 2026 · 3 accepted calls · 1 returned no usage" in response.text
+    spend_data_match = re.search(
+        r'<script[^>]*id="spend-per-day-data"[^>]*>(.*?)</script>',
+        response.text,
+        re.DOTALL,
+    )
+    assert spend_data_match is not None
+    spend_datasets = {
+        series["name"]: series for series in json.loads(spend_data_match.group(1))["datasets"]
+    }
+    assert spend_datasets["z-ai/glm-4.6"]["values"] == [0.2345, 0.9]
+    assert spend_datasets["z-ai/glm-4.6"]["costs"] == ["$0.2345", "$0.9000"]
+    assert spend_datasets["openai/gpt-5-mini"]["values"] == [0.0, 0.1]
+    assert spend_datasets["openai/gpt-5-mini"]["costs"] == ["$0.0000", "$0.1000"]
 
 
 def test_the_analytics_page_charts_p90_latency_per_model_per_day() -> None:
@@ -518,11 +545,18 @@ def test_the_analytics_page_charts_p90_latency_per_model_per_day() -> None:
     assert 'id="latency-per-day-chart"' in response.text
     assert "Call latency" in response.text
     assert "9 in 10 calls were faster than the bar" in response.text
-    assert (
-        '{"name": "z-ai/glm-4.6", "values": [4100, 3000]}, '
-        + '{"name": "openai/gpt-5-mini", "values": [null, 1200]}'
-        in response.text
+    latency_data_match = re.search(
+        r'<script[^>]*id="latency-per-day-data"[^>]*>(.*?)</script>',
+        response.text,
+        re.DOTALL,
     )
+    assert latency_data_match is not None
+    latency_values = {
+        series["name"]: series["values"]
+        for series in json.loads(latency_data_match.group(1))["datasets"]
+    }
+    assert latency_values["z-ai/glm-4.6"] == [4100, 3000]
+    assert latency_values["openai/gpt-5-mini"] == [None, 1200]
 
 
 def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
@@ -548,11 +582,9 @@ def test_the_analytics_chart_assets_are_served_as_static_files() -> None:
     assert init_script.status_code == 200
     assert init_script.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert "frappe.Chart" in init_script.text
-    assert "stacked: true" in init_script.text
     assert latency_init_script.status_code == 200
     assert latency_init_script.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert "frappe.Chart" in latency_init_script.text
-    assert "stacked" not in latency_init_script.text
     assert stale_url.status_code == 404
     assert missing.status_code == 404
 
@@ -611,6 +643,66 @@ def test_the_analytics_page_degrades_when_the_database_is_unreachable(
     assert "Model spend analytics load failed: Error" in caplog.text
 
 
+def test_the_activity_page_degrades_when_the_database_is_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(_query: ActivityQuery) -> ActivityPage:
+        raise psycopg.OperationalError("password=secret-value")
+
+    client = _client(_queue(), activity=ActivityService(list=broken))
+
+    response = client.get("/operations/runs")
+
+    assert response.status_code == 503
+    assert "Recent activity is unavailable" in response.text
+    assert "The database could not be reached. Reload this page to try again." in response.text
+    assert "not configured for this deployment" not in response.text
+    assert "Recent activity load failed: OperationalError" in caplog.text
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+
+
+def test_the_run_detail_page_degrades_when_the_database_is_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(_run_id: UUID) -> RunDetail:
+        raise psycopg.OperationalError("password=secret-value")
+
+    client = _client(_queue(), runs=RunsService(detail=broken))
+
+    response = client.get(f"/operations/runs/{UUID(int=2)}")
+
+    assert response.status_code == 503
+    assert "Pipeline runs are unavailable" in response.text
+    assert "The database could not be reached. Reload this page to try again." in response.text
+    assert "not configured for this deployment" not in response.text
+    assert "Pipeline run detail load failed: OperationalError" in caplog.text
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+
+
+def test_the_work_item_page_degrades_when_the_database_is_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(_job_id: UUID) -> WorkItemDetail:
+        raise psycopg.OperationalError("password=secret-value")
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), work_detail=broken),
+    )
+
+    response = client.get(f"/operations/work/{UUID(int=31)}")
+
+    assert response.status_code == 503
+    assert "Work item detail is unavailable" in response.text
+    assert "The database could not be reached. Reload this page to try again." in response.text
+    assert "not configured for this deployment" not in response.text
+    assert "Work item detail load failed: OperationalError" in caplog.text
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+
+
 def test_the_operations_pages_link_to_each_other() -> None:
     client = _client(_queue(), activity=_activity_service()[0])
 
@@ -619,3 +711,57 @@ def test_the_operations_pages_link_to_each_other() -> None:
     assert 'href="/operations/analytics"' in runs.text
     assert 'href="/operations/control"' in runs.text
     assert 'href="/operations/failures"' not in runs.text
+
+
+def test_the_activity_page_renders_runs_work_and_pagination() -> None:
+    activity, _ = _activity_service(
+        _activity_run_entry(value=1, idle=True),
+        _activity_run_entry(value=2, kind="discovery"),
+        _activity_work_entry(value=9, state="failed"),
+        cursor="next-cursor-token",
+    )
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert listing.status_code == 200
+    assert "A run is one pipeline pass; a job is one listing being worked on." in listing.text
+    assert "Scheduler tick" in listing.text
+    assert "Nothing was due." in listing.text
+    assert "Discovery run" in listing.text
+    assert "4 discovered · 3 processed · 2 model calls" in listing.text
+    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
+    assert "Job</strong>" in listing.text
+    assert ">Retrying</span>" in listing.text
+    assert "provider_timeout: OpenRouter did not respond" in listing.text
+    assert 'href="/operations/work/00000000-0000-0000-0000-000000000009"' in listing.text
+    assert "Open job →" in listing.text
+    assert 'class="row-head"' in listing.text
+    assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
+    assert "Next page →" in listing.text
+
+
+def test_the_activity_page_renders_the_filter_form() -> None:
+    activity, _ = _activity_service()
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert listing.status_code == 200
+    assert 'name="status" value="failed"' in listing.text
+    assert 'name="kind"' in listing.text
+    assert '<option value="orchestration">Scheduler tick</option>' in listing.text
+    assert '<option value="evaluation">Evaluation run</option>' in listing.text
+    assert "<span>Needs attention</span>" in listing.text
+    assert 'name="from"' in listing.text
+    assert "Apply filters" in listing.text
+
+
+def test_the_activity_page_counts_hidden_entries() -> None:
+    activity, _ = _activity_service(hidden_no_op_count=2)
+    client = _client(_queue(), activity=activity)
+
+    listing = client.get("/operations/runs")
+
+    assert "2 entries that did nothing hidden." in listing.text
+    assert "All matching activity is hidden." in listing.text

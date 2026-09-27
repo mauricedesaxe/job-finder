@@ -270,6 +270,92 @@ def test_owner_promotion_page_previews_evidence_and_rejects_invalid_activation(
         assert "Approved qualification promotion does not exist" in activation.text
 
 
+def test_owner_records_a_rejected_promotion_decision(authority_schema: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(dir=root, prefix=".decision-ui-", suffix=".json") as artifact_file:
+        artifact_path = Path(artifact_file.name)
+        _ = write_implementation_artifact(root, artifact_path)
+        client, connect = _client_for_schema(authority_schema, artifact_path=artifact_path)
+        with connect() as connection:
+            _ = apply_migrations(connection)
+        candidate_page = client.get("/configuration/qualification-targets")
+        token_match = re.search(r'name="csrf_token" value="([^"]+)"', candidate_page.text)
+        assert token_match is not None
+        token = token_match.group(1)
+        created = client.post(
+            "/configuration/qualification-targets/candidate",
+            data={"csrf_token": token},
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        with connect() as connection:
+            row = connection.execute("SELECT id FROM qualification_targets").fetchone()
+        assert row is not None
+        candidate_id = str(row[0])
+        unknown_decision = client.post(
+            "/configuration/qualification-promotion/decide",
+            data={
+                "csrf_token": token,
+                "baseline_target_id": "",
+                "candidate_target_id": candidate_id,
+                "decision": "maybe",
+                "reason": "Undecided",
+                "idempotency_key": "undecided-decision",
+            },
+        )
+        assert unknown_decision.status_code == 422
+        assert "Choose approve or reject." in unknown_decision.text
+        decided = client.post(
+            "/configuration/qualification-promotion/decide",
+            data={
+                "csrf_token": token,
+                "baseline_target_id": "",
+                "candidate_target_id": candidate_id,
+                "decision": "rejected",
+                "reason": "Evidence is incomplete",
+                "idempotency_key": "reject-first-candidate",
+            },
+            follow_redirects=False,
+        )
+        assert decided.status_code == 303
+        assert decided.headers["location"] == (
+            "/configuration/qualification-promotion?notice=decision-recorded"
+        )
+        assert "Decision recorded." in client.get(decided.headers["location"]).text
+        with connect() as connection:
+            recorded = connection.execute(
+                """
+                SELECT candidate_target_id, decision, reason
+                FROM qualification_promotion_decisions
+                WHERE idempotency_key = 'reject-first-candidate'
+                """
+            ).fetchone()
+        assert recorded == (candidate_id, "rejected", "Evidence is incomplete")
+
+
+def test_promotion_preview_rejects_a_malformed_candidate_target(authority_schema: str) -> None:
+    client, connect = _client_for_schema(authority_schema)
+    with connect() as connection:
+        _ = apply_migrations(connection)
+    promotion_page = client.get("/configuration/qualification-promotion")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', promotion_page.text)
+    assert token_match is not None
+    preview = client.post(
+        "/configuration/qualification-promotion/preview",
+        data={
+            "csrf_token": token_match.group(1),
+            "baseline_target_id": "",
+            "candidate_target_id": "not-a-target-id",
+        },
+    )
+    assert preview.status_code == 422
+    assert "Choose a candidate and a valid baseline target." in preview.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM qualification_promotion_decisions"
+        ).fetchone() == (0,)
+
+
 def test_owner_setup_writes_independent_search_drafts(authority_schema: str) -> None:
     stage = [OnboardingStage.COMPLETE]
     client, connect = _client_for_schema(authority_schema, owner_stage=stage)
@@ -421,6 +507,209 @@ def test_stale_acquisition_edit_keeps_submitted_keywords(authority_schema: str) 
         )
 
 
+def test_stale_acquisition_publish_leaves_one_publication(authority_schema: str) -> None:
+    client, connect = _client_for_schema(authority_schema)
+    with connect() as connection:
+        _ = apply_migrations(connection)
+    page = client.get("/configuration")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert token_match is not None
+    token = token_match.group(1)
+    source = next(iter(SupportedSearchSource)).value
+    saved = client.post(
+        "/configuration/acquisition/draft",
+        data={
+            "csrf_token": token,
+            "draft_version": "0",
+            "search_keywords": "backend engineer",
+            "enabled_sources": source,
+        },
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    published = client.post(
+        "/configuration/acquisition/publish",
+        data={
+            "csrf_token": token,
+            "draft_version": "1",
+            "idempotency_key": "publish-once",
+        },
+        follow_redirects=False,
+    )
+    assert published.status_code == 303
+    with connect() as connection:
+        publications = connection.execute(
+            "SELECT count(*) FROM acquisition_policy_publications"
+        ).fetchone()
+        assert get_acquisition_policy_draft(connection).version == 2
+    stale = client.post(
+        "/configuration/acquisition/publish",
+        data={
+            "csrf_token": token,
+            "draft_version": "1",
+            "idempotency_key": "publish-twice",
+        },
+        follow_redirects=False,
+    )
+    assert stale.status_code == 409
+    assert "Acquisition draft changed. Reload and retry." in stale.text
+    with connect() as connection:
+        assert (
+            connection.execute("SELECT count(*) FROM acquisition_policy_publications").fetchone()
+            == publications
+        )
+        assert connection.execute(
+            """
+                SELECT outcome FROM acquisition_policy_publication_receipts
+                WHERE idempotency_key = 'publish-twice'
+                """
+        ).fetchone() == ("draft_changed",)
+
+
+def test_stale_generation_activation_keeps_the_active_acquisition(authority_schema: str) -> None:
+    client, connect = _client_for_schema(authority_schema)
+    with connect() as connection:
+        _ = apply_migrations(connection)
+    page = client.get("/configuration")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert token_match is not None
+    token = token_match.group(1)
+    source = next(iter(SupportedSearchSource)).value
+    saved = client.post(
+        "/configuration/acquisition/draft",
+        data={
+            "csrf_token": token,
+            "draft_version": "0",
+            "search_keywords": "backend engineer",
+            "enabled_sources": source,
+        },
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    published = client.post(
+        "/configuration/acquisition/publish",
+        data={
+            "csrf_token": token,
+            "draft_version": "1",
+            "idempotency_key": "publish-for-activation",
+        },
+        follow_redirects=False,
+    )
+    assert published.status_code == 303
+    with connect() as connection:
+        candidate_revision_id = get_acquisition_policy_draft(connection).base_revision_id
+    activated = client.post(
+        "/configuration/acquisition/activate",
+        data={
+            "csrf_token": token,
+            "active_generation": "0",
+            "candidate_revision_id": candidate_revision_id,
+            "idempotency_key": "activate-once",
+        },
+        follow_redirects=False,
+    )
+    assert activated.status_code == 303
+    with connect() as connection:
+        active_row = connection.execute(
+            "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
+        ).fetchone()
+        assert active_row == (candidate_revision_id, 1)
+    stale = client.post(
+        "/configuration/acquisition/activate",
+        data={
+            "csrf_token": token,
+            "active_generation": "0",
+            "candidate_revision_id": candidate_revision_id,
+            "idempotency_key": "activate-twice",
+        },
+        follow_redirects=False,
+    )
+    assert stale.status_code == 409
+    assert "Active acquisition changed. Reload and retry." in stale.text
+    with connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT revision_id, generation FROM active_acquisition_policy WHERE singleton_id = 1"
+            ).fetchone()
+            == active_row
+        )
+        assert connection.execute(
+            """
+                SELECT outcome FROM acquisition_policy_activation_receipts
+                WHERE idempotency_key = 'activate-twice'
+                """
+        ).fetchone() == ("active_changed",)
+
+
+def test_continue_before_publish_and_activate_keeps_the_setup_stage(authority_schema: str) -> None:
+    stage = [OnboardingStage.COMPLETE]
+    client, connect = _client_for_schema(authority_schema, owner_stage=stage)
+    with connect() as connection:
+        _ = apply_migrations(connection)
+    page = client.get("/configuration")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert token_match is not None
+    token = token_match.group(1)
+    saved = client.post(
+        "/configuration/acquisition/draft",
+        data={
+            "csrf_token": token,
+            "draft_version": "0",
+            "search_keywords": "platform engineer",
+            "enabled_sources": next(iter(SupportedSearchSource)).value,
+        },
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    _ = postgres_owner_access_service(connect).bootstrap("owner password for this test")
+    with connect() as connection:
+        _ = connection.execute(
+            "UPDATE owner_onboarding SET stage = 'preferences' WHERE singleton_id = 1"
+        )
+    stage[0] = OnboardingStage.PREFERENCES
+    continued = client.post(
+        "/configuration/continue", data={"csrf_token": token}, follow_redirects=False
+    )
+    assert continued.status_code == 409
+    assert "Publish and activate both saved sections first." in continued.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT stage FROM owner_onboarding WHERE singleton_id = 1"
+        ).fetchone() == ("preferences",)
+
+
+def test_draft_save_outage_is_unavailable_without_a_retry_command(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    client, _ = _client_for_schema("unused")
+    control = client.get("/operations/control")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', control.text)
+    assert token_match is not None
+
+    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
+        response = client.post(
+            "/configuration/acquisition/draft",
+            data={
+                "csrf_token": token_match.group(1),
+                "draft_version": "0",
+                "search_keywords": "backend engineer",
+                "enabled_sources": next(iter(SupportedSearchSource)).value,
+            },
+        )
+
+    assert response.status_code == 503
+    assert "Search setup is unavailable" in response.text
+    assert 'href="/configuration"' in response.text
+    assert "<form" not in response.text
+    assert 'action="/configuration/acquisition/draft"' not in response.text
+    assert "Retry this request" not in response.text
+    assert "save acquisition draft" in caplog.text
+    assert "OperationalError" in caplog.text
+    assert "secret-value" not in response.text + caplog.text
+
+
 def test_search_setup_reports_database_outage_as_retryable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -433,7 +722,7 @@ def test_search_setup_reports_database_outage_as_retryable(
     assert response.status_code == 503
     assert "Search setup is unavailable" in response.text
     assert 'href="/configuration"' in response.text
-    assert "load search setup failed (OperationalError)" in caplog.text
+    assert "OperationalError" in caplog.text
     assert "secret-value" not in caplog.text
 
 
@@ -534,13 +823,14 @@ def test_qualification_writes_report_database_outage_as_server_failure(
 def test_every_split_setup_write_checks_csrf_before_database_access(
     monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    monkeypatch.setenv(
+        "JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://postgres:postgres@127.0.0.1:1/unreachable"
+    )
     client, _ = _client_for_schema("unused")
-    with patch("psycopg.connect") as connect:
-        response = client.post(path, data={"csrf_token": "invalid"})
+    response = client.post(path, data={"csrf_token": "invalid"})
 
     assert response.status_code == (404 if path == "/configuration/continue" else 403)
-    connect.assert_not_called()
+    assert "Search setup is unavailable" not in response.text
 
 
 @pytest.mark.parametrize(

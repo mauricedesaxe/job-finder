@@ -66,8 +66,17 @@ def test_execution_estimate_uses_prompt_release_instead_of_configuration_prompts
         max_jobs=1,
     )
 
+    relevance_calls = sum(
+        version.definition.phase in ("filter", "profile") for version in prompt_release.versions
+    )
+    openrouter_calls = len(prompt_release.versions) - relevance_calls
+    expected_attempts = (
+        relevance_calls * JevRetryPolicy().max_attempts
+        + openrouter_calls * OpenRouterRetryPolicy().max_attempts * 2
+    )
+
     assert estimate.logical_model_calls_per_job == len(prompt_release.versions)
-    assert estimate.maximum_provider_attempts == 40
+    assert estimate.maximum_provider_attempts == expected_attempts
 
 
 def test_existing_installs_can_run_scheduled_work_before_budget_setup() -> None:

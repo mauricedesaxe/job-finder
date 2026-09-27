@@ -6,6 +6,7 @@ import re
 from typing import Never
 from uuid import UUID
 
+import psycopg
 import pytest
 from pydantic import SecretStr
 from starlette.routing import Route
@@ -295,8 +296,8 @@ def test_the_control_plane_page_renders_all_live_schedule_controls() -> None:
     assert "a job found this morning is not decided tomorrow" in response.text
     assert "in 11 days" in response.text
     assert 'title="2026-09-21 13:00 UTC"' in response.text
-    assert response.text.count('action="/operations/run"') == 5
-    assert response.text.count('action="/operations/schedule"') == 5
+    assert response.text.count('action="/operations/run"') == len(CONTROL_DEFINITIONS)
+    assert response.text.count('action="/operations/schedule"') == len(CONTROL_DEFINITIONS)
 
 
 def test_the_control_plane_page_names_a_missing_configuration() -> None:
@@ -307,8 +308,8 @@ def test_the_control_plane_page_names_a_missing_configuration() -> None:
     assert response.status_code == 200
     assert "Dagster is not configured for this app" in response.text
     assert "JOB_FINDER_DAGSTER_GRAPHQL_URL" in response.text
-    assert response.text.count("schedule-state unavailable") == 5
-    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 10
+    assert response.text.count("schedule-state unavailable") == len(CONTROL_DEFINITIONS)
+    assert len(re.findall(r"<button[^>]+disabled", response.text)) == 2 * len(CONTROL_DEFINITIONS)
 
 
 def test_the_control_plane_page_reports_an_unreachable_dagster(
@@ -745,3 +746,39 @@ def test_work_recovery_rejects_malformed_identity_before_calling_the_service() -
     assert response.status_code == 400
     assert "Malformed operations form" in response.text
     assert calls == []
+
+
+def test_work_recovery_reports_a_database_failure_without_leaking_the_connection_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(_command: WorkRecoveryCommand) -> WorkRecoveryResult:
+        raise psycopg.OperationalError("password=secret-value")
+
+    client = _client(
+        _queue(),
+        operations=OperationsService(load=lambda: _operations_snapshot(), recover=broken),
+    )
+
+    response = client.post(
+        "/operations/recovery",
+        data={
+            "csrf_token": _csrf(client),
+            "job_id": str(UUID(int=31)),
+            "action": "retry_now",
+            "expected_state": "failed",
+            "expected_attempt_count": "2",
+            "idempotency_key": "private-key",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "Work recovery is unavailable" in response.text
+    assert (
+        "The recovery result could not be confirmed. Reload the work item before retrying."
+        in response.text
+    )
+    assert "not configured for this deployment" not in response.text
+    assert "Work recovery failed: OperationalError" in caplog.text
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+    assert "private-key" not in caplog.text

@@ -55,9 +55,6 @@ from job_finder.review.test_app_support import (
     helper_queue as _queue,
     helper_csrf as _csrf,
     helper_operations_snapshot as _operations_snapshot,
-    helper_activity_run_entry as _activity_run_entry,
-    helper_activity_work_entry as _activity_work_entry,
-    helper_activity_service as _activity_service,
     helper_applied_dismissal as _applied_dismissal,
     NOW,
     SETTINGS,
@@ -890,6 +887,32 @@ def test_reports_incompatible_release_readiness_without_authentication(
     assert "Relevance policy implementation artifacts" in caplog.text
 
 
+def test_reports_application_state_readiness_failure_without_authentication(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken_state() -> None:
+        raise RuntimeError("password=secret-value")
+
+    client = TestClient(
+        create_review_app(
+            lambda: _queue(),
+            SETTINGS,
+            submit_review=_default_submit_review,
+            owner_access_service=OWNER_ACCESS,
+            account_service=helper_account_service(),
+            readiness=broken_state,
+            now=lambda: NOW,
+        )
+    )
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.text == "application state unavailable"
+    assert "Readiness state check failed: RuntimeError" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
 def test_dismiss_undo_redirects_with_its_own_notice() -> None:
     client = _client(
         _queue(),
@@ -938,57 +961,3 @@ def test_dismissal_requires_csrf_before_calling_the_service() -> None:
 
     assert response.status_code == 403
     assert calls == []
-
-
-def test_the_activity_page_renders_runs_work_and_pagination() -> None:
-    activity, _ = _activity_service(
-        _activity_run_entry(value=1, idle=True),
-        _activity_run_entry(value=2, kind="discovery"),
-        _activity_work_entry(value=9, state="failed"),
-        cursor="next-cursor-token",
-    )
-    client = _client(_queue(), activity=activity)
-
-    listing = client.get("/operations/runs")
-
-    assert listing.status_code == 200
-    assert "A run is one pipeline pass; a job is one listing being worked on." in listing.text
-    assert "Scheduler tick" in listing.text
-    assert "Nothing was due." in listing.text
-    assert "Discovery run" in listing.text
-    assert "4 discovered · 3 processed · 2 model calls" in listing.text
-    assert 'href="/operations/runs/00000000-0000-0000-0000-000000000002"' in listing.text
-    assert "Job</strong>" in listing.text
-    assert ">Retrying</span>" in listing.text
-    assert "provider_timeout: OpenRouter did not respond" in listing.text
-    assert 'href="/operations/work/00000000-0000-0000-0000-000000000009"' in listing.text
-    assert "Open job →" in listing.text
-    assert 'class="row-head"' in listing.text
-    assert 'href="/operations/runs?cursor=next-cursor-token"' in listing.text
-    assert "Next page →" in listing.text
-
-
-def test_the_activity_page_renders_the_filter_form() -> None:
-    activity, _ = _activity_service()
-    client = _client(_queue(), activity=activity)
-
-    listing = client.get("/operations/runs")
-
-    assert listing.status_code == 200
-    assert 'name="status" value="failed"' in listing.text
-    assert 'name="kind"' in listing.text
-    assert '<option value="orchestration">Scheduler tick</option>' in listing.text
-    assert '<option value="evaluation">Evaluation run</option>' in listing.text
-    assert "<span>Needs attention</span>" in listing.text
-    assert 'name="from"' in listing.text
-    assert "Apply filters" in listing.text
-
-
-def test_the_activity_page_counts_hidden_entries() -> None:
-    activity, _ = _activity_service(hidden_no_op_count=2)
-    client = _client(_queue(), activity=activity)
-
-    listing = client.get("/operations/runs")
-
-    assert "2 entries that did nothing hidden." in listing.text
-    assert "All matching activity is hidden." in listing.text

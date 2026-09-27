@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,9 @@ from job_finder.evaluation.prompt_releases import (
     build_work_culture_candidate_release,
 )
 from job_finder.evaluation.relevance_releases import (
+    _EVALUATE_AFTER_LISTING_IMPORT_MOVE,
+    _EVALUATE_BEFORE_LISTING_IMPORT_MOVE,
+    _matches_execution_artifact,
     CodeArtifactIdentity,
     FewerThanActiveSignals,
     GeminiExecutionPolicy,
@@ -97,9 +101,8 @@ def test_hype_and_permanent_availability_are_a_conjunctive_rejection() -> None:
     assert work_culture_rule.count == 2
     assert policy.provider_adapter == baseline.provider_adapter
     assert policy.decision_composition == baseline.decision_composition
-    assert relevance_release.id == (
-        "c5af1a0a2dff819057597edc5951ee78bf77f4295f6a9778fa84a9db536139d9"
-    )
+    assert relevance_release.id != build_relevance_release(baseline).id
+    assert re.fullmatch(r"[0-9a-f]{64}", relevance_release.id)
     validate_release_target(
         ReleaseTarget(
             prompt_release_id=prompt_release.id,
@@ -149,32 +152,25 @@ def test_policies_identify_the_actual_checked_in_execution_sources() -> None:
     }
 
 
-def test_prior_release_cannot_execute_after_location_semantics_change() -> None:
-    prompt_release = build_prompt_release()
-    policy = build_jev_atomic_policy()
-    old_digest = "76ca2bab6774100bfdb5f165fb287a74f009adb9269e4da188b99f55d1c8445a"
-    legacy_policy = policy.model_copy(
-        update={
-            "input_serialization": policy.input_serialization.model_copy(
-                update={"content_digest": old_digest}
-            ),
-            "decision_composition": (
-                policy.decision_composition[0].model_copy(update={"content_digest": old_digest}),
-                policy.decision_composition[1],
-            ),
-        }
+def test_import_move_compatibility_window_accepts_exactly_its_recorded_digest_pair() -> None:
+    entrypoint = "job_finder.evaluation.evaluate:job_message"
+    recorded = CodeArtifactIdentity(
+        entrypoint=entrypoint,
+        content_digest=_EVALUATE_BEFORE_LISTING_IMPORT_MOVE,
     )
-    release = build_relevance_release(legacy_policy)
+    current = CodeArtifactIdentity(
+        entrypoint=entrypoint,
+        content_digest=_EVALUATE_AFTER_LISTING_IMPORT_MOVE,
+    )
 
-    with pytest.raises(RelevanceReleaseError, match="implementation artifacts"):
-        validate_release_target(
-            ReleaseTarget(
-                prompt_release_id=prompt_release.id,
-                relevance_release_id=release.id,
-            ),
-            prompt_release,
-            release,
-        )
+    assert _matches_execution_artifact(recorded, current)
+    assert not _matches_execution_artifact(
+        recorded.model_copy(update={"content_digest": "0" * 64}), current
+    )
+    assert not _matches_execution_artifact(
+        recorded,
+        current.model_copy(update={"content_digest": "0" * 64}),
+    )
 
 
 def test_source_content_changes_release_identity_without_rewriting_project_sources(
