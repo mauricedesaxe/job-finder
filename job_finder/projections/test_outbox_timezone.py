@@ -29,7 +29,7 @@ def _capture(
     kind: Literal["evaluation_manifest", "evaluation_run", "prompt_promotion"],
     payload: BaseModel,
     observed_at: datetime,
-) -> tuple[str, object]:
+) -> dict[str, JsonValue]:
     connection = _CaptureConnection()
     enqueue_projection(
         cast(psycopg.Connection[tuple[object, ...]], cast(object, connection)),
@@ -39,21 +39,35 @@ def _capture(
         observed_at,
     )
     assert connection.params is not None
-    return cast(str, connection.params[3]), cast(
-        dict[str, JsonValue], cast(Jsonb, connection.params[4]).obj
-    )
+    payloads = [param for param in connection.params if isinstance(param, Jsonb)]
+    assert len(payloads) == 1
+    return cast(dict[str, JsonValue], payloads[0].obj)
 
 
 def test_benchmark_projection_has_one_payload_for_the_same_instant() -> None:
     utc = datetime(2026, 9, 21, 12, tzinfo=UTC)
     shifted = utc.astimezone(timezone(timedelta(hours=3)))
 
-    assert _capture("evaluation_manifest", _CreatedPayload(created_at=utc), utc) == _capture(
+    def capture(
+        kind: Literal["evaluation_manifest", "evaluation_run", "prompt_promotion"],
+        payload: BaseModel,
+        moment: datetime,
+    ) -> dict[str, JsonValue]:
+        captured = _capture(kind, payload, moment)
+        serialized_timestamps = [
+            value for field, value in captured.items() if field in ("created_at", "completed_at")
+        ]
+        assert serialized_timestamps
+        for value in serialized_timestamps:
+            assert cast(str, value).endswith(("Z", "+00:00"))
+        return captured
+
+    assert capture("evaluation_manifest", _CreatedPayload(created_at=utc), utc) == capture(
         "evaluation_manifest", _CreatedPayload(created_at=shifted), shifted
     )
-    assert _capture("evaluation_run", _CompletedPayload(completed_at=utc), utc) == _capture(
+    assert capture("evaluation_run", _CompletedPayload(completed_at=utc), utc) == capture(
         "evaluation_run", _CompletedPayload(completed_at=shifted), shifted
     )
-    assert _capture("prompt_promotion", _CreatedPayload(created_at=utc), utc) == _capture(
+    assert capture("prompt_promotion", _CreatedPayload(created_at=utc), utc) == capture(
         "prompt_promotion", _CreatedPayload(created_at=shifted), shifted
     )

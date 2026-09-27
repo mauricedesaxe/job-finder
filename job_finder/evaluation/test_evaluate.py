@@ -5,6 +5,7 @@ from datetime import date
 
 import pytest
 
+from job_finder.ats.models import ApplicationQuestion, AtsAvailable
 from job_finder.evaluation.evaluate import evaluate_job, job_message
 from job_finder.evaluation.models import (
     CriterionAccepted,
@@ -147,6 +148,51 @@ def test_uses_structured_location_for_location_relevance() -> None:
 
     result = evaluate_job(job, release, evaluate, rates=RATES)
 
+    assert result == Rejected(reason="remote-europe-eligible")
+
+
+def test_routes_ats_application_questions_to_the_location_filter_only() -> None:
+    release = build_prompt_release()
+    evidence = AtsAvailable(
+        source="greenhouse",
+        location="Remote",
+        locations=("Remote",),
+        workplace_type="Remote",
+        country="United States",
+        application_questions=(
+            ApplicationQuestion(
+                label="Do you live in one of these states?",
+                required=True,
+                choices=("California", "Colorado", "New York", "Oregon"),
+            ),
+            ApplicationQuestion(
+                label="How did you hear about us?",
+                required=False,
+                choices=(),
+            ),
+        ),
+    )
+    inputs: dict[str, str] = {}
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        inputs[version.definition.criterion] = values["job"]
+        if version.definition.criterion == "remote-europe-eligible":
+            return _accepted(version, passed=False)
+        return _accepted(version, passed=True)
+
+    result = evaluate_job(JOB, release, evaluate, rates=RATES, ats_evidence=evidence)
+
+    location_input = inputs["remote-europe-eligible"]
+    assert (
+        "- Application question (required): Do you live in one of these states? "
+        "Choices: California, Colorado, New York, Oregon" in location_input
+    )
+    assert "## ATS Structured Data (from greenhouse API)" in location_input
+    assert "How did you hear about us?" not in location_input
+    for criterion, value in inputs.items():
+        if criterion != "remote-europe-eligible":
+            assert "## ATS Structured Data" not in value
+            assert "Application question" not in value
     assert result == Rejected(reason="remote-europe-eligible")
 
 

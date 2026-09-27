@@ -23,6 +23,7 @@ from job_finder.ats.policy import (
     detect_ats_source,
     format_ats_block,
     format_ats_description,
+    format_location_context,
 )
 from job_finder.ats.workable import parse_workable_job, parse_workable_url
 
@@ -279,6 +280,94 @@ def test_formats_structured_evidence_for_the_evaluator() -> None:
             "Job body",
         )
     )
+
+
+def _question_evidence(
+    questions: tuple[ApplicationQuestion, ...], description: str | None = None
+) -> AtsAvailable:
+    return AtsAvailable(
+        source="greenhouse",
+        location="Remote",
+        locations=("Remote",),
+        workplace_type="Remote",
+        country="United States",
+        description=description,
+        application_questions=questions,
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_line"),
+    (
+        (
+            ApplicationQuestion(
+                label="Do you live in one of these states?",
+                required=True,
+                choices=("California", "Oregon"),
+            ),
+            "- Application question (required): Do you live in one of these states? "
+            "Choices: California, Oregon",
+        ),
+        (
+            ApplicationQuestion(
+                label="Are you willing to relocate?",
+                required=True,
+                choices=(),
+            ),
+            "- Application question (required): Are you willing to relocate?",
+        ),
+        (
+            ApplicationQuestion(
+                label="What is your preferred time zone?",
+                required=False,
+                choices=("CET", "EST"),
+            ),
+            "- Application question (optional): What is your preferred time zone? "
+            "Choices: CET, EST",
+        ),
+    ),
+)
+def test_renders_location_relevant_application_questions(
+    question: ApplicationQuestion, expected_line: str
+) -> None:
+    block = format_ats_block(_question_evidence((question,)))
+
+    assert expected_line in block.splitlines()
+
+
+def test_omits_application_questions_without_a_location_signal() -> None:
+    block = format_ats_block(
+        _question_evidence(
+            (
+                ApplicationQuestion(
+                    label="How did you hear about us?",
+                    required=False,
+                    choices=("Referral", "LinkedIn"),
+                ),
+            )
+        )
+    )
+
+    assert "How did you hear about us?" not in block
+    assert not [line for line in block.splitlines() if line.startswith("- Application question")]
+
+
+def test_attaches_the_ats_description_when_the_listing_omits_it() -> None:
+    data = _question_evidence((), description="Hiring across EMEA only.")
+
+    context = format_location_context(data, "Listing body without the ATS blurb.")
+
+    assert "ATS job description:\nHiring across EMEA only." in context
+    assert context.startswith("## ATS Structured Data (from greenhouse API)")
+
+
+def test_does_not_duplicate_a_description_already_in_the_listing() -> None:
+    data = _question_evidence((), description="Shared company blurb.")
+
+    context = format_location_context(data, "Intro.\nShared company blurb.\nOutro.")
+
+    assert context == format_ats_block(data)
+    assert "ATS job description:" not in context
 
 
 def test_preserves_provider_specific_workplace_values() -> None:

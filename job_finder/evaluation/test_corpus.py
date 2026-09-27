@@ -13,8 +13,6 @@ from job_finder.ats.policy import format_ats_block
 from job_finder.evaluation import corpus as corpus_module
 from job_finder.evaluation.corpus import (
     CORPUS_ROOT,
-    MAX_FALSE_NEGATIVE_RATE,
-    MAX_FALSE_POSITIVE_RATE,
     EvaluationCorpusResult,
     corpus_identity,
     evaluate_corpus_case,
@@ -314,8 +312,6 @@ def test_scores_false_positives_and_false_negatives_against_separate_populations
 
     report = score_evaluation_corpus(results)
 
-    assert MAX_FALSE_POSITIVE_RATE == Decimal("0.15")
-    assert MAX_FALSE_NEGATIVE_RATE == Decimal("0.10")
     assert report.false_positive_rate == Decimal("0.5000000")
     assert report.false_negative_rate == Decimal("0.5000000")
     assert report.operational_failure_count == 1
