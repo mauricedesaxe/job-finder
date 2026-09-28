@@ -5,8 +5,9 @@ from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from typing import cast
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import httpx2
 import psycopg
 import pytest
 from fasthtml.common import FastHTML
@@ -15,7 +16,7 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 from starlette.routing import Route
 
-from job_finder.access_policy import RouteAccess, route_policy
+from job_finder.access_policy import Capability, RouteAccess, route_policy
 from job_finder.config import PostgresContractSettings, ReviewAppSettings
 from job_finder.database import apply_migrations
 from job_finder.review.accounts import AccountRole, AccountService
@@ -77,9 +78,11 @@ def _link(response_text: str, kind: str) -> str:
     return urlparse(match.group(1)).path
 
 
-def _login(client: TestClient, email: str, password: str, next_url: str = "/") -> int:
+def _login_response(
+    client: TestClient, email: str, password: str, next_url: str = "/"
+) -> httpx2.Response:
     form = client.get("/login")
-    response = client.post(
+    return client.post(
         "/login",
         data={
             "csrf_token": _csrf(form.text),
@@ -89,7 +92,17 @@ def _login(client: TestClient, email: str, password: str, next_url: str = "/") -
         },
         follow_redirects=False,
     )
-    return response.status_code
+
+
+def _login(client: TestClient, email: str, password: str, next_url: str = "/") -> int:
+    return _login_response(client, email, password, next_url).status_code
+
+
+def _accept_member(
+    accounts: AccountService, admin_id: UUID, email: str, grants: frozenset[Capability]
+) -> None:
+    invite = accounts.issue_invite(admin_id, email, role=AccountRole.MEMBER, grants=grants)
+    assert accounts.accept_invite(invite, "secure-member-password") is not None
 
 
 def test_member_invite_grants_and_disable_are_enforced(
@@ -209,3 +222,167 @@ def test_every_registered_protected_route_denies_an_ungranted_account(
             assert response.status_code == 403, (method, route.path, response.status_code)
             checked.add((method, route.path))
     assert len(checked) >= 20
+
+
+def test_login_lands_on_the_first_granted_area(
+    member_app: tuple[TestClient, AccountService],
+) -> None:
+    admin_client, accounts = member_app
+    admin = next(user for user in accounts.list_members() if user.email == "admin@example.com")
+
+    _accept_member(
+        accounts,
+        admin.id,
+        "reviewer@example.com",
+        frozenset({Capability.REVIEW_VIEW, Capability.REVIEW_SUBMIT}),
+    )
+    reviewer = TestClient(admin_client.app)
+    reviewer_response = _login_response(reviewer, "reviewer@example.com", "secure-member-password")
+    assert reviewer_response.status_code == 303
+    assert reviewer_response.headers["location"] == "/"
+
+    _accept_member(accounts, admin.id, "none@example.com", frozenset())
+    ungranted = TestClient(admin_client.app)
+    ungranted_response = _login_response(ungranted, "none@example.com", "secure-member-password")
+    assert ungranted_response.status_code == 303
+    assert ungranted_response.headers["location"] == "/no-access"
+    no_access = ungranted.get("/no-access")
+    assert no_access.status_code == 200
+    assert "No access assigned" in no_access.text
+    assert "Ask an administrator to grant access to an area." in no_access.text
+
+    _accept_member(
+        accounts, admin.id, "analyst@example.com", frozenset({Capability.ANALYTICS_VIEW})
+    )
+    analyst = TestClient(admin_client.app)
+    analyst_response = _login_response(analyst, "analyst@example.com", "secure-member-password")
+    assert analyst_response.status_code == 303
+    assert analyst_response.headers["location"] == "/operations/analytics"
+
+
+def test_members_page_is_read_only_without_the_members_grant(
+    member_app: tuple[TestClient, AccountService],
+) -> None:
+    admin_client, accounts = member_app
+    admin = next(user for user in accounts.list_members() if user.email == "admin@example.com")
+    _accept_member(accounts, admin.id, "viewer@example.com", frozenset({Capability.ADMIN_VIEW}))
+
+    assert _login(admin_client, "admin@example.com", "secure-admin-password") == 303
+    admin_page = admin_client.get("/members")
+    assert admin_page.status_code == 200
+    assert "Invite a member" in admin_page.text
+    assert 'action="/members/' in admin_page.text
+
+    viewer = TestClient(admin_client.app)
+    assert _login(viewer, "viewer@example.com", "secure-member-password") == 303
+    page = viewer.get("/members")
+    assert page.status_code == 200
+    assert "admin@example.com" in page.text
+    assert "viewer@example.com" in page.text
+    assert "Invite a member" not in page.text
+    assert 'action="/members/' not in page.text
+
+
+def test_acceptance_forms_reject_mismatched_and_short_passwords(
+    member_app: tuple[TestClient, AccountService],
+) -> None:
+    admin_client, accounts = member_app
+    admin = next(user for user in accounts.list_members() if user.email == "admin@example.com")
+
+    invite = accounts.issue_invite(
+        admin.id, "member@example.com", role=AccountRole.MEMBER, grants=frozenset()
+    )
+    recipient = TestClient(admin_client.app)
+    invite_form = recipient.get(f"/invite/{invite}")
+    invite_csrf = {"csrf_token": _csrf(invite_form.text)}
+    mismatched = recipient.post(
+        f"/invite/{invite}",
+        data={
+            **invite_csrf,
+            "password": "secure-member-password",
+            "password_confirmation": "differing-password",
+        },
+    )
+    assert mismatched.status_code == 400
+    assert "Passwords differ." in mismatched.text
+    short = recipient.post(
+        f"/invite/{invite}",
+        data={**invite_csrf, "password": "shortpw1", "password_confirmation": "shortpw1"},
+    )
+    assert short.status_code == 400
+    assert "Use a password of 12 to 1024 characters." in short.text
+    accepted = recipient.post(
+        f"/invite/{invite}",
+        data={
+            **invite_csrf,
+            "password": "secure-member-password",
+            "password_confirmation": "secure-member-password",
+        },
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+
+    member = next(user for user in accounts.list_members() if user.email == "member@example.com")
+    reset = accounts.issue_reset(admin.id, member.id)
+    holder = TestClient(admin_client.app)
+    reset_form = holder.get(f"/reset/{reset}")
+    reset_csrf = {"csrf_token": _csrf(reset_form.text)}
+    mismatched_reset = holder.post(
+        f"/reset/{reset}",
+        data={
+            **reset_csrf,
+            "password": "new-secure-password",
+            "password_confirmation": "differing-password",
+        },
+    )
+    assert mismatched_reset.status_code == 400
+    assert "Passwords differ." in mismatched_reset.text
+    short_reset = holder.post(
+        f"/reset/{reset}",
+        data={**reset_csrf, "password": "shortpw1", "password_confirmation": "shortpw1"},
+    )
+    assert short_reset.status_code == 400
+    assert "Use a password of 12 to 1024 characters." in short_reset.text
+    accepted_reset = holder.post(
+        f"/reset/{reset}",
+        data={
+            **reset_csrf,
+            "password": "new-secure-password",
+            "password_confirmation": "new-secure-password",
+        },
+        follow_redirects=False,
+    )
+    assert accepted_reset.status_code == 303
+
+
+def test_duplicate_invite_via_the_web_reports_the_conflict(
+    member_app: tuple[TestClient, AccountService],
+) -> None:
+    admin_client, accounts = member_app
+    assert _login(admin_client, "admin@example.com", "secure-admin-password", "/members") == 303
+    invite_form = admin_client.get("/members/invite")
+    data = {
+        "csrf_token": _csrf(invite_form.text),
+        "email": "reviewer@example.com",
+        "preset": "Reviewer",
+        "grants": ["review.view", "review.submit"],
+    }
+    invited = admin_client.post("/members/invite", data=data)
+    assert invited.status_code == 200
+    link = _link(invited.text, "invite")
+    member_client = TestClient(admin_client.app)
+    invitation = member_client.get(link)
+    accepted = member_client.post(
+        link,
+        data={
+            "csrf_token": _csrf(invitation.text),
+            "password": "secure-member-password",
+            "password_confirmation": "secure-member-password",
+        },
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    duplicate = admin_client.post("/members/invite", data=data)
+    assert duplicate.status_code == 400
+    assert "account already exists" in duplicate.text
+    assert "/invite/" not in duplicate.text
