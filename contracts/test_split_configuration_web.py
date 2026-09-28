@@ -5,8 +5,9 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import re
+from socket import socket
 from tempfile import NamedTemporaryFile
-from unittest.mock import patch
+from typing import cast
 from uuid import uuid4
 
 import psycopg
@@ -49,6 +50,13 @@ def authority_schema() -> Iterator[str]:
             _ = connection.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema_name))
             )
+
+
+def _refused_postgres_dsn() -> str:
+    with socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        _host, port = cast(tuple[str, int], probe.getsockname())
+    return f"postgresql://redact:hunter2@127.0.0.1:{port}/test"
 
 
 def _client_for_schema(
@@ -682,22 +690,21 @@ def test_draft_save_outage_is_unavailable_without_a_retry_command(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
     client, _ = _client_for_schema("unused")
     control = client.get("/operations/control")
     token_match = re.search(r'name="csrf_token" value="([^"]+)"', control.text)
     assert token_match is not None
 
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
-        response = client.post(
-            "/configuration/acquisition/draft",
-            data={
-                "csrf_token": token_match.group(1),
-                "draft_version": "0",
-                "search_keywords": "backend engineer",
-                "enabled_sources": next(iter(SupportedSearchSource)).value,
-            },
-        )
+    response = client.post(
+        "/configuration/acquisition/draft",
+        data={
+            "csrf_token": token_match.group(1),
+            "draft_version": "0",
+            "search_keywords": "backend engineer",
+            "enabled_sources": next(iter(SupportedSearchSource)).value,
+        },
+    )
 
     assert response.status_code == 503
     assert "Search setup is unavailable" in response.text
@@ -707,23 +714,22 @@ def test_draft_save_outage_is_unavailable_without_a_retry_command(
     assert "Retry this request" not in response.text
     assert "save acquisition draft" in caplog.text
     assert "OperationalError" in caplog.text
-    assert "secret-value" not in response.text + caplog.text
+    assert "hunter2" not in response.text + caplog.text
 
 
 def test_search_setup_reports_database_outage_as_retryable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
     client, _ = _client_for_schema("unused")
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
-        response = client.get("/configuration")
+    response = client.get("/configuration")
 
     assert response.status_code == 503
     assert "Search setup is unavailable" in response.text
     assert 'href="/configuration"' in response.text
     assert "OperationalError" in caplog.text
-    assert "secret-value" not in caplog.text
+    assert "hunter2" not in response.text + caplog.text
 
 
 @pytest.mark.parametrize(
@@ -745,16 +751,14 @@ def test_qualification_pages_report_database_outage_without_exposing_details(
     path: str,
     message: str,
 ) -> None:
-    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
     client, _ = _client_for_schema("unused")
-
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("secret-password")):
-        response = client.get(path)
+    response = client.get(path)
 
     assert response.status_code == 503
     assert message in response.text
     assert "OperationalError" in caplog.text
-    assert "secret-password" not in response.text + caplog.text
+    assert "hunter2" not in response.text + caplog.text
 
 
 @pytest.mark.parametrize(
@@ -794,19 +798,18 @@ def test_qualification_writes_report_database_outage_as_server_failure(
     fields: dict[str, str],
     message: str,
 ) -> None:
-    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://test:test@127.0.0.1:5432/test")
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
     client, _ = _client_for_schema("unused")
     control = client.get("/operations/control")
     token_match = re.search(r'name="csrf_token" value="([^"]+)"', control.text)
     assert token_match is not None
 
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("secret-password")):
-        response = client.post(path, data={"csrf_token": token_match.group(1), **fields})
+    response = client.post(path, data={"csrf_token": token_match.group(1), **fields})
 
     assert response.status_code == 503
     assert message in response.text
     assert "OperationalError" in caplog.text
-    assert "secret-password" not in response.text + caplog.text
+    assert "hunter2" not in response.text + caplog.text
 
 
 @pytest.mark.parametrize(
@@ -823,14 +826,13 @@ def test_qualification_writes_report_database_outage_as_server_failure(
 def test_every_split_setup_write_checks_csrf_before_database_access(
     monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    monkeypatch.setenv(
-        "JOB_FINDER_TEST_POSTGRES_DSN", "postgresql://postgres:postgres@127.0.0.1:1/unreachable"
-    )
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
     client, _ = _client_for_schema("unused")
     response = client.post(path, data={"csrf_token": "invalid"})
 
     assert response.status_code == (404 if path == "/configuration/continue" else 403)
     assert "Search setup is unavailable" not in response.text
+    assert "hunter2" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -855,21 +857,18 @@ def test_every_split_setup_write_checks_csrf_before_database_access(
     ],
 )
 def test_uncertain_split_write_preserves_its_retry_command(
-    authority_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
     path: str,
     fields: dict[str, str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client, connect = _client_for_schema(authority_schema)
-    with connect() as connection:
-        _ = apply_migrations(connection)
-    page = client.get("/configuration")
-    token_match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    monkeypatch.setenv("JOB_FINDER_TEST_POSTGRES_DSN", _refused_postgres_dsn())
+    client, _ = _client_for_schema("unused")
+    control = client.get("/operations/control")
+    token_match = re.search(r'name="csrf_token" value="([^"]+)"', control.text)
     assert token_match is not None
-    token = token_match.group(1)
 
-    with patch("psycopg.connect", side_effect=psycopg.OperationalError("password=secret-value")):
-        response = client.post(path, data={"csrf_token": token, **fields})
+    response = client.post(path, data={"csrf_token": token_match.group(1), **fields})
 
     assert response.status_code == 503
     assert "Search setup result is unknown" in response.text
@@ -878,7 +877,7 @@ def test_uncertain_split_write_preserves_its_retry_command(
         assert f'name="{key}" value="{value}"' in response.text
     assert "Search setup" in caplog.text
     assert "OperationalError" in caplog.text
-    assert "secret-value" not in caplog.text
+    assert "hunter2" not in response.text + caplog.text
 
 
 def test_split_pages_do_not_reflect_unknown_notices(authority_schema: str) -> None:

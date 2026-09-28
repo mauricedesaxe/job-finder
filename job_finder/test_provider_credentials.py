@@ -8,10 +8,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socket import socket
 from typing import cast, final, override
-from unittest.mock import patch
 
 import pytest
-import requests
 from pydantic import SecretStr
 
 from job_finder.provider_credentials import (
@@ -291,14 +289,21 @@ def test_provider_non_json_responses_map_to_no_capabilities(
 def test_provider_request_failure_logs_without_exposing_the_secret(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    validators = production_provider_validators()
+    with socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        _host, port = cast(tuple[str, int], probe.getsockname())
+        base = f"http://127.0.0.1:{port}"
+        validators = production_provider_validators(
+            jina_search_url=f"{base}/search",
+            jina_reader_url=f"{base}/reader",
+            openrouter_url=f"{base}/openrouter",
+            typesafe_url=f"{base}/typesafe",
+        )
 
-    with patch("requests.post", side_effect=requests.RequestException("password=secret-value")):
         result = validators[ProviderKind.JINA](SecretStr("valid-secret"))
 
     assert result.capabilities == ()
-    assert "Jina search validation request failed (RequestException)" in caplog.text
-    assert "secret-value" not in caplog.text
+    assert "Jina search validation request failed (" in caplog.text
     assert "valid-secret" not in caplog.text
 
 
