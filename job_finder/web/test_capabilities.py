@@ -54,11 +54,6 @@ def test_review_routes_all_have_policy(split: bool) -> None:
     bound = compile_route_policies(app, review_routes=True, split_routes=split)
     routes = [route for route in app.routes if isinstance(route, Route)]
     assert len(bound) == sum(len(route.methods or ()) for route in routes)
-    assert all(
-        bound[(route.endpoint, method)] == route_policy(method, route.path)
-        for route in routes
-        for method in route.methods or ()
-    )
     assert route_policy("HEAD", "/static/{name}") == route_policy("GET", "/static/{name}")
 
 

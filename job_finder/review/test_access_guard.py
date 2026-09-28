@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
+from typing import NoReturn
 from uuid import UUID
 
+import pytest
 from starlette.requests import Request
 
 from job_finder.access_policy import Capability, RouteAccess, RoutePolicy
@@ -35,16 +36,33 @@ def _owner(
 ) -> OwnerAccessService:
     return OwnerAccessService(
         load_state=lambda: OwnerAccessState(stage, hash_present),
-        authenticate=lambda password: False,
-        bootstrap=Mock(),
+        authenticate=lambda _password: False,
+        bootstrap=lambda _password: pytest.fail("unexpected bootstrap"),
     )
 
 
+def _no_database() -> NoReturn:
+    raise RuntimeError("no database in this test")
+
+
+class StubAccountService(AccountService):
+    _present: bool = True
+    _principal: Account | None = None
+
+    def __init__(self, *, has_accounts: bool = True, principal: Account | None = None) -> None:
+        super().__init__(_no_database)
+        object.__setattr__(self, "_present", has_accounts)
+        object.__setattr__(self, "_principal", principal)
+
+    def has_accounts(self) -> bool:
+        return self._present
+
+    def load_principal(self, token: str) -> Account | None:
+        return self._principal
+
+
 def _accounts(principal: Account | None, *, has_accounts: bool = True) -> AccountService:
-    accounts = Mock(spec=AccountService)
-    accounts.has_accounts.return_value = has_accounts
-    accounts.load_principal.return_value = principal
-    return accounts
+    return StubAccountService(principal=principal, has_accounts=has_accounts)
 
 
 def test_old_owner_cookie_cannot_authorize_review() -> None:
