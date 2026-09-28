@@ -249,6 +249,49 @@ def test_greenhouse_form_preserves_location_choices() -> None:
     assert "Choices: California, Oregon" in format_ats_block(evidence)
 
 
+@pytest.mark.parametrize(
+    ("location_question", "unrelated_question"),
+    (
+        ("Do you reside in one of these states?", "How did you hear about us?"),
+        (
+            "Are you legally authorized to work in the United States?",
+            "Why do you want to work here?",
+        ),
+        ("Which time zone do you work from?", "Describe your favorite project."),
+    ),
+)
+def test_formats_only_location_application_questions(
+    location_question: str,
+    unrelated_question: str,
+) -> None:
+    evidence = AtsAvailable(
+        source="greenhouse",
+        location="Remote",
+        locations=("Remote",),
+        workplace_type="Remote",
+        country="United States",
+        application_questions=(
+            ApplicationQuestion(
+                label=unrelated_question, required=False, choices=("Blog", "Friend")
+            ),
+            ApplicationQuestion(
+                label=location_question,
+                required=True,
+                choices=("California", "Oregon"),
+            ),
+        ),
+    )
+
+    block = format_ats_block(evidence)
+
+    assert (
+        f"- Application question (required): {location_question} Choices: California, Oregon"
+        in (block)
+    )
+    assert unrelated_question not in block
+    assert "Blog" not in block
+
+
 def test_formats_structured_evidence_for_the_evaluator() -> None:
     data = AtsAvailable(
         source="lever",

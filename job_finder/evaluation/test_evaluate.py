@@ -196,6 +196,66 @@ def test_routes_ats_application_questions_to_the_location_filter_only() -> None:
     assert result == Rejected(reason="remote-europe-eligible")
 
 
+def test_ats_evidence_formats_application_questions_into_the_location_criterion() -> None:
+    release = build_prompt_release()
+    evidence = AtsAvailable(
+        source="greenhouse",
+        location="Remote",
+        locations=("Remote",),
+        workplace_type="Remote",
+        country="United States",
+        description="US only",
+        application_questions=(
+            ApplicationQuestion(
+                label="Do you reside in one of these states?",
+                required=True,
+                choices=("California", "Oregon"),
+            ),
+        ),
+    )
+    inputs: dict[str, str] = {}
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        inputs[version.definition.criterion] = values["job"]
+        return _accepted(version, passed=True)
+
+    _ = evaluate_job(JOB, release, evaluate, rates=RATES, ats_evidence=evidence)
+
+    location = inputs["remote-europe-eligible"]
+    assert "- Application question (required): Do you reside in one of these states?" in location
+    assert "Choices: California, Oregon" in location
+    assert "ATS job description:\nUS only" in location
+    compensation = inputs["compensation-minimum"]
+    assert "Do you reside in one of these states?" not in compensation
+    assert "California, Oregon" not in compensation
+    assert "US only" not in compensation
+
+
+def test_omits_the_ats_description_when_the_listing_already_states_it() -> None:
+    release = build_prompt_release()
+    evidence = AtsAvailable(
+        source="greenhouse",
+        location="Remote",
+        locations=("Remote",),
+        workplace_type="Remote",
+        country="United States",
+        description="US only",
+    )
+    job = JOB.model_copy(update={"description": "We hire across the US only worldwide."})
+    inputs: dict[str, str] = {}
+
+    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
+        inputs[version.definition.criterion] = values["job"]
+        return _accepted(version, passed=True)
+
+    _ = evaluate_job(job, release, evaluate, rates=RATES, ats_evidence=evidence)
+
+    location = inputs["remote-europe-eligible"]
+    assert "## ATS Structured Data" in location
+    assert "ATS job description:" not in location
+    assert location.count("US only") == 1
+
+
 def test_returns_the_first_filter_result_in_catalog_order() -> None:
     release = build_prompt_release()
     calls: list[str] = []
