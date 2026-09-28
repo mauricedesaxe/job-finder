@@ -86,3 +86,29 @@ def test_operations_sub_sidebar_marks_the_current_page() -> None:
     assert 'href="/operations/control" aria-current="page"' in markup
     assert "/operations/failures" not in markup
     assert 'aria-label="Operations"' in markup
+
+
+def test_sidebar_lists_only_granted_sections() -> None:
+    markup = to_xml(sidebar("token", current="review", grants=frozenset({Capability.REVIEW_VIEW})))
+
+    assert 'href="/"' in markup
+    assert "/operations" not in markup
+    assert "/configuration" not in markup
+    assert "/members" not in markup
+
+
+def test_sidebar_shows_operations_for_analytics_only_grants() -> None:
+    grants = frozenset({Capability.ANALYTICS_VIEW})
+    markup = to_xml(sidebar("token", current="operations", grants=grants))
+    sub_markup = to_xml(operations_sub_sidebar("analytics", grants=grants))
+
+    assert 'href="/operations"' in markup
+    assert 'href="/configuration"' not in markup
+    assert "Recent activity" not in sub_markup
+    assert "Analytics" in sub_markup
+
+
+def test_sidebar_offers_sign_out_always() -> None:
+    markup = to_xml(sidebar("token", current="review", grants=frozenset()))
+
+    assert 'action="/logout"' in markup
