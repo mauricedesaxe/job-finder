@@ -4,8 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from pathlib import Path
-import re
 from uuid import uuid4
 
 import psycopg
@@ -376,12 +374,30 @@ def test_first_admin_requires_legacy_password_when_present(
     assert row == (claim_stage, None)
 
 
-def test_sql_grant_allowlist_matches_capability_registry() -> None:
-    migration = (
-        Path(__file__).parents[1] / "job_finder/migrations/0052_review_accounts.sql"
-    ).read_text()
-    allowlist = migration.split("CHECK (grants <@ ARRAY[", 1)[1].split("]::TEXT[])", 1)[0]
-    assert set(re.findall(r"'([a-z]+\.[a-z]+)'", allowlist)) == {cap.value for cap in Capability}
+def test_grant_allowlist_accepts_every_registry_capability_and_rejects_unknown_grants(
+    account_db: tuple[str, str],
+) -> None:
+    dsn, schema = account_db
+    service = _service(dsn, schema)
+    admin = service.first_admin("admin@example.com", "secure-first-password")
+    assert admin is not None
+    invite = service.issue_invite(
+        admin.id, "member@example.com", role=AccountRole.MEMBER, grants=frozenset()
+    )
+    member = service.accept_invite(invite, "secure-member-password")
+    assert member is not None
+    every_grant = sorted(capability.value for capability in Capability)
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        changed = connection.execute(
+            "UPDATE review_users SET grants = %s WHERE id = %s", (every_grant, member.id)
+        ).rowcount
+        assert changed == 1
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "UPDATE review_users SET grants = %s WHERE id = %s",
+                ([*every_grant, "bogus.grant"], member.id),
+            )
 
 
 def test_member_manager_can_manage_members_but_not_admins(account_db: tuple[str, str]) -> None:
@@ -430,3 +446,144 @@ def test_member_manager_can_manage_members_but_not_admins(account_db: tuple[str,
             "SELECT detail ->> 'email' FROM review_membership_audit WHERE action = 'invited'"
         ).fetchall()
     assert {row[0] for row in rows} == {"manager@example.com", "member@example.com"}
+
+
+def test_invite_for_an_existing_account_is_rejected_everywhere(
+    account_db: tuple[str, str],
+) -> None:
+    dsn, schema = account_db
+    service = _service(dsn, schema)
+    admin = service.first_admin("admin@example.com", "secure-first-password")
+    assert admin is not None
+    invite = service.issue_invite(
+        admin.id,
+        "member@example.com",
+        role=AccountRole.MEMBER,
+        grants=frozenset({Capability.REVIEW_VIEW}),
+    )
+    member = service.accept_invite(invite, "secure-member-password")
+    assert member is not None
+    with pytest.raises(ValueError, match="account already exists"):
+        service.issue_invite(
+            admin.id,
+            "member@example.com",
+            role=AccountRole.MEMBER,
+            grants=frozenset({Capability.REVIEW_VIEW}),
+        )
+    with pytest.raises(ValueError, match="account already exists"):
+        service.issue_invite(
+            admin.id,
+            "MEMBER@example.com",
+            role=AccountRole.MEMBER,
+            grants=frozenset({Capability.REVIEW_VIEW}),
+        )
+    with pytest.raises(ValueError, match="account already exists"):
+        service.issue_invite(
+            admin.id, "admin@example.com", role=AccountRole.MEMBER, grants=frozenset()
+        )
+
+
+def test_a_new_password_reset_revokes_pending_ones(account_db: tuple[str, str]) -> None:
+    dsn, schema = account_db
+    service = _service(dsn, schema)
+    admin = service.first_admin("admin@example.com", "secure-first-password")
+    assert admin is not None
+    invite = service.issue_invite(
+        admin.id, "member@example.com", role=AccountRole.MEMBER, grants=frozenset()
+    )
+    member = service.accept_invite(invite, "secure-member-password")
+    assert member is not None
+    first = service.issue_reset(admin.id, member.id)
+    second = service.issue_reset(admin.id, member.id)
+    assert not service.accept_reset(first, "first-new-password")
+    assert service.accept_reset(second, "second-new-password")
+    assert service.authenticate("member@example.com", "second-new-password") == member
+    assert service.authenticate("member@example.com", "secure-member-password") is None
+
+
+def test_expired_sessions_stop_authorizing_and_disabled_accounts_cannot_start_sessions(
+    account_db: tuple[str, str],
+) -> None:
+    dsn, schema = account_db
+    service = _service(dsn, schema)
+    admin = service.first_admin("admin@example.com", "secure-first-password")
+    assert admin is not None
+    invite = service.issue_invite(
+        admin.id, "member@example.com", role=AccountRole.MEMBER, grants=frozenset()
+    )
+    member = service.accept_invite(invite, "secure-member-password")
+    assert member is not None
+    session = service.create_session(member.id)
+    assert service.load_principal(session) == member
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        connection.execute(
+            "UPDATE review_sessions SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'"
+        )
+    assert service.load_principal(session) is None
+    service.set_member(
+        admin.id,
+        member.id,
+        role=AccountRole.MEMBER,
+        grants=frozenset(),
+        status=AccountStatus.DISABLED,
+    )
+    with pytest.raises(ValueError, match="active account required"):
+        service.create_session(member.id)
+    service.set_member(
+        admin.id,
+        member.id,
+        role=AccountRole.MEMBER,
+        grants=frozenset(),
+        status=AccountStatus.ACTIVE,
+    )
+    assert service.create_session(member.id)
+
+
+def test_grant_shapes_are_validated_before_any_write(account_db: tuple[str, str]) -> None:
+    dsn, schema = account_db
+    service = _service(dsn, schema)
+    admin = service.first_admin("admin@example.com", "secure-first-password")
+    assert admin is not None
+    invite = service.issue_invite(
+        admin.id, "member@example.com", role=AccountRole.MEMBER, grants=frozenset()
+    )
+    member = service.accept_invite(invite, "secure-member-password")
+    assert member is not None
+    with pytest.raises(ValueError, match="area view access"):
+        service.set_member(
+            admin.id,
+            member.id,
+            role=AccountRole.MEMBER,
+            grants=frozenset({Capability.REVIEW_SUBMIT}),
+            status=AccountStatus.ACTIVE,
+        )
+    with pytest.raises(ValueError, match="admin grants must be empty"):
+        service.set_member(
+            admin.id,
+            member.id,
+            role=AccountRole.ADMIN,
+            grants=frozenset({Capability.REVIEW_VIEW}),
+            status=AccountStatus.ACTIVE,
+        )
+    with pytest.raises(ValueError, match="area view access"):
+        service.issue_invite(
+            admin.id,
+            "another@example.com",
+            role=AccountRole.MEMBER,
+            grants=frozenset({Capability.REVIEW_SUBMIT}),
+        )
+    with pytest.raises(ValueError, match="admin grants must be empty"):
+        service.issue_invite(
+            admin.id,
+            "another@example.com",
+            role=AccountRole.ADMIN,
+            grants=frozenset({Capability.REVIEW_VIEW}),
+        )
+    refreshed = next(user for user in service.list_members() if user.id == member.id)
+    assert refreshed.role is AccountRole.MEMBER
+    assert refreshed.grants == frozenset()
+    assert [user.email for user in service.list_members()] == [
+        "admin@example.com",
+        "member@example.com",
+    ]
