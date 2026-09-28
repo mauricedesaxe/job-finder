@@ -9,10 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.pipeline.connection import Connection, require_autocommit
 from job_finder.pipeline.runs import (
-    OrchestrationRun,
     fail_reevaluation_for_request,
     fail_reevaluation_run,
-    load_run_by_id,
 )
 
 JobWorkFailureOutcome = Literal["retry", "terminal_error", "lease_lost"]
@@ -301,7 +299,3 @@ def find_terminal_decision_id(connection: Connection, job_id: UUID) -> str | Non
         (job_id,),
     ).fetchone()
     return None if row is None else str(row[0])
-
-
-def load_processing_run(connection: Connection, run_id: UUID) -> OrchestrationRun:
-    return load_run_by_id(connection, run_id)

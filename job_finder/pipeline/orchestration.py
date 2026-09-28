@@ -32,7 +32,7 @@ from job_finder.evaluation.jev import (
 )
 from job_finder.evaluation.models import (
     CriterionResult,
-    OperationalError,
+    ModelCallContext,
     OperationalFailure,
     PromptAccepted,
     Rejected,
@@ -77,9 +77,7 @@ from job_finder.jobs.title_deduplication import (
 )
 from job_finder.pipeline.connection import Connection
 from job_finder.pipeline.processing_attempts import (
-    complete_model_call_context,
-    ensure_model_call_context,
-    fail_model_call_context,
+    run_model_call_attempt,
 )
 from job_finder.pipeline.discoveries import register_discoveries
 from job_finder.pipeline.work_items import (
@@ -90,9 +88,8 @@ from job_finder.pipeline.work_items import (
     fail_job_claim,
     find_terminal_decision_id,
     terminally_fail_job_claim,
-    load_processing_run,
 )
-from job_finder.pipeline.runs import OrchestrationRun, SplitOrchestrationRun
+from job_finder.pipeline.runs import OrchestrationRun, SplitOrchestrationRun, load_run_by_id
 from job_finder.review.queue import enqueue_qualified_review_item
 from job_finder.search_configuration import load_search_configuration_revision
 
@@ -275,7 +272,7 @@ def process_claimed_jobs(
             execution_release = release
             execution_relevance_policy = relevance_release.policy
             if claim.reevaluation_pipeline_run_id is not None:
-                execution_run = load_processing_run(connection, claim.reevaluation_pipeline_run_id)
+                execution_run = load_run_by_id(connection, claim.reevaluation_pipeline_run_id)
                 if execution_run.status != "running":
                     raise RuntimeError("Reevaluation run is not active")
                 execution_release, execution_relevance = load_release_target(
@@ -502,49 +499,49 @@ def _evaluate_criterion(
     api_key: str,
     now: Now,
 ) -> CriterionResult:
+    operation_key = f"evaluation:{prompt.definition.name}"
     if boundaries.model_call_started is not None:
-        boundaries.model_call_started(f"evaluation:{prompt.definition.name}")
-    context = ensure_model_call_context(
+        boundaries.model_call_started(operation_key)
+
+    def invoke(context: ModelCallContext) -> CriterionResult:
+        match relevance_policy:
+            case GeminiExecutionPolicy():
+                return evaluate_persisted_openrouter_prompt(
+                    prompt,
+                    values,
+                    context,
+                    postgres_model_call_persistence(connection),
+                    api_key=api_key,
+                    sender=boundaries.model_sender,
+                    generation_sender=boundaries.generation_sender,
+                    retry_policy=boundaries.model_retry_policy,
+                    now=now,
+                )
+            case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
+                return evaluate_persisted_jev_prompt(
+                    prompt,
+                    values,
+                    context,
+                    postgres_model_call_persistence(connection, provider="typesafe"),
+                    api_key=api_key,
+                    execution_policy=relevance_policy,
+                    sender=boundaries.jev_sender,
+                    retry_policy=boundaries.jev_retry_policy,
+                    now=now,
+                )
+            case _:
+                assert_never(relevance_policy)
+
+    return run_model_call_attempt(
         connection,
         run_id=run.id,
         job_id=claim.job_id,
-        operation_key=f"evaluation:{prompt.definition.name}",
+        operation_key=operation_key,
         input_digest=prompt_input_digest(values),
-        started_at=now(),
         prompt_release_id=run.prompt_release_id,
+        now=now,
+        invoke=invoke,
     )
-    match relevance_policy:
-        case GeminiExecutionPolicy():
-            result = evaluate_persisted_openrouter_prompt(
-                prompt,
-                values,
-                context,
-                postgres_model_call_persistence(connection),
-                api_key=api_key,
-                sender=boundaries.model_sender,
-                generation_sender=boundaries.generation_sender,
-                retry_policy=boundaries.model_retry_policy,
-                now=now,
-            )
-        case JevAtomicExecutionPolicy() | JevFaithfulExecutionPolicy():
-            result = evaluate_persisted_jev_prompt(
-                prompt,
-                values,
-                context,
-                postgres_model_call_persistence(connection, provider="typesafe"),
-                api_key=api_key,
-                execution_policy=relevance_policy,
-                sender=boundaries.jev_sender,
-                retry_policy=boundaries.jev_retry_policy,
-                now=now,
-            )
-        case _:
-            assert_never(relevance_policy)
-    if isinstance(result, OperationalError):
-        fail_model_call_context(connection, context, result, completed_at=now())
-    else:
-        complete_model_call_context(connection, context, completed_at=now())
-    return result
 
 
 def _enrich(
@@ -560,30 +557,25 @@ def _enrich(
     if boundaries.model_call_started is not None:
         boundaries.model_call_started("enrichment")
     values = enrichment_values(job)
-    context = ensure_model_call_context(
+    return run_model_call_attempt(
         connection,
         run_id=run.id,
         job_id=claim.job_id,
         operation_key="enrichment",
         input_digest=prompt_input_digest(values),
-        started_at=now(),
         prompt_release_id=run.prompt_release_id,
+        now=now,
+        invoke=lambda context: enrich_job(
+            job,
+            release,
+            context,
+            postgres_model_call_persistence(connection),
+            api_key=api_key,
+            sender=boundaries.model_sender,
+            generation_sender=boundaries.generation_sender,
+            retry_policy=boundaries.model_retry_policy,
+        ),
     )
-    result = enrich_job(
-        job,
-        release,
-        context,
-        postgres_model_call_persistence(connection),
-        api_key=api_key,
-        sender=boundaries.model_sender,
-        generation_sender=boundaries.generation_sender,
-        retry_policy=boundaries.model_retry_policy,
-    )
-    if isinstance(result, OperationalError):
-        fail_model_call_context(connection, context, result, completed_at=now())
-    else:
-        complete_model_call_context(connection, context, completed_at=now())
-    return result
 
 
 def _deduplicate(
@@ -600,31 +592,26 @@ def _deduplicate(
     if boundaries.model_call_started is not None:
         boundaries.model_call_started("deduplication")
     values = title_deduplication_values(new_title, existing_titles)
-    context = ensure_model_call_context(
+    return run_model_call_attempt(
         connection,
         run_id=run.id,
         job_id=claim.job_id,
         operation_key="deduplication",
         input_digest=prompt_input_digest(values),
-        started_at=now(),
         prompt_release_id=run.prompt_release_id,
+        now=now,
+        invoke=lambda context: deduplicate_title(
+            new_title,
+            existing_titles,
+            release,
+            context,
+            postgres_model_call_persistence(connection),
+            api_key=api_key,
+            sender=boundaries.model_sender,
+            generation_sender=boundaries.generation_sender,
+            retry_policy=boundaries.model_retry_policy,
+        ),
     )
-    result = deduplicate_title(
-        new_title,
-        existing_titles,
-        release,
-        context,
-        postgres_model_call_persistence(connection),
-        api_key=api_key,
-        sender=boundaries.model_sender,
-        generation_sender=boundaries.generation_sender,
-        retry_policy=boundaries.model_retry_policy,
-    )
-    if isinstance(result, OperationalError):
-        fail_model_call_context(connection, context, result, completed_at=now())
-    else:
-        complete_model_call_context(connection, context, completed_at=now())
-    return result
 
 
 def _claim_completing_store(connection: Connection, claim: JobWorkClaim, now: Now) -> DecisionStore:

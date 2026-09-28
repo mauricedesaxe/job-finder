@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
+from typing import TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
@@ -13,6 +15,8 @@ from job_finder.evaluation.models import (
     RetryableOperationalError,
 )
 from job_finder.pipeline.connection import Connection, require_autocommit
+
+_Result = TypeVar("_Result")
 
 
 def ensure_model_call_context(
@@ -131,3 +135,32 @@ def fail_model_call_context(
                 context.processing_attempt_id,
             ),
         )
+
+
+def run_model_call_attempt(
+    connection: Connection,
+    *,
+    run_id: UUID,
+    job_id: UUID,
+    operation_key: str,
+    input_digest: InputDigest,
+    prompt_release_id: PromptReleaseId,
+    now: Callable[[], datetime],
+    invoke: Callable[[ModelCallContext], _Result],
+) -> _Result:
+    context = ensure_model_call_context(
+        connection,
+        run_id=run_id,
+        job_id=job_id,
+        operation_key=operation_key,
+        input_digest=input_digest,
+        started_at=now(),
+        prompt_release_id=prompt_release_id,
+    )
+    result = invoke(context)
+    completed_at = now()
+    if isinstance(result, OperationalError):
+        fail_model_call_context(connection, context, result, completed_at=completed_at)
+    else:
+        complete_model_call_context(connection, context, completed_at=completed_at)
+    return result
