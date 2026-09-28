@@ -890,7 +890,7 @@ def test_reports_incompatible_release_readiness_without_authentication(
 def test_reports_application_state_readiness_failure_without_authentication(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def broken_state() -> None:
+    def unavailable() -> None:
         raise RuntimeError("password=secret-value")
 
     client = TestClient(
@@ -898,9 +898,9 @@ def test_reports_application_state_readiness_failure_without_authentication(
             lambda: _queue(),
             SETTINGS,
             submit_review=_default_submit_review,
-            owner_access_service=OWNER_ACCESS,
             account_service=helper_account_service(),
-            readiness=broken_state,
+            owner_access_service=OWNER_ACCESS,
+            readiness=unavailable,
             now=lambda: NOW,
         )
     )
@@ -910,7 +910,7 @@ def test_reports_application_state_readiness_failure_without_authentication(
     assert response.status_code == 503
     assert response.text == "application state unavailable"
     assert "Readiness state check failed: RuntimeError" in caplog.text
-    assert "secret-value" not in caplog.text
+    assert "password=secret-value" not in response.text + caplog.text
 
 
 def test_dismiss_undo_redirects_with_its_own_notice() -> None:

@@ -12,6 +12,7 @@ import importlib.util
 import re
 from collections.abc import Generator
 from pathlib import Path
+from socket import socket
 from typing import Callable, cast
 from uuid import uuid4
 
@@ -22,10 +23,27 @@ from psycopg import sql
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from job_finder.config import PostgresContractSettings
+from job_finder.config import (
+    DatabaseSettings,
+    PostgresContractSettings,
+    ReviewAppSettings,
+)
+from job_finder.execution_budget import postgres_budget_setup_service
+from job_finder.review.accounts import AccountService
+from job_finder.review.feedback import postgres_review_submitter
+from job_finder.review.owner_access import postgres_owner_access_service
+from job_finder.review.queue import postgres_review_queue_loader
+from job_finder.web.app import create_review_app
 
 SERVE_REVIEW = Path(__file__).parents[1] / "scripts" / "serve_review.py"
 OWNER_PASSWORD = "wiring test owner password"
+
+
+def _refused_postgres_dsn() -> str:
+    with socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        _host, port = cast(tuple[str, int], probe.getsockname())
+    return f"postgresql://jobfinder:hunter2@127.0.0.1:{port}/jobfinder_test"
 
 
 @pytest.fixture
@@ -105,6 +123,40 @@ def test_serve_review_serves_real_requests_from_the_environment(
     setup = client.get("/setup/providers")
     assert setup.status_code == 200
     assert "provider" in setup.text.lower()
+
+
+def test_readyz_reports_database_unavailability_without_leaking_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOB_FINDER_POSTGRES_DSN", _refused_postgres_dsn())
+    database = DatabaseSettings.from_environment()
+
+    def connect() -> psycopg.Connection[tuple[object, ...]]:
+        return psycopg.connect(database.postgres_dsn, autocommit=True)
+
+    budget = postgres_budget_setup_service(connect)
+
+    def readiness() -> None:
+        _ = budget.inspect(25)
+
+    app = create_review_app(
+        postgres_review_queue_loader(connect),
+        ReviewAppSettings(session_secret="s" * 32, cookie_secure=False),
+        submit_review=postgres_review_submitter(connect),
+        account_service=AccountService(connect),
+        owner_access_service=postgres_owner_access_service(connect),
+        readiness=readiness,
+    )
+    client = TestClient(app, base_url="https://testserver")
+
+    ready = client.get("/readyz")
+    health = client.get("/healthz")
+
+    assert ready.status_code == 503
+    assert ready.text == "database unavailable"
+    assert health.status_code == 200
+    assert health.text == "ok"
+    assert "hunter2" not in ready.text + health.text
 
 
 def test_serve_review_requires_split_owner_setup(monkeypatch: pytest.MonkeyPatch) -> None:
