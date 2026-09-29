@@ -18,7 +18,6 @@ from contracts.test_postgres_authority import (
     build_qualification_target,
     build_search_configuration_revision,
     datetime,
-    project_legacy_search_configuration,
     psycopg,
     pytest,
     qualification_definition_revision_id,
@@ -54,16 +53,47 @@ def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
 ) -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     original = DEFAULT_SEARCH_CONFIGURATION
-    configurations = (
-        original,
-        original.model_copy(update={"search_keywords": (*original.search_keywords, "a new role")}),
-        original.model_copy(
-            update={
-                "personal_criteria": (
-                    original.personal_criteria[0].model_copy(update={"name": "Renamed criterion"}),
-                    *original.personal_criteria[1:],
-                )
-            }
+    original_acquisition = AcquisitionPolicy(
+        search_keywords=original.search_keywords,
+        enabled_sources=original.enabled_sources,
+    )
+    original_qualification = QualificationDefinition(
+        personal_criteria=original.personal_criteria,
+        target_profiles=original.target_profiles,
+    )
+    additional_keyword = "a new role"
+    renamed_criterion = original.personal_criteria[0].model_copy(
+        update={"name": "Renamed criterion"}
+    )
+    cases = (
+        (original, original_acquisition, original_qualification),
+        (
+            original.model_copy(
+                update={"search_keywords": (*original.search_keywords, additional_keyword)}
+            ),
+            original_acquisition.model_copy(
+                update={"search_keywords": (*original.search_keywords, additional_keyword)}
+            ),
+            original_qualification,
+        ),
+        (
+            original.model_copy(
+                update={
+                    "personal_criteria": (
+                        renamed_criterion,
+                        *original.personal_criteria[1:],
+                    )
+                }
+            ),
+            original_acquisition,
+            original_qualification.model_copy(
+                update={
+                    "personal_criteria": (
+                        renamed_criterion,
+                        *original.personal_criteria[1:],
+                    )
+                }
+            ),
         ),
     )
     with _connection(authority_schema) as connection:
@@ -75,7 +105,7 @@ def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
                     configuration, created_at=now, created_by="migration-test"
                 ),
             )
-            for configuration in configurations
+            for configuration, _, _ in cases
         )
         legacy_tables = _public_tables(connection)
         legacy_rows = _table_contents(connection, legacy_tables)
@@ -92,8 +122,9 @@ def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
             "SELECT count(*) FROM qualification_definition_revisions"
         ).fetchone() == (2,)
 
-        for revision in revisions:
-            projection = project_legacy_search_configuration(revision.configuration)
+        for revision, (_, expected_acquisition, expected_qualification) in zip(
+            revisions, cases, strict=True
+        ):
             row = connection.execute(
                 """
                 SELECT bridge.acquisition_policy_revision_id, acquisition.content,
@@ -110,10 +141,10 @@ def test_policy_projection_migration_preserves_legacy_rows_and_repeats(
             assert row is not None
             acquisition = AcquisitionPolicy.model_validate(row[1])
             qualification = QualificationDefinition.model_validate(row[3])
-            assert row[0] == acquisition_policy_revision_id(projection.acquisition)
-            assert row[2] == qualification_definition_revision_id(projection.qualification)
-            assert acquisition == projection.acquisition
-            assert qualification == projection.qualification
+            assert row[0] == acquisition_policy_revision_id(expected_acquisition)
+            assert row[2] == qualification_definition_revision_id(expected_qualification)
+            assert acquisition == expected_acquisition
+            assert qualification == expected_qualification
 
         projection_tables = (
             "acquisition_policy_revisions",
@@ -229,18 +260,25 @@ def test_split_policy_state_seeds_without_changing_legacy_authority(
 
         assert apply_migrations(connection) == EXPECTED_MIGRATIONS
         assert _table_contents(connection, legacy_tables) == legacy_rows
-        projection = project_legacy_search_configuration(second)
-        acquisition_id = acquisition_policy_revision_id(projection.acquisition)
-        qualification_id = qualification_definition_revision_id(projection.qualification)
+        expected_acquisition = AcquisitionPolicy(
+            search_keywords=second.search_keywords,
+            enabled_sources=second.enabled_sources,
+        )
+        expected_qualification = QualificationDefinition(
+            personal_criteria=second.personal_criteria,
+            target_profiles=second.target_profiles,
+        )
+        acquisition_id = acquisition_policy_revision_id(expected_acquisition)
+        qualification_id = qualification_definition_revision_id(expected_qualification)
         assert connection.execute(
             "SELECT revision_id, generation FROM active_acquisition_policy"
         ).fetchone() == (acquisition_id, 0)
         assert connection.execute(
             "SELECT base_revision_id, version, content FROM acquisition_policy_drafts"
-        ).fetchone() == (acquisition_id, 0, projection.acquisition.model_dump(mode="json"))
+        ).fetchone() == (acquisition_id, 0, expected_acquisition.model_dump(mode="json"))
         assert connection.execute(
             "SELECT base_revision_id, version, content FROM qualification_definition_drafts"
-        ).fetchone() == (qualification_id, 0, projection.qualification.model_dump(mode="json"))
+        ).fetchone() == (qualification_id, 0, expected_qualification.model_dump(mode="json"))
         assert connection.execute(
             "SELECT count(*) FROM legacy_search_configuration_publication_projections"
         ).fetchone() == (2,)

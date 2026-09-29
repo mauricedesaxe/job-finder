@@ -142,7 +142,6 @@ from job_finder.evaluation.qualification_prompt_compilations import (
     bind_qualification_prompt_release,
     load_compiled_qualification_target,
 )
-from job_finder.policy_projection import project_legacy_search_configuration
 from job_finder.qualification_definition import (
     QualificationDefinition,
     QualificationDefinitionRevisionId,
