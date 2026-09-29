@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from socket import socket
 from typing import cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -18,10 +19,11 @@ from starlette.routing import Route
 
 from job_finder.access_policy import Capability, RouteAccess, route_policy
 from job_finder.config import PostgresContractSettings, ReviewAppSettings
-from job_finder.database import apply_migrations
+from job_finder.database import ConnectionFactory, apply_migrations
 from job_finder.review.accounts import AccountRole, AccountService
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessService, OwnerAccessState
 from job_finder.review.queue import ReviewQueue
+from job_finder.review.test_app_support import OWNER_EMAIL, OWNER_PASSWORD, FakeAccountService
 from job_finder.web.app import create_review_app
 
 
@@ -386,3 +388,104 @@ def test_duplicate_invite_via_the_web_reports_the_conflict(
     assert duplicate.status_code == 400
     assert "account already exists" in duplicate.text
     assert "/invite/" not in duplicate.text
+
+
+def _refused_postgres_dsn() -> str:
+    with socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        _host, port = cast(tuple[str, int], probe.getsockname())
+    return f"postgresql://redact:hunter2@127.0.0.1:{port}/test"
+
+
+class _OutageAccountService(FakeAccountService, AccountService):
+    def __init__(self, connect: ConnectionFactory) -> None:
+        FakeAccountService.__init__(self)
+        AccountService.__init__(self, connect=connect)
+
+
+def _outage_client() -> TestClient:
+    def connect() -> psycopg.Connection[tuple[object, ...]]:
+        return psycopg.connect(_refused_postgres_dsn(), autocommit=True)
+
+    owner_state = OwnerAccessState(OnboardingStage.COMPLETE, False)
+    owner_access = OwnerAccessService(
+        load_state=lambda: owner_state,
+        authenticate=lambda _password: False,
+        bootstrap=lambda _password: pytest.fail("unexpected bootstrap"),
+    )
+    settings = ReviewAppSettings(
+        bootstrap_token=SecretStr("bootstrap-token-with-at-least-32-characters"),
+        session_secret="s" * 32,
+        cookie_secure=False,
+    )
+    app = create_review_app(
+        lambda: ReviewQueue(items=()),
+        settings,
+        submit_review=lambda _review: pytest.fail("unexpected review"),
+        owner_access_service=owner_access,
+        account_service=_OutageAccountService(connect),
+    )
+    return TestClient(app)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "fields", "unavailable"),
+    [
+        ("GET", "/members", None, "Members unavailable"),
+        (
+            "POST",
+            "/members/invite",
+            {
+                "email": "outage@example.com",
+                "preset": "Reviewer",
+                "grants": ["review.view", "review.submit"],
+            },
+            "Invite unavailable",
+        ),
+        (
+            "POST",
+            f"/members/{uuid4()}",
+            {"role": "member", "status": "active"},
+            "Change unavailable",
+        ),
+        ("POST", f"/members/{uuid4()}/reset", {}, "Reset unavailable"),
+        (
+            "POST",
+            f"/invite/{'t' * 43}",
+            {
+                "password": "secure-member-password",
+                "password_confirmation": "secure-member-password",
+            },
+            "Invitation unavailable",
+        ),
+        (
+            "POST",
+            f"/reset/{'t' * 43}",
+            {
+                "password": "secure-member-password",
+                "password_confirmation": "secure-member-password",
+            },
+            "Reset unavailable",
+        ),
+    ],
+)
+def test_member_routes_report_a_database_outage_with_distinct_copy(
+    method: str,
+    path: str,
+    fields: dict[str, str | list[str]] | None,
+    unavailable: str,
+) -> None:
+    client = _outage_client()
+    assert _login(client, OWNER_EMAIL, OWNER_PASSWORD) == 303
+    home = client.get("/")
+    assert home.status_code == 200
+
+    if method == "GET":
+        response = client.get(path)
+    else:
+        response = client.post(path, data={"csrf_token": _csrf(home.text), **(fields or {})})
+
+    assert response.status_code == 503
+    assert unavailable in response.text
+    assert "Reload and try again." in response.text
+    assert "hunter2" not in response.text

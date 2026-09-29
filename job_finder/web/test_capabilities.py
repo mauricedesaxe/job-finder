@@ -116,6 +116,8 @@ def test_preset_grants_are_independent_snapshots() -> None:
     assert landing_path(preset_grants(Preset.SEARCH_MANAGER)) == "/configuration"
     assert landing_path(preset_grants(Preset.OPERATOR)) == "/operations/runs"
     assert landing_path(frozenset({Capability.ANALYTICS_VIEW})) == "/operations/analytics"
+    assert landing_path(frozenset({Capability.CONTROL_VIEW})) == "/operations/control"
+    assert landing_path(frozenset({Capability.ADMIN_VIEW})) == "/members"
     assert landing_path(frozenset()) == "/no-access"
 
 

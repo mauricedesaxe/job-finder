@@ -15,6 +15,7 @@ from job_finder.config import PostgresContractSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PASSWORD = "hunter2"
+SCRIPT_WRONG_PASSWORD = "not-the-script-password"
 
 
 @pytest.fixture
@@ -80,4 +81,20 @@ def test_script_output_keeps_database_credentials_private(
     assert result.returncode == 0
     assert expected in result.stdout
     assert SCRIPT_PASSWORD not in result.stdout + result.stderr
+    assert "postgresql://" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "module", ["scripts.backfill_review_queue", "scripts.reprocess_thin_body_jobs"]
+)
+def test_script_failure_output_keeps_database_credentials_private(
+    script_postgres_dsn: str, module: str
+) -> None:
+    rejected = script_postgres_dsn.replace(f":{SCRIPT_PASSWORD}@", f":{SCRIPT_WRONG_PASSWORD}@")
+
+    result = _run_script(module, rejected, dry_run=True)
+
+    assert result.returncode != 0
+    assert SCRIPT_PASSWORD not in result.stdout + result.stderr
+    assert SCRIPT_WRONG_PASSWORD not in result.stdout + result.stderr
     assert "postgresql://" not in result.stdout + result.stderr

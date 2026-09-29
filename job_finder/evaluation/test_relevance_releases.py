@@ -14,7 +14,6 @@ from job_finder.evaluation.prompt_releases import (
 from job_finder.evaluation.relevance_releases import (
     _EVALUATE_AFTER_LISTING_IMPORT_MOVE,
     _EVALUATE_BEFORE_LISTING_IMPORT_MOVE,
-    _matches_execution_artifact,
     CodeArtifactIdentity,
     FewerThanActiveSignals,
     GeminiExecutionPolicy,
@@ -152,25 +151,30 @@ def test_policies_identify_the_actual_checked_in_execution_sources() -> None:
     }
 
 
-def test_import_move_compatibility_window_accepts_exactly_its_recorded_digest_pair() -> None:
-    entrypoint = "job_finder.evaluation.evaluate:job_message"
-    recorded = CodeArtifactIdentity(
-        entrypoint=entrypoint,
-        content_digest=_EVALUATE_BEFORE_LISTING_IMPORT_MOVE,
+@pytest.mark.parametrize(
+    "historical_digest",
+    (_EVALUATE_BEFORE_LISTING_IMPORT_MOVE, _EVALUATE_AFTER_LISTING_IMPORT_MOVE),
+)
+def test_import_move_release_digests_no_longer_execute_after_source_drift(
+    historical_digest: str,
+) -> None:
+    prompt_release = build_prompt_release()
+    policy = build_jev_atomic_policy()
+    legacy_policy = policy.model_copy(
+        update={
+            "input_serialization": policy.input_serialization.model_copy(
+                update={"content_digest": historical_digest}
+            ),
+        }
     )
-    current = CodeArtifactIdentity(
-        entrypoint=entrypoint,
-        content_digest=_EVALUATE_AFTER_LISTING_IMPORT_MOVE,
+    relevance_release = build_relevance_release(legacy_policy)
+    target = ReleaseTarget(
+        prompt_release_id=prompt_release.id,
+        relevance_release_id=relevance_release.id,
     )
 
-    assert _matches_execution_artifact(recorded, current)
-    assert not _matches_execution_artifact(
-        recorded.model_copy(update={"content_digest": "0" * 64}), current
-    )
-    assert not _matches_execution_artifact(
-        recorded,
-        current.model_copy(update={"content_digest": "0" * 64}),
-    )
+    with pytest.raises(RelevanceReleaseError, match="current source artifacts"):
+        validate_release_target(target, prompt_release, relevance_release)
 
 
 def test_source_content_changes_release_identity_without_rewriting_project_sources(

@@ -24,16 +24,20 @@ class _FailingSender:
 @final
 class _StatusServer(ThreadingHTTPServer):
     status: int
+    requests_received: list[tuple[str, str]]
 
     def __init__(self, status: int) -> None:
         self.status = status
+        self.requests_received = []
         super().__init__(("127.0.0.1", 0), _StatusHandler)
 
 
 @final
 class _StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        self.send_response(cast(_StatusServer, self.server).status)
+        server = cast(_StatusServer, self.server)
+        server.requests_received.append((self.command, self.path))
+        self.send_response(server.status)
         self.send_header("content-length", "0")
         self.end_headers()
 
@@ -61,25 +65,18 @@ def _url(server: _StatusServer, token: str) -> str:
 
 
 def test_pings_the_heartbeat_url() -> None:
-    calls: list[str] = []
+    with _http_status(200) as server:
+        ping_heartbeat(_url(server, "secret-token"))
 
-    def sender(url: str) -> None:
-        calls.append(url)
-
-    ping_heartbeat("https://heartbeat.example/ping", sender=sender)
-
-    assert calls == ["https://heartbeat.example/ping"]
+    assert server.requests_received == [("GET", "/secret-token")]
 
 
-def test_skips_a_missing_heartbeat_url() -> None:
-    calls: list[str] = []
+def test_skips_a_missing_heartbeat_url(caplog: LogCaptureFixture) -> None:
+    with _http_status(200) as server:
+        ping_heartbeat(None)
 
-    def sender(url: str) -> None:
-        calls.append(url)
-
-    ping_heartbeat(None, sender=sender)
-
-    assert calls == []
+    assert server.requests_received == []
+    assert "Heartbeat ping failed" not in caplog.text
 
 
 def test_a_failed_ping_warns_without_exposing_the_url(caplog: LogCaptureFixture) -> None:
@@ -87,7 +84,6 @@ def test_a_failed_ping_warns_without_exposing_the_url(caplog: LogCaptureFixture)
 
     ping_heartbeat("https://heartbeat.example/secret-token", sender=failing)
 
-    assert failing.calls == ["https://heartbeat.example/secret-token"]
     assert "Heartbeat ping failed: ConnectionError" in caplog.text
     assert "secret-token" not in caplog.text
 

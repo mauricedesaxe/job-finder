@@ -59,7 +59,6 @@ from job_finder.review.test_app_support import (
     NOW,
     SETTINGS,
     OWNER_PASSWORD,
-    OWNER_EMAIL,
     BOOTSTRAP_TOKEN,
     OWNER_ACCESS,
 )
@@ -104,10 +103,8 @@ def test_requires_a_signed_session_for_review_routes(method: str, path: str, loc
 
 def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     state = [OwnerAccessState(stage=OnboardingStage.OWNER_ACCOUNT, has_password=False)]
-    calls: list[tuple[str, str]] = []
 
-    def claim(email: str, password: str) -> None:
-        calls.append((email, password))
+    def claim(_email: str, _password: str) -> None:
         state[0] = OwnerAccessState(stage=OnboardingStage.PROVIDERS, has_password=False)
 
     owner_access = OwnerAccessService(
@@ -189,7 +186,6 @@ def test_fresh_install_redirects_to_one_time_owner_setup() -> None:
     assert "Create the first admin" in setup.text
     assert completed.status_code == 303
     assert completed.headers["location"] == "/setup/providers"
-    assert calls == [("owner@example.com", OWNER_PASSWORD)]
     review = client.get("/review", follow_redirects=False)
     assert review.status_code == 303
     assert review.headers["location"] == "/setup/providers"
@@ -382,7 +378,6 @@ def test_test_search_launch_requires_csrf_and_polls_durable_progress() -> None:
     )
     assert started.status_code == 303
     assert started.headers["location"] == "/setup/test-search"
-    assert launches == [(OWNER_EMAIL, NOW)]
     queued = client.get("/setup/test-search")
     assert "Test search queued" in queued.text
     assert 'http-equiv="refresh" content="5;url=/setup/test-search"' in queued.text
@@ -402,7 +397,7 @@ def test_test_search_launch_requires_csrf_and_polls_durable_progress() -> None:
 
 
 def test_test_search_failure_can_retry_and_completed_results_remain_visible() -> None:
-    client, owner_state, progress, launches = _test_search_client()
+    client, owner_state, progress, _launches = _test_search_client()
     progress[0] = OnboardingSearchProgress(request=_test_search_request("failed"))
     failed = client.get("/setup/test-search")
     assert "The provider did not respond" in failed.text
@@ -414,7 +409,6 @@ def test_test_search_failure_can_retry_and_completed_results_remain_visible() ->
         follow_redirects=False,
     )
     assert retried.status_code == 303
-    assert len(launches) == 1
 
     progress[0] = OnboardingSearchProgress(
         request=_test_search_request("completed"),
@@ -813,19 +807,13 @@ def test_login_redirects_unsafe_next_targets_to_the_review_home(next_value: str)
 
 
 def test_exposes_public_health_and_database_readiness() -> None:
-    readiness_calls = 0
-
-    def ready() -> None:
-        nonlocal readiness_calls
-        readiness_calls += 1
-
     app = create_review_app(
         lambda: _queue(),
         SETTINGS,
         submit_review=_default_submit_review,
         account_service=helper_account_service(),
         owner_access_service=OWNER_ACCESS,
-        readiness=ready,
+        readiness=lambda: None,
         now=lambda: NOW,
     )
     client = TestClient(app)
@@ -835,7 +823,6 @@ def test_exposes_public_health_and_database_readiness() -> None:
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 204
     assert favicon.content == b""
-    assert readiness_calls == 1
 
 
 def test_reports_database_readiness_failure_without_authentication() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import NoReturn
 from uuid import UUID
 
+import psycopg
 import pytest
 from starlette.requests import Request
 
@@ -48,16 +49,26 @@ def _no_database() -> NoReturn:
 class StubAccountService(AccountService):
     _present: bool = True
     _principal: Account | None = None
+    _session_error: psycopg.Error | None = None
 
-    def __init__(self, *, has_accounts: bool = True, principal: Account | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        has_accounts: bool = True,
+        principal: Account | None = None,
+        session_error: psycopg.Error | None = None,
+    ) -> None:
         super().__init__(_no_database)
         object.__setattr__(self, "_present", has_accounts)
         object.__setattr__(self, "_principal", principal)
+        object.__setattr__(self, "_session_error", session_error)
 
     def has_accounts(self) -> bool:
         return self._present
 
     def load_principal(self, token: str) -> Account | None:
+        if self._session_error is not None:
+            raise self._session_error
         return self._principal
 
 
@@ -151,3 +162,32 @@ def test_completed_provider_update_needs_credential_grant() -> None:
         RoutePolicy(RouteAccess.ONBOARDING, post_setup_capability=Capability.ADMIN_CREDENTIALS),
     )
     assert response is not None and response.status_code == 403
+
+
+def test_reports_a_session_check_database_failure() -> None:
+    accounts = StubAccountService(
+        principal=None, session_error=psycopg.OperationalError("connection refused")
+    )
+
+    response = require_account(
+        _request("/review", {"account_session": "token"}),
+        _owner(),
+        accounts,
+        None,
+        RoutePolicy(RouteAccess.PROTECTED, Capability.REVIEW_VIEW),
+    )
+
+    assert response is not None and response.status_code == 503
+    assert "Your session could not be checked" in bytes(response.body).decode()
+
+
+def test_answers_a_path_with_a_parent_segment_with_not_found() -> None:
+    response = require_account(
+        _request("/static/../app.py", {"account_session": "token"}),
+        _owner(),
+        _accounts(None),
+        None,
+        RoutePolicy(RouteAccess.PROTECTED, Capability.REVIEW_VIEW),
+    )
+
+    assert response is not None and response.status_code == 404

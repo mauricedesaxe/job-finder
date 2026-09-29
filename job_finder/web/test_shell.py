@@ -108,6 +108,17 @@ def test_sidebar_shows_operations_for_analytics_only_grants() -> None:
     assert "Analytics" in sub_markup
 
 
+def test_sidebar_shows_operations_for_control_only_grants() -> None:
+    grants = frozenset({Capability.CONTROL_VIEW})
+    markup = to_xml(sidebar("token", current="operations", grants=grants))
+    sub_markup = to_xml(operations_sub_sidebar("control", grants=grants))
+
+    assert 'href="/operations"' in markup
+    assert 'href="/configuration"' not in markup
+    assert "Recent activity" not in sub_markup
+    assert "Control plane" in sub_markup
+
+
 def test_sidebar_offers_sign_out_always() -> None:
     markup = to_xml(sidebar("token", current="review", grants=frozenset()))
 
