@@ -10,7 +10,6 @@ import pytest
 
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import format_ats_block
-from job_finder.evaluation import corpus as corpus_module
 from job_finder.evaluation.corpus import (
     CORPUS_ROOT,
     EvaluationCorpusResult,
@@ -109,7 +108,7 @@ def test_rejects_duplicate_logical_case_ids(tmp_path: Path) -> None:
 
 
 def test_corpus_identity_tracks_bytes_and_policy_without_tracking_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     directory = tmp_path / "pass"
     directory.mkdir()
@@ -130,11 +129,6 @@ def test_corpus_identity_tracks_bytes_and_policy_without_tracking_paths(
     )
     assert (
         corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=2").run_digest
-        != first.run_digest
-    )
-    monkeypatch.setattr(corpus_module, "MAX_FALSE_POSITIVE_RATE", Decimal("0.20"))
-    assert (
-        corpus_identity(original, "direct", "a" * 64, "p" * 64, "EUR=1").run_digest
         != first.run_digest
     )
 

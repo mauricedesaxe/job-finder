@@ -18,8 +18,11 @@ from contracts.test_postgres_authority import _store_default_qualification_targe
 from job_finder.ats.models import AtsAvailable, AtsNotApplicable
 from job_finder.benchmarks.qualification_evidence import (
     FixtureCase,
+    FixtureSetId,
     PhaseFixtureSet,
     QualificationEvidence,
+    fixture_set_id,
+    load_fixture_set,
     store_fixture_set,
 )
 from job_finder.benchmarks.qualification_execution import execute_qualification_evidence
@@ -342,6 +345,108 @@ def test_failed_execution_is_recorded_and_replayed_identically(
             ).fetchone() == (0,)
             retry = execute("contract:new-attempt")
             assert retry == fresh
+            assert connection.execute(
+                "SELECT count(*) FROM qualification_phase_evidence WHERE target_id = %s",
+                (target_id,),
+            ).fetchone() == (0,)
+
+
+def test_load_fixture_set_reports_missing_fixture_set(authority_schema: str) -> None:
+    settings = PostgresContractSettings.from_environment()
+    with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(authority_schema))
+        )
+        apply_migrations(connection)
+        with pytest.raises(ValueError, match="Input preparation fixture set not found"):
+            _ = load_fixture_set(connection, FixtureSetId("a" * 64), phase="input_preparation")
+
+
+def test_load_fixture_set_rejects_mismatched_content_identity(authority_schema: str) -> None:
+    settings = PostgresContractSettings.from_environment()
+    content_json = (
+        '{"cases": [{"expected": {}, "input": {"salary": 1.50}, "input_path": "direct"}],'
+        ' "phase": "input_preparation", "schema_version": 1}'
+    )
+    with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(authority_schema))
+        )
+        apply_migrations(connection)
+        connection.execute(
+            """
+            WITH candidate AS (SELECT %s::jsonb AS content)
+            INSERT INTO qualification_fixture_sets (id, phase, content, created_at, created_by)
+            SELECT encode(sha256(convert_to(canonical_job_finder_json(content), 'UTF8')), 'hex'),
+                   'input_preparation', content, %s, %s
+            FROM candidate
+            """,
+            (content_json, _NOW, "contract"),
+        )
+        row = connection.execute("SELECT id, content FROM qualification_fixture_sets").fetchone()
+        assert row is not None
+        stored_identity = FixtureSetId(str(row[0]))
+        stored = PhaseFixtureSet.model_validate(row[1])
+        assert stored.phase == "input_preparation"
+        assert fixture_set_id(stored) != stored_identity
+        with pytest.raises(ValueError, match="Input preparation fixture set has invalid identity"):
+            _ = load_fixture_set(connection, stored_identity, phase="input_preparation")
+
+
+def test_load_fixture_set_rejects_phase_mismatch(authority_schema: str) -> None:
+    settings = PostgresContractSettings.from_environment()
+    with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(authority_schema))
+        )
+        apply_migrations(connection)
+        identity = store_fixture_set(
+            connection,
+            PhaseFixtureSet(
+                phase="enrichment",
+                cases=(FixtureCase(input={}, expected={}, input_path="direct"),),
+            ),
+            created_at=_NOW,
+            created_by="contract",
+        )
+        with pytest.raises(ValueError, match="Input preparation fixture set has invalid identity"):
+            _ = load_fixture_set(connection, identity, phase="input_preparation")
+
+
+def test_execution_with_missing_fixture_set_fails(authority_schema: str) -> None:
+    settings = PostgresContractSettings.from_environment()
+    root = Path(__file__).resolve().parents[1]
+    with NamedTemporaryFile(dir=root, suffix=".json") as temporary:
+        artifact_path = Path(temporary.name)
+        with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(authority_schema))
+            )
+            apply_migrations(connection)
+            artifact, _, target = _store_default_qualification_target(connection, _NOW)
+            target_id = qualification_target_id(target)
+            assert write_implementation_artifact(root, artifact_path) == artifact
+            _ = bind_qualification_prompt_release(
+                connection, target_id, artifact_path, created_at=_NOW, created_by="contract"
+            )
+
+            def credentials(_connection: object):
+                raise AssertionError("Input preparation does not use provider credentials")
+
+            result = execute_qualification_evidence(
+                connection,
+                idempotency_key="contract:missing-fixture",
+                target_id=target_id,
+                phase="input_preparation",
+                input_id="a" * 64,
+                artifact_path=artifact_path,
+                resolve_credentials=credentials,
+                completed_at=_NOW,
+                created_by="contract",
+            )
+            assert result.state == "failed"
+            assert result.failure == "execution_failed"
+            assert result.evidence_id is None
             assert connection.execute(
                 "SELECT count(*) FROM qualification_phase_evidence WHERE target_id = %s",
                 (target_id,),

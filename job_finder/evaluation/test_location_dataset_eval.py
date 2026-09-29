@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import itertools
+import subprocess
+import sys
+from typing import cast
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,17 +14,22 @@ from langfuse.api.commons.types.dataset_item import DatasetStatus
 from langfuse.experiment import ExperimentItemResult
 
 import scripts.evaluate_location_dataset as location_dataset
-from scripts.evaluate_location_dataset import ExpectedLocationOutcome, _counts, main
+from scripts.evaluate_location_dataset import (
+    ExpectedLocationOutcome,
+    _counts,
+    _exact_match,
+    main,
+)
 
 _STAMP = datetime(2026, 1, 1, 12, 0, 0)
 _IDS = itertools.count()
 
 
-def _dataset_item(eligible: bool | None) -> DatasetItem:
+def _dataset_item(eligible: bool | None, input_: dict[str, object] | None = None) -> DatasetItem:
     return DatasetItem(
         id=f"item-{next(_IDS)}",
         status=DatasetStatus.ACTIVE,
-        input={},
+        input={} if input_ is None else input_,
         expected_output=None if eligible is None else {"eligible_remote_from_romania": eligible},
         metadata=None,
         dataset_id="dataset",
@@ -205,3 +213,105 @@ def test_main_rejects_an_out_of_bounds_minimum_rejection_rate(rate: str) -> None
         )
 
     assert excinfo.value.code == 2
+
+
+def test_main_classifies_ats_structural_rejections_without_a_model_call(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outputs: list[dict[str, object]] = []
+
+    class _TaskClient:
+        def __init__(self, *, public_key: str, secret_key: str, host: str) -> None:
+            _ = (public_key, secret_key, host)
+
+        def get_dataset(self, name: str) -> _DatasetHandle:
+            _ = name
+            return _DatasetHandle(items=tuple(items))
+
+        def run_experiment(self, *, data: list[DatasetItem], **kwargs: object) -> _ExperimentRun:
+            task = kwargs["task"]
+            assert callable(task)
+            results: list[ExperimentItemResult] = []
+            for item in data:
+                output = cast(dict[str, object], task(item=item))
+                outputs.append(output)
+                results.append(
+                    ExperimentItemResult(
+                        item=item,
+                        output=output,
+                        evaluations=[],
+                        trace_id=None,
+                        dataset_run_id=None,
+                    )
+                )
+            return _ExperimentRun(
+                item_results=tuple(results),
+                dataset_run_url="https://langfuse.test/run",
+            )
+
+    items = [_dataset_item(False, input_=_onsite_input())]
+    _authorize(monkeypatch)
+    monkeypatch.setattr(location_dataset, "Langfuse", _TaskClient)
+
+    exit_code = main(["--dataset", "locations", "--run-name", "release-check"])
+
+    assert exit_code == 0
+    assert outputs == [
+        {
+            "eligible_remote_from_romania": False,
+            "route": "ats_structural",
+            "reason": "ATS workplaceType=OnSite (Berlin)",
+        }
+    ]
+    output = capsys.readouterr().out
+    assert "Location rejects caught: 1/1" in output
+
+
+def _onsite_input() -> dict[str, object]:
+    return {
+        "title": "Senior engineer",
+        "company": "Example",
+        "url": "https://example.com/job",
+        "location": "Berlin",
+        "description": "Build products.",
+        "ats_evidence": {
+            "kind": "available",
+            "source": "greenhouse",
+            "location": "Berlin",
+            "locations": ["Berlin"],
+            "workplace_type": "OnSite",
+            "country": "Germany",
+        },
+    }
+
+
+def test_help_smoke() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.evaluate_location_dataset", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "--minimum-rejection-rate" in result.stdout
+    assert "--dataset" in result.stdout
+
+
+def test_exact_match_scores_observed_eligibility_against_the_expected_outcome() -> None:
+    matched = _exact_match(
+        input={},
+        output={"eligible_remote_from_romania": False, "route": "ats_structural", "reason": ""},
+        expected_output={"eligible_remote_from_romania": False},
+        metadata=None,
+    )
+    mismatched = _exact_match(
+        input={},
+        output={"eligible_remote_from_romania": True, "route": "jev_atomic", "reason": ""},
+        expected_output={"eligible_remote_from_romania": False},
+        metadata=None,
+    )
+
+    assert matched.value == 1.0
+    assert mismatched.value == 0.0
+    assert mismatched.name == "location_eligibility_correct"

@@ -1522,6 +1522,237 @@ def test_rolls_back_qualified_terminal_state_when_claim_completion_fails(
     assert rolled_back == (0, 0, 0, 0, "failed", None, None, None)
 
 
+def test_qualified_run_completes_model_attempts_with_pinned_clock_and_release(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    raw_url = "https://jobs.lever.co/acme/qualified-attempts"
+    model_outputs: Iterator[tuple[str, Mapping[str, object]]] = iter(
+        (
+            (
+                "enrich_job",
+                {
+                    "title": "Senior Product Engineer",
+                    "company": "Acme",
+                    "description": "Build the product.",
+                    "location": "Remote",
+                },
+            ),
+        )
+    )
+
+    def model_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        tool_name, output = next(model_outputs)
+        return _model_response(tool_name, output)
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-qualified-attempts", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        summary = process_claimed_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
+                model_sender=model_sender,
+                jev_sender=_qualifying_jev_call,
+            ),
+            openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
+            owner_token=uuid4(),
+            observed_at=now,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=False,
+            now=lambda: now,
+        )
+        release = load_prompt_release(connection, run.prompt_release_id)
+        attempts = connection.execute(
+            """
+            SELECT status, completed_at, error IS NULL
+            FROM processing_attempts
+            ORDER BY operation_key
+            """
+        ).fetchall()
+        operation_keys = {
+            key
+            for (key,) in connection.execute(
+                "SELECT DISTINCT operation_key FROM model_call_attempts"
+            ).fetchall()
+        }
+        release_ids = connection.execute(
+            "SELECT DISTINCT prompt_release_id FROM model_call_attempts"
+        ).fetchall()
+
+    evaluation_keys = {
+        f"evaluation:{version.definition.name}"
+        for version in release.versions
+        if version.definition.phase in ("filter", "profile")
+    }
+    expected_attempt_count = len(evaluation_keys) + 2
+
+    assert summary.terminal_count == 1
+    assert attempts == [("completed", now, True)] * expected_attempt_count
+    assert operation_keys >= evaluation_keys | {"enrichment"}
+    assert operation_keys - (evaluation_keys | {"enrichment"}) <= {"deduplication"}
+    assert release_ids == [(run.prompt_release_id,)]
+
+
+def test_crashed_model_call_leaves_attempts_running_and_retry_completes_them(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    retry_at = now + timedelta(minutes=2)
+    raw_url = "https://jobs.lever.co/acme/crashing-model-call"
+    crashed_operation_key = "evaluation:job-finder-filter-location-eligibility"
+
+    def crashing_jev_call(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> JevHttpResponse:
+        raise RuntimeError("model worker crashed mid-run")
+
+    model_outputs: Iterator[tuple[str, Mapping[str, object]]] = iter(
+        (
+            (
+                "enrich_job",
+                {
+                    "title": "Senior Product Engineer",
+                    "company": "Acme",
+                    "description": "Build the product.",
+                    "location": "Remote",
+                },
+            ),
+        )
+    )
+
+    def model_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: dict[str, object],
+        _timeout: float,
+    ) -> HttpResponse:
+        tool_name, output = next(model_outputs)
+        return _model_response(tool_name, output)
+
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        run = _prepare_run(connection, "dagster:run-crashing-model-call", now)
+        _ = register_discoveries(
+            connection,
+            run_id=run.id,
+            keyword="senior product engineer",
+            domain="jobs.lever.co",
+            raw_urls=(raw_url,),
+            discovered_at=now,
+        )
+        with pytest.raises(RuntimeError, match="model worker crashed mid-run"):
+            _ = process_claimed_jobs(
+                connection,
+                run,
+                PipelineBoundaries(
+                    search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                    scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                    fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
+                    model_sender=_unexpected_model_call,
+                    jev_sender=crashing_jev_call,
+                ),
+                openrouter_api_key="test-key",
+                typesafe_api_key="test-key",
+                owner_token=uuid4(),
+                observed_at=now,
+                max_items=1,
+                lease_for=timedelta(minutes=5),
+                retry_after=timedelta(minutes=2),
+                enable_ats_enrichment=False,
+                now=lambda: now,
+            )
+        crashed_attempts = connection.execute(
+            "SELECT status, completed_at IS NULL, error IS NULL FROM processing_attempts"
+        ).fetchall()
+        crashed_operation_rows = connection.execute(
+            "SELECT count(*) FROM processing_attempts WHERE operation_key = %s",
+            (crashed_operation_key,),
+        ).fetchone()
+
+        assert crashed_attempts == [("running", True, True)]
+        assert crashed_operation_rows == (1,)
+
+        recovered = process_claimed_jobs(
+            connection,
+            run,
+            PipelineBoundaries(
+                search=lambda _keyword, _domain: SearchSucceeded(urls=()),
+                scrape=lambda _url: ScrapeSucceeded(markdown=_LONG_MARKDOWN),
+                fetch_ats=lambda _url, _title: pytest.fail("ATS should be disabled"),
+                model_sender=model_sender,
+                jev_sender=_qualifying_jev_call,
+            ),
+            openrouter_api_key="test-key",
+            typesafe_api_key="test-key",
+            owner_token=uuid4(),
+            observed_at=retry_at,
+            max_items=1,
+            lease_for=timedelta(minutes=5),
+            retry_after=timedelta(minutes=2),
+            enable_ats_enrichment=False,
+            now=lambda: retry_at,
+        )
+        resumed = connection.execute(
+            """
+            SELECT p.status, p.completed_at, p.error IS NULL,
+                   array_agg(m.status ORDER BY m.attempt_number)
+            FROM processing_attempts p
+            JOIN model_call_attempts m ON m.processing_attempt_id = p.id
+            WHERE p.operation_key = %s
+            GROUP BY p.status, p.completed_at, p.error IS NULL
+            """,
+            (crashed_operation_key,),
+        ).fetchone()
+        retried_operation_rows = connection.execute(
+            "SELECT count(*) FROM processing_attempts WHERE operation_key = %s",
+            (crashed_operation_key,),
+        ).fetchone()
+        final_attempts = connection.execute(
+            """
+            SELECT status, completed_at, error IS NULL
+            FROM processing_attempts
+            ORDER BY operation_key
+            """
+        ).fetchall()
+        model_attempt_count = connection.execute(
+            "SELECT count(*) FROM model_call_attempts"
+        ).fetchone()
+        completed_work = connection.execute(
+            "SELECT state, terminal_decision_id IS NOT NULL FROM job_work_items"
+        ).fetchone()
+
+    assert recovered.terminal_count == 1
+    assert resumed == ("completed", retry_at, True, ["accepted"])
+    assert retried_operation_rows == crashed_operation_rows
+    assert final_attempts == [("completed", retry_at, True)] * len(final_attempts)
+    assert len(final_attempts) == 8
+    assert model_attempt_count == (7,)
+    assert completed_work == ("completed", True)
+
+
 def test_reevaluation_processes_the_pinned_snapshot_without_rewriting_history(
     authority_schema: str,
 ) -> None:

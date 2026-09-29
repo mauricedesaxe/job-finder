@@ -324,3 +324,111 @@ def test_provider_connection_failures_map_to_no_capabilities(provider: ProviderK
 
     assert result.capabilities == ()
     assert not result.invalid_credentials
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    (
+        ("other_tool", '{"ready":true}'),
+        ("validate_provider", '{"ready":false}'),
+        ("validate_provider", "not-json"),
+    ),
+)
+def test_openrouter_rejects_tool_answers_that_do_not_confirm_readiness(
+    tool_name: str,
+    arguments: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    completion = {
+        "id": "validation",
+        "model": "google/gemini-2.5-flash-lite",
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": arguments},
+                        }
+                    ]
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": "0.001"},
+    }
+    with _provider_stub([(200, json.dumps(completion))]) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[ProviderKind.OPENROUTER](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert "OpenRouter validation returned an invalid response" in caplog.text
+
+
+def test_openrouter_without_usage_data_grants_no_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    completion = {
+        "id": "validation",
+        "model": "google/gemini-2.5-flash-lite",
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "validate_provider",
+                                "arguments": '{"ready":true}',
+                            },
+                        }
+                    ]
+                }
+            }
+        ],
+    }
+    with _provider_stub([(200, json.dumps(completion))]) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[ProviderKind.OPENROUTER](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert "OpenRouter validation returned no usage data" in caplog.text
+
+
+def test_jina_reader_api_code_failure_maps_to_no_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    responses = [
+        (200, json.dumps({"code": 200, "data": []})),
+        (200, json.dumps({"code": 429, "data": {"title": "Example", "content": "Readable"}})),
+    ]
+    with _provider_stub(responses) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[ProviderKind.JINA](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert "Jina reader validation returned API code 429" in caplog.text
+    assert [path for path, _headers, _body in server.requests] == ["/search", "/reader"]
+
+
+def test_typesafe_without_a_validation_answer_grants_no_capabilities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = {
+        "model": "jev-1.13.0",
+        "answers": {"other": {"type": "noul", "noul": 1}},
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    with _provider_stub([(200, json.dumps(response))]) as server:
+        validators = production_provider_validators(**_stub_urls(server))
+
+        result = validators[ProviderKind.TYPESAFE](SecretStr("valid-secret"))
+
+    assert result.capabilities == ()
+    assert not result.invalid_credentials
+    assert "Typesafe validation returned no validation answer" in caplog.text

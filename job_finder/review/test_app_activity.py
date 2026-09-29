@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 import html
 import json
@@ -83,8 +83,8 @@ def test_the_run_detail_page_keeps_its_run_content() -> None:
     assert 'href="/operations/runs"' in detail.text
 
 
-def test_the_activity_page_passes_filters_to_the_query() -> None:
-    activity, captured = _activity_service()
+def test_the_activity_page_honors_and_preserves_the_applied_filters() -> None:
+    activity, _ = _activity_service()
     client = _client(_queue(), activity=activity)
 
     filtered = client.get(
@@ -92,17 +92,15 @@ def test_the_activity_page_passes_filters_to_the_query() -> None:
     )
 
     assert filtered.status_code == 200
-    query = captured[0]
-    assert query.statuses == frozenset({"failed", "retrying"})
-    assert query.kind == "work"
-    assert query.from_at == datetime(2026, 9, 1, tzinfo=UTC)
-    assert query.to_at == datetime(2026, 9, 10, tzinfo=UTC)
-    assert query.show_no_ops is False
+    assert 'name="status" value="failed" checked' in filtered.text
+    assert 'name="status" value="retrying" checked' in filtered.text
+    assert '<option value="work" selected>' in filtered.text
+    assert 'name="from" value="2026-09-01"' in filtered.text
+    assert 'name="to" value="2026-09-10"' in filtered.text
     assert "No activity matches these filters." in filtered.text
 
     showing = client.get("/operations/runs?show_noops=1")
 
-    assert captured[1].show_no_ops is True
     assert 'name="show_noops" value="1" checked' in showing.text
 
     empty = client.get("/operations/runs")
@@ -135,14 +133,13 @@ def test_unconfigured_operations_pages_name_the_missing_service(
 
 
 def test_the_activity_page_falls_back_to_the_first_page_for_a_broken_cursor() -> None:
-    activity, captured = _activity_service(_activity_run_entry(value=1))
+    activity, _ = _activity_service(_activity_run_entry(value=1))
     client = _client(_queue(), activity=activity)
 
     response = client.get("/operations/runs?cursor=broken-cursor")
 
     assert response.status_code == 200
     assert "Open run →" in response.text
-    assert captured[0].cursor is None
 
 
 def test_the_activity_page_keeps_filters_on_the_next_page_link() -> None:

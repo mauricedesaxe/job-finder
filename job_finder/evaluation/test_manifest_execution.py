@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -7,12 +8,11 @@ from pydantic import JsonValue, ValidationError
 
 from job_finder.ats.models import ApplicationQuestion, AtsAvailable
 from job_finder.benchmarks.manifests import EvaluationCaseInput, EvaluationManifestCase
-from job_finder.evaluation.evaluate import evaluate_job
+from job_finder.evaluation import manifest_execution
+from job_finder.evaluation.jev import JevCriterionObservation
 from job_finder.evaluation.manifest_execution import _case_evaluator  # pyright: ignore[reportPrivateUsage]
-from job_finder.evaluation.manifest_execution import _ATS_EVIDENCE  # pyright: ignore[reportPrivateUsage]
 from job_finder.evaluation.models import (
     CriterionAccepted,
-    CriterionResult,
     ProviderRequestObservation,
     Qualified,
     ReleaseTarget,
@@ -24,7 +24,6 @@ from job_finder.evaluation.relevance_releases import (
     build_jev_atomic_policy,
     build_relevance_release,
 )
-from job_finder.jobs.listings import JobListing
 
 
 @pytest.mark.parametrize(
@@ -125,8 +124,24 @@ def test_case_evaluator_validates_ats_evidence_before_any_evaluation() -> None:
         evaluator(_case(ats_evidence={"source": 42}), target, 0)
 
 
-def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_input() -> None:
+def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     release = build_prompt_release()
+    policy = build_jev_atomic_policy()
+    target = ReleaseTarget(
+        prompt_release_id=release.id,
+        relevance_release_id=build_relevance_release(policy).id,
+    )
+    evaluator = _case_evaluator(
+        release=release,
+        target=target,
+        relevance_policy=policy,
+        rates="",
+        openrouter_api_key=None,
+        typesafe_api_key="typesafe",
+        record_request=_ignore_request,
+    )
     evidence = AtsAvailable(
         source="greenhouse",
         location="Remote",
@@ -142,27 +157,39 @@ def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_
             ),
         ),
     )
-    case = _case(ats_evidence=evidence.model_dump(mode="json"))
-    inputs: dict[str, str] = {}
+    job_inputs: dict[str, str] = {}
 
-    def evaluate(version: PromptVersion, values: Mapping[str, str]) -> CriterionResult:
-        inputs[version.definition.criterion] = values["job"]
-        return CriterionAccepted(
-            prompt_name=version.definition.name,
-            passed=True,
-            reason=version.definition.criterion,
+    def accept_every_criterion(
+        prompt: PromptVersion,
+        values: Mapping[str, str],
+        **_kwargs: object,
+    ) -> JevCriterionObservation:
+        job_inputs[prompt.definition.criterion] = values["job"]
+        return JevCriterionObservation(
+            result=CriterionAccepted(
+                prompt_name=prompt.definition.name,
+                passed=True,
+                reason=prompt.definition.criterion,
+            ),
+            pass_probability=1.0,
+            model="jev",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            estimated_cost_usd=Decimal("0"),
         )
 
-    validated = _ATS_EVIDENCE.validate_python(case.input.ats_evidence)
-    result = evaluate_job(_job(case), release, evaluate, rates="", ats_evidence=validated)
+    monkeypatch.setattr(manifest_execution, "evaluate_jev_prompt", accept_every_criterion)
+
+    result = evaluator(_case(ats_evidence=evidence.model_dump(mode="json")), target, 0)
 
     assert isinstance(result, Qualified)
     assert (
         "- Application question (required): Do you reside in one of these states?"
-        in inputs["remote-europe-eligible"]
+        in job_inputs["remote-europe-eligible"]
     )
-    assert "Choices: California, Oregon" in inputs["remote-europe-eligible"]
-    assert "ATS job description:\nUS only" in inputs["remote-europe-eligible"]
+    assert "Choices: California, Oregon" in job_inputs["remote-europe-eligible"]
+    assert "ATS job description:\nUS only" in job_inputs["remote-europe-eligible"]
 
 
 def _case(ats_evidence: JsonValue | None) -> EvaluationManifestCase:
@@ -188,22 +215,6 @@ def _case(ats_evidence: JsonValue | None) -> EvaluationManifestCase:
             target_profile=None,
             ats_evidence=ats_evidence,
         ),
-    )
-
-
-def _job(case: EvaluationManifestCase) -> JobListing:
-    return JobListing.model_validate(
-        {
-            "title": case.input.title,
-            "company": case.input.company,
-            "url": case.input.url,
-            "source": case.input.source,
-            "keywords_matched": case.input.keywords,
-            "date_posted": case.input.date_posted,
-            "date_scraped": case.input.observed_at.date(),
-            "description": case.input.description,
-            "location": case.input.location,
-        }
     )
 
 

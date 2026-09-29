@@ -43,6 +43,12 @@ from contracts.test_postgres_authority import (
     store_prompt_release,
     token_hex,
     uuid4,
+    UUID,
+)
+
+from job_finder.pipeline.processing_attempts import (
+    complete_model_call_context,
+    run_model_call_attempt,
 )
 
 pytest_plugins = ("contracts.test_postgres_authority",)
@@ -701,3 +707,97 @@ def test_persists_structured_compensation_on_the_snapshot(authority_schema: str)
         ).fetchone()
 
     assert row == (Decimal("80000"), Decimal("100000"), "EUR", "year", "ats")
+
+
+def test_run_model_call_attempt_fails_on_operational_error_and_completes_otherwise(
+    authority_schema: str,
+) -> None:
+    now = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    run_id = uuid4()
+    job_id = uuid4()
+    retryable = RetryableOperationalError(
+        prompt_name="job-finder-filter-work-culture",
+        error_code="http_503",
+        reason="provider unavailable",
+    )
+    accepted = CriterionAccepted(
+        prompt_name="job-finder-filter-work-culture", passed=True, reason="matched"
+    )
+    with _connection(authority_schema) as connection:
+        apply_migrations(connection)
+        release = bootstrap_prompt_release(connection)
+        _insert_prompt_run(connection, run_id, release.id, now)
+        connection.execute(
+            """
+            INSERT INTO jobs (id, raw_url, first_discovered_at, last_discovered_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (job_id, f"https://example.com/jobs/{job_id}", now, now),
+        )
+        retryable_digest = prompt_input_digest({"job": "retryable body"})
+        first = run_model_call_attempt(
+            connection,
+            run_id=run_id,
+            job_id=job_id,
+            operation_key="evaluate_job",
+            input_digest=retryable_digest,
+            prompt_release_id=release.id,
+            now=lambda: now,
+            invoke=lambda _context: retryable,
+        )
+        failed_row = connection.execute(
+            """
+            SELECT status, completed_at, error->>'retryability'
+            FROM processing_attempts
+            WHERE operation_key = 'evaluate_job'
+            """
+        ).fetchone()
+
+        assert first is retryable
+        assert failed_row == ("failed", now, "retryable")
+
+        attempt_id_row = connection.execute(
+            "SELECT id FROM processing_attempts WHERE operation_key = 'evaluate_job'"
+        ).fetchone()
+        assert attempt_id_row is not None
+        complete_model_call_context(
+            connection,
+            ModelCallContext(
+                processing_attempt_id=UUID(str(attempt_id_row[0])),
+                pipeline_run_id=run_id,
+                prompt_release_id=release.id,
+                operation_key="evaluate_job",
+                input_digest=retryable_digest,
+            ),
+            completed_at=now,
+        )
+        guarded_row = connection.execute(
+            """
+            SELECT status, completed_at, error->>'retryability'
+            FROM processing_attempts
+            WHERE operation_key = 'evaluate_job'
+            """
+        ).fetchone()
+
+        assert guarded_row == failed_row
+
+        second = run_model_call_attempt(
+            connection,
+            run_id=run_id,
+            job_id=job_id,
+            operation_key="evaluate_job_accepted",
+            input_digest=prompt_input_digest({"job": "accepted body"}),
+            prompt_release_id=release.id,
+            now=lambda: now,
+            invoke=lambda _context: accepted,
+        )
+        completed_row = connection.execute(
+            """
+            SELECT status, completed_at, error IS NULL
+            FROM processing_attempts
+            WHERE operation_key = 'evaluate_job_accepted'
+            """
+        ).fetchone()
+
+    assert second is accepted
+    assert completed_row == ("completed", now, True)
