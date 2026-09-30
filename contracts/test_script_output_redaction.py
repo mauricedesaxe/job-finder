@@ -85,7 +85,15 @@ def test_script_output_keeps_database_credentials_private(
 
 
 @pytest.mark.parametrize(
-    "module", ["scripts.backfill_review_queue", "scripts.reprocess_thin_body_jobs"]
+    "module",
+    [
+        "scripts.backfill_review_queue",
+        "scripts.reprocess_thin_body_jobs",
+        "scripts.backfill_snapshots",
+        "scripts.reprocess_mis_titled_jobs",
+        "scripts.rebuild_langfuse_projections",
+        "scripts.bootstrap_postgres_prompts",
+    ],
 )
 def test_script_failure_output_keeps_database_credentials_private(
     script_postgres_dsn: str, module: str
