@@ -25,6 +25,7 @@ from job_finder.discovery.exchange_rates import (
 from job_finder.evaluation.evaluate import evaluate_job
 from job_finder.evaluation.jev import (
     JevCriterionObservation,
+    JevSender,
     evaluate_prompt as evaluate_jev_prompt,
 )
 from job_finder.evaluation.models import (
@@ -89,6 +90,7 @@ def _case_evaluator(
     openrouter_api_key: str | None,
     typesafe_api_key: str | None,
     record_request: Callable[[ProviderRequestObservation], None],
+    jev_sender: JevSender | None = None,
 ) -> CaseEvaluator:
     match relevance_policy:
         case GeminiExecutionPolicy():
@@ -157,6 +159,7 @@ def _case_evaluator(
                         api_key=api_key,
                         execution_policy=relevance_policy,
                         observe_attempt=record_request,
+                        sender=jev_sender,
                     )
                 case _:
                     assert_never(relevance_policy)

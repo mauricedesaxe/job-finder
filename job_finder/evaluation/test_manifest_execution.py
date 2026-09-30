@@ -1,6 +1,9 @@
+from __future__ import annotations
+
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -8,16 +11,14 @@ from pydantic import JsonValue, ValidationError
 
 from job_finder.ats.models import ApplicationQuestion, AtsAvailable
 from job_finder.benchmarks.manifests import EvaluationCaseInput, EvaluationManifestCase
-from job_finder.evaluation import manifest_execution
-from job_finder.evaluation.jev import JevCriterionObservation
+from job_finder.evaluation.jev import JEV_MODEL, JevHttpResponse
 from job_finder.evaluation.manifest_execution import _case_evaluator  # pyright: ignore[reportPrivateUsage]
 from job_finder.evaluation.models import (
-    CriterionAccepted,
     ProviderRequestObservation,
     Qualified,
     ReleaseTarget,
 )
-from job_finder.evaluation.prompt_releases import PromptVersion, build_prompt_release
+from job_finder.evaluation.prompt_releases import build_prompt_release
 from job_finder.evaluation.relevance_releases import (
     RelevanceExecutionPolicy,
     build_gemini_policy,
@@ -124,15 +125,40 @@ def test_case_evaluator_validates_ats_evidence_before_any_evaluation() -> None:
         evaluator(_case(ats_evidence={"source": 42}), target, 0)
 
 
-def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_input(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_input() -> None:
     release = build_prompt_release()
     policy = build_jev_atomic_policy()
     target = ReleaseTarget(
         prompt_release_id=release.id,
         relevance_release_id=build_relevance_release(policy).id,
     )
+    wire_states: list[tuple[frozenset[str], str]] = []
+
+    def qualifying_sender(
+        _url: str,
+        _headers: Mapping[str, str],
+        body: dict[str, object],
+        _timeout: float,
+    ) -> JevHttpResponse:
+        questions = cast("dict[str, object]", body["questions"])
+        wire_states.append((frozenset(questions), str(body["state"])))
+        probabilities = dict.fromkeys(questions, 0.0)
+        if "owns_product_delivery" in probabilities:
+            probabilities["owns_product_delivery"] = 1.0
+        return JevHttpResponse(
+            status_code=200,
+            body=json.dumps(
+                {
+                    "model": JEV_MODEL,
+                    "answers": {
+                        name: {"type": "noul", "noul": probability}
+                        for name, probability in probabilities.items()
+                    },
+                    "usage": {"input_tokens": 12, "output_tokens": len(questions)},
+                }
+            ),
+        )
+
     evaluator = _case_evaluator(
         release=release,
         target=target,
@@ -141,6 +167,7 @@ def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_
         openrouter_api_key=None,
         typesafe_api_key="typesafe",
         record_request=_ignore_request,
+        jev_sender=qualifying_sender,
     )
     evidence = AtsAvailable(
         source="greenhouse",
@@ -157,39 +184,18 @@ def test_case_evaluator_flows_recorded_ats_evidence_into_the_location_criterion_
             ),
         ),
     )
-    job_inputs: dict[str, str] = {}
-
-    def accept_every_criterion(
-        prompt: PromptVersion,
-        values: Mapping[str, str],
-        **_kwargs: object,
-    ) -> JevCriterionObservation:
-        job_inputs[prompt.definition.criterion] = values["job"]
-        return JevCriterionObservation(
-            result=CriterionAccepted(
-                prompt_name=prompt.definition.name,
-                passed=True,
-                reason=prompt.definition.criterion,
-            ),
-            pass_probability=1.0,
-            model="jev",
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=0,
-            estimated_cost_usd=Decimal("0"),
-        )
-
-    monkeypatch.setattr(manifest_execution, "evaluate_jev_prompt", accept_every_criterion)
 
     result = evaluator(_case(ats_evidence=evidence.model_dump(mode="json")), target, 0)
 
     assert isinstance(result, Qualified)
-    assert (
-        "- Application question (required): Do you reside in one of these states?"
-        in job_inputs["remote-europe-eligible"]
-    )
-    assert "Choices: California, Oregon" in job_inputs["remote-europe-eligible"]
-    assert "ATS job description:\nUS only" in job_inputs["remote-europe-eligible"]
+    location_questions = frozenset(policy.questions["remote-europe-eligible"])
+    states = dict(wire_states)
+    carriers = [questions for questions, state in wire_states if "ATS job description" in state]
+    assert carriers == [location_questions]
+    ats_state = states[location_questions]
+    assert "- Application question (required): Do you reside in one of these states?" in ats_state
+    assert "Choices: California, Oregon" in ats_state
+    assert "ATS job description:\nUS only" in ats_state
 
 
 def _case(ats_evidence: JsonValue | None) -> EvaluationManifestCase:
