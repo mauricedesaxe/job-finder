@@ -102,7 +102,7 @@ def prepare_orchestration_run(
         return existing
     rates = fetch_rates()
     run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    rate_data = _exchange_rate_data(rates)
     rate_digest = _digest(rate_data)
     with connection.transaction():
         inserted = connection.execute(
@@ -126,14 +126,7 @@ def prepare_orchestration_run(
             ),
         ).fetchone()
         if inserted is not None:
-            _ = connection.execute(
-                """
-                INSERT INTO run_exchange_rate_snapshots (
-                  pipeline_run_id, content_digest, rates, source, observed_at
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (run_id, rate_digest, Jsonb(rate_data), rates.source, rates.observed_at),
-            )
+            _insert_exchange_rate_snapshot(connection, run_id, rates, rate_data, rate_digest)
     stored = load_orchestration_run(connection, idempotency_key)
     if stored is None:
         raise RuntimeError("Orchestration run could not be loaded after creation")
@@ -190,7 +183,7 @@ def prepare_split_orchestration_run(
     )
     rates = fetch_rates()
     run_id = uuid5(NAMESPACE_URL, f"orchestration-run:{idempotency_key}")
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    rate_data = _exchange_rate_data(rates)
     with connection.transaction():
         inserted = connection.execute(
             """
@@ -216,14 +209,7 @@ def prepare_split_orchestration_run(
             ),
         ).fetchone()
         if inserted is not None:
-            _ = connection.execute(
-                """
-                INSERT INTO run_exchange_rate_snapshots (
-                  pipeline_run_id, content_digest, rates, source, observed_at
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
-            )
+            _insert_exchange_rate_snapshot(connection, run_id, rates, rate_data, _digest(rate_data))
     stored = load_orchestration_run(connection, idempotency_key)
     if not isinstance(stored, SplitOrchestrationRun) or (
         stored.implementation_ref != implementation_ref
@@ -280,7 +266,7 @@ def prepare_onboarding_run(
             return resumed
         return stored
     rates = fetch_rates()
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    rate_data = _exchange_rate_data(rates)
     with connection.transaction():
         _ = connection.execute(
             """
@@ -301,14 +287,7 @@ def prepare_onboarding_run(
                 started_at,
             ),
         )
-        _ = connection.execute(
-            """
-            INSERT INTO run_exchange_rate_snapshots (
-              pipeline_run_id, content_digest, rates, source, observed_at
-            ) VALUES (%s, %s, %s, %s, %s)
-            """,
-            (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
-        )
+        _insert_exchange_rate_snapshot(connection, run_id, rates, rate_data, _digest(rate_data))
     stored = load_run_by_id(connection, run_id)
     if isinstance(stored, SplitOrchestrationRun):
         raise ValueError("Onboarding run provenance differs from its pinned request")
@@ -364,7 +343,7 @@ def prepare_split_onboarding_run(
         relevance_release_id=compiled.target.relevance.relevance_release_id,
     )
     rates = fetch_rates()
-    rate_data = {currency: str(value) for currency, value in sorted(rates.rates.items())}
+    rate_data = _exchange_rate_data(rates)
     with connection.transaction():
         _ = connection.execute(
             """
@@ -388,14 +367,7 @@ def prepare_split_onboarding_run(
                 started_at,
             ),
         )
-        _ = connection.execute(
-            """
-            INSERT INTO run_exchange_rate_snapshots (
-              pipeline_run_id, content_digest, rates, source, observed_at
-            ) VALUES (%s, %s, %s, %s, %s)
-            """,
-            (run_id, _digest(rate_data), Jsonb(rate_data), rates.source, rates.observed_at),
-        )
+        _insert_exchange_rate_snapshot(connection, run_id, rates, rate_data, _digest(rate_data))
     stored = load_run_by_id(connection, run_id)
     if not isinstance(stored, SplitOrchestrationRun) or (
         stored.idempotency_key != f"onboarding:{request_key}"
@@ -405,6 +377,33 @@ def prepare_split_onboarding_run(
     ):
         raise ValueError("Onboarding run provenance differs from its pinned request")
     return stored
+
+
+def _exchange_rate_data(snapshot: ExchangeRateSnapshot) -> dict[str, str]:
+    return {currency: str(value) for currency, value in sorted(snapshot.rates.items())}
+
+
+def _insert_exchange_rate_snapshot(
+    connection: Connection,
+    run_id: UUID,
+    snapshot: ExchangeRateSnapshot,
+    rate_data: dict[str, str],
+    content_digest: str,
+) -> None:
+    _ = connection.execute(
+        """
+        INSERT INTO run_exchange_rate_snapshots (
+          pipeline_run_id, content_digest, rates, source, observed_at
+        ) VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            run_id,
+            content_digest,
+            Jsonb(rate_data),
+            snapshot.source,
+            snapshot.observed_at,
+        ),
+    )
 
 
 def complete_orchestration_run(
