@@ -14,6 +14,7 @@ from job_finder.benchmarks.qualification_activation import (
     QualificationActivationError,
     QualificationActivationReceipt,
     activate_qualification_target,
+    get_active_qualification_target,
 )
 from job_finder.benchmarks.qualification_promotions import (
     PromotionEvidenceSelection,
@@ -29,13 +30,12 @@ from job_finder.evaluation.qualification_components import (
     QualificationTargetId,
     RelevanceContent,
     ResolvedQualificationTarget,
+    load_qualification_target,
 )
 from job_finder.mcp_tools.common import APPEND_ONLY, CAS_WRITE, READ_ONLY, McpDependencies
 from job_finder.qualification_target_service import (
     CreateQualificationCandidateCommand,
     create_qualification_candidate,
-    get_active_qualification_authority,
-    get_qualification_candidate,
 )
 
 _TargetId = Annotated[QualificationTargetId, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -58,14 +58,14 @@ def _register_candidate_tools(mcp: FastMCP, dependencies: McpDependencies) -> No
     def qualification_active_get() -> ActiveQualificationTarget:
         """Get the independent active qualification target and CAS generation."""
         with dependencies.connect() as connection:
-            return get_active_qualification_authority(connection)
+            return get_active_qualification_target(connection)
 
     @mcp.tool(annotations=READ_ONLY)
     def qualification_candidate_get(target_id: _TargetId) -> ResolvedQualificationTarget:
         """Inspect one complete immutable qualification target candidate."""
         try:
             with dependencies.connect() as connection:
-                return get_qualification_candidate(connection, target_id)
+                return load_qualification_target(connection, target_id)
         except ValueError as error:
             raise ToolError(str(error)) from error
 
