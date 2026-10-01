@@ -13,15 +13,17 @@ from psycopg import sql
 from contracts.test_postgres_authority import _store_default_qualification_target  # pyright: ignore[reportPrivateUsage]
 from job_finder.config import PostgresContractSettings
 from job_finder.database import apply_migrations
+from job_finder.benchmarks.qualification_activation import get_active_qualification_target
 from job_finder.evaluation.implementation_artifacts import write_implementation_artifact
-from job_finder.evaluation.qualification_components import qualification_target_id
+from job_finder.evaluation.qualification_components import (
+    load_qualification_target,
+    qualification_target_id,
+)
 from job_finder.qualification_target_service import (
     CreateCurrentQualificationCandidateCommand,
     CreateQualificationCandidateCommand,
     create_qualification_candidate,
     create_current_qualification_candidate,
-    get_active_qualification_authority,
-    get_qualification_candidate,
 )
 
 
@@ -64,9 +66,9 @@ def test_candidate_requires_one_executing_artifact(authority_schema: str) -> Non
             )
             created = create_qualification_candidate(connection, command, artifact_path)
             assert created.id == qualification_target_id(target)
-            assert get_qualification_candidate(connection, created.id) == created
+            assert load_qualification_target(connection, created.id) == created
             assert create_qualification_candidate(connection, command, artifact_path) == created
-            active = get_active_qualification_authority(connection)
+            active = get_active_qualification_target(connection)
             assert active.target_id is None and active.generation == 0
             wrong = command.model_copy(
                 update={
@@ -96,8 +98,8 @@ def test_current_candidate_compiles_published_definition_without_activation(
             assert (
                 create_current_qualification_candidate(connection, command, artifact_path) == target
             )
-            assert get_qualification_candidate(connection, target.id) == target
-            active = get_active_qualification_authority(connection)
+            assert load_qualification_target(connection, target.id) == target
+            active = get_active_qualification_target(connection)
             assert active.target_id is None and active.generation == 0
             assert connection.execute(
                 "SELECT count(*) FROM qualification_prompt_compilations WHERE target_id = %s",

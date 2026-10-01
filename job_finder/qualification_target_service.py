@@ -11,10 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.acquisition_policy import AcquisitionPolicyRevisionId
 from job_finder.acquisition_policy_service import load_acquisition_policy_revision
-from job_finder.benchmarks.qualification_activation import (
-    ActiveQualificationTarget,
-    get_active_qualification_target,
-)
 from job_finder.evaluation.implementation_artifacts import (
     store_implementation_artifact,
     verify_implementation_artifact,
@@ -23,11 +19,9 @@ from job_finder.evaluation.qualification_components import (
     DeduplicationContent,
     EnrichmentContent,
     InputPreparationContent,
-    QualificationTargetId,
     RelevanceContent,
     ResolvedQualificationTarget,
     build_qualification_target,
-    load_qualification_target,
     resolve_executable_qualification_target,
     store_component_release,
     store_qualification_target,
@@ -175,13 +169,3 @@ def create_qualification_candidate(
             connection, target, created_at=command.timestamp, created_by=command.actor
         )
         return resolve_executable_qualification_target(connection, target_id, artifact_path)
-
-
-def get_qualification_candidate(
-    connection: _Connection, target_id: QualificationTargetId
-) -> ResolvedQualificationTarget:
-    return load_qualification_target(connection, target_id)
-
-
-def get_active_qualification_authority(connection: _Connection) -> ActiveQualificationTarget:
-    return get_active_qualification_target(connection)

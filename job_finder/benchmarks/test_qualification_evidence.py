@@ -8,6 +8,7 @@ import psycopg
 import pytest
 from pydantic import ValidationError
 
+from job_finder.benchmarks.provider_attempts import store_executed_evidence
 from job_finder.benchmarks.qualification_evidence import (
     FixtureCase,
     FixtureSetId,
@@ -19,6 +20,7 @@ from job_finder.benchmarks.qualification_evidence import (
     fixture_set_id,
     load_fixture_set,
     require_comparable_relevance_evidence,
+    summarize_fixture_results,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.evaluation.qualification_components import ComponentReleaseId, QualificationTargetId
@@ -86,6 +88,54 @@ def test_load_fixture_set_checks_stored_content_identity() -> None:
 def test_load_fixture_set_rejects_missing_content() -> None:
     with pytest.raises(ValueError, match="Enrichment fixture set not found"):
         _ = load_fixture_set(_fixture_connection(None), FixtureSetId("0" * 64), phase="enrichment")
+
+
+def test_fixture_result_summary_counts_passed_cases() -> None:
+    outcome, result = summarize_fixture_results(
+        [
+            {"passed": True, "observed": {"value": 1}},
+            {"passed": False, "observed": {"value": 2}},
+        ]
+    )
+
+    assert outcome == "failed"
+    assert result == {
+        "case_count": 2,
+        "passed_count": 1,
+        "cases": [
+            {"passed": True, "observed": {"value": 1}},
+            {"passed": False, "observed": {"value": 2}},
+        ],
+    }
+
+
+def test_fixture_result_summary_passes_when_every_case_passes() -> None:
+    assert summarize_fixture_results([{"passed": True}])[0] == "passed"
+
+
+def test_executed_model_evidence_requires_a_provider_attempt() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    evidence = QualificationEvidence(
+        target_id=QualificationTargetId("a" * 64),
+        phase="enrichment",
+        component_release_id=ComponentReleaseId("b" * 64),
+        fixture_set_id=FixtureSetId("c" * 64),
+        executor_artifact_id=ImplementationArtifactId("d" * 64),
+        origin="synthetic",
+        outcome="failed",
+        result={},
+        completed_at=now,
+    )
+
+    with pytest.raises(ValueError, match="requires at least one provider attempt"):
+        _ = store_executed_evidence(
+            cast(psycopg.Connection[tuple[object, ...]], object()),
+            evidence,
+            (),
+            provider="openrouter",
+            created_at=now,
+            created_by="test",
+        )
 
 
 def test_relevance_comparison_uses_one_frozen_input() -> None:

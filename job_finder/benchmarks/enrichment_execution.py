@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
-    store_provider_attempts,
+    store_executed_evidence,
 )
 from job_finder.benchmarks.qualification_evidence import (
     FixtureSetId,
@@ -18,7 +18,7 @@ from job_finder.benchmarks.qualification_evidence import (
     QualificationEvidence,
     QualificationEvidenceId,
     load_fixture_set,
-    store_qualification_evidence,
+    summarize_fixture_results,
 )
 from job_finder.evaluation.models import (
     InputDigest,
@@ -68,7 +68,6 @@ def execute_enrichment_fixture_set(
     prompt = compiled.prompt_release.version("job-finder-enrichment")
     attempts: list[ModelCallAttempt] = []
     results: list[dict[str, JsonValue]] = []
-    passed_count = 0
     for position, case in enumerate(fixtures.cases):
         content = EnrichmentFixtureInput.model_validate(case.input)
         _require_case_settings(content, prompt.parameters, case.input_path)
@@ -98,7 +97,6 @@ def execute_enrichment_fixture_set(
             retry_policy=RetryPolicy(max_attempts=content.provider_settings.retry_limit + 1),
         )
         passed = isinstance(result, PromptAccepted) and result.output == expected
-        passed_count += passed
         observed = (
             result.output.model_dump(mode="json")
             if isinstance(result, PromptAccepted)
@@ -112,6 +110,7 @@ def execute_enrichment_fixture_set(
                 "expected": expected.model_dump(mode="json"),
             }
         )
+    outcome, result = summarize_fixture_results(results)
     evidence = QualificationEvidence(
         target_id=target_id,
         phase="enrichment",
@@ -119,28 +118,19 @@ def execute_enrichment_fixture_set(
         fixture_set_id=fixture_id,
         executor_artifact_id=compiled.target.content.artifact_id,
         origin="synthetic" if sender is not None or generation_sender is not None else "canonical",
-        outcome="passed" if passed_count == len(results) else "failed",
-        result={
-            "case_count": len(results),
-            "passed_count": passed_count,
-            "cases": _JSON.validate_python(results),
-        },
+        outcome=outcome,
+        result=result,
         attempts=tuple(provider_attempt_evidence(attempt) for attempt in attempts),
         completed_at=completed_at,
     )
-    with connection.transaction():
-        evidence_id = store_qualification_evidence(
-            connection, evidence, created_at=completed_at, created_by=created_by
-        )
-        store_provider_attempts(
-            connection,
-            evidence,
-            attempts,
-            provider="openrouter",
-            created_at=completed_at,
-            created_by=created_by,
-        )
-    return evidence_id
+    return store_executed_evidence(
+        connection,
+        evidence,
+        attempts,
+        provider="openrouter",
+        created_at=completed_at,
+        created_by=created_by,
+    )
 
 
 def _require_case_settings(

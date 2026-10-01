@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, ClassVar, Literal, NewType, Self
 
 import psycopg
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 from psycopg.types.json import Jsonb
 
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
@@ -22,6 +23,8 @@ QualificationEvidenceId = NewType("QualificationEvidenceId", str)
 _DIGEST = r"^[0-9a-f]{64}$"
 FixturePhase = Literal["input_preparation", "enrichment", "deduplication", "composition"]
 Phase = Literal["input_preparation", "relevance", "enrichment", "deduplication", "composition"]
+_FIXTURE_RESULTS: TypeAdapter[list[dict[str, JsonValue]]] = TypeAdapter(list[dict[str, JsonValue]])
+_JSON_OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
 class EvidenceModel(BaseModel):
@@ -101,6 +104,30 @@ def fixture_set_id(content: PhaseFixtureSet) -> FixtureSetId:
 
 def qualification_evidence_id(content: QualificationEvidence) -> QualificationEvidenceId:
     return QualificationEvidenceId(_content_digest(content))
+
+
+def summarize_fixture_results(
+    cases: Sequence[dict[str, JsonValue]],
+) -> tuple[Literal["passed", "failed"], dict[str, JsonValue]]:
+    validated = _FIXTURE_RESULTS.validate_python(cases)
+    if not validated:
+        raise ValueError("Fixture results require a boolean passed value for every case")
+    passed_count = 0
+    for case in validated:
+        passed = case.get("passed")
+        if not isinstance(passed, bool):
+            raise ValueError("Fixture results require a boolean passed value for every case")
+        passed_count += int(passed)
+    return (
+        "passed" if passed_count == len(validated) else "failed",
+        _JSON_OBJECT.validate_python(
+            {
+                "case_count": len(validated),
+                "passed_count": passed_count,
+                "cases": validated,
+            }
+        ),
+    )
 
 
 def require_comparable_relevance_evidence(

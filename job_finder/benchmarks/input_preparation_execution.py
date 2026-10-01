@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import psycopg
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsNotApplicable, AtsUnavailable
 from job_finder.ats.policy import ats_structural_filter
@@ -15,6 +15,7 @@ from job_finder.benchmarks.qualification_evidence import (
     QualificationEvidenceId,
     load_fixture_set,
     store_qualification_evidence,
+    summarize_fixture_results,
 )
 from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.evaluation.qualification_prompt_compilations import (
@@ -28,8 +29,6 @@ from job_finder.jobs.structural_filter import (
     structural_filter,
 )
 from job_finder.pipeline.orchestration import prepare_listing_with_ats
-
-_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
 
 class InputPreparationFixtureInput(BaseModel):
@@ -86,7 +85,6 @@ def execute_input_preparation_fixture_set(
     target = load_compiled_qualification_target(connection, target_id, artifact_path).target
     fixtures = load_fixture_set(connection, fixture_id, phase="input_preparation")
     results: list[dict[str, JsonValue]] = []
-    passed_count = 0
     for case in fixtures.cases:
         content = InputPreparationFixtureInput.model_validate(case.input)
         if (case.input_path == "direct") != isinstance(content.ats_evidence, AtsNotApplicable):
@@ -98,7 +96,6 @@ def execute_input_preparation_fixture_set(
         expected = InputPreparationObservation.model_validate(case.expected)
         observed = prepare_fixture_input(content)
         passed = observed == expected
-        passed_count += passed
         results.append(
             {
                 "input_path": case.input_path,
@@ -107,6 +104,7 @@ def execute_input_preparation_fixture_set(
                 "expected": expected.model_dump(mode="json"),
             }
         )
+    outcome, result = summarize_fixture_results(results)
     evidence = QualificationEvidence(
         target_id=target_id,
         phase="input_preparation",
@@ -114,12 +112,8 @@ def execute_input_preparation_fixture_set(
         fixture_set_id=fixture_id,
         executor_artifact_id=target.content.artifact_id,
         origin="canonical",
-        outcome="passed" if passed_count == len(results) else "failed",
-        result={
-            "case_count": len(results),
-            "passed_count": passed_count,
-            "cases": _JSON.validate_python(results),
-        },
+        outcome=outcome,
+        result=result,
         completed_at=completed_at,
     )
     return store_qualification_evidence(
