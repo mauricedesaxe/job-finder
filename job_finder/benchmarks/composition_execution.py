@@ -13,7 +13,7 @@ from job_finder.ats.models import AtsEvidence, AtsNotApplicable
 from job_finder.benchmarks.provider_attempts import (
     Provider,
     provider_attempt_evidence,
-    store_provider_attempts,
+    store_executed_evidence,
 )
 from job_finder.benchmarks.qualification_evidence import (
     FixtureSetId,
@@ -22,7 +22,7 @@ from job_finder.benchmarks.qualification_evidence import (
     QualificationEvidence,
     QualificationEvidenceId,
     load_fixture_set,
-    store_qualification_evidence,
+    summarize_fixture_results,
 )
 from job_finder.discovery.exchange_rates import ExchangeRateSnapshot
 from job_finder.discovery.jina import JinaUnavailable, ScrapeResult, SearchSucceeded
@@ -129,20 +129,14 @@ def execute_composition_fixture_set(
             model_sender is not None or generation_sender is not None or jev_sender is not None
         ),
     )
-    with connection.transaction():
-        evidence_id = store_qualification_evidence(
-            connection, evidence, created_at=completed_at, created_by=created_by
-        )
-        if attempts:
-            store_provider_attempts(
-                connection,
-                evidence,
-                attempts,
-                providers=tuple(provider for provider, _ in calls),
-                created_at=completed_at,
-                created_by=created_by,
-            )
-    return evidence_id
+    return store_executed_evidence(
+        connection,
+        evidence,
+        attempts,
+        providers=tuple(provider for provider, _ in calls),
+        created_at=completed_at,
+        created_by=created_by,
+    )
 
 
 def _build_composition_evidence(
@@ -157,23 +151,15 @@ def _build_composition_evidence(
 ) -> QualificationEvidence:
     results = execution.results
     attempts = tuple(attempt for _, attempt in execution.calls)
+    case_outcome, result = summarize_fixture_results(results)
     return QualificationEvidence(
         target_id=target_id,
         phase="composition",
         fixture_set_id=fixture_id,
         executor_artifact_id=compiled.target.content.artifact_id,
         origin="synthetic" if synthetic else "canonical",
-        outcome=(
-            "passed"
-            if all(result["passed"] for result in results) and all(coverage.values())
-            else "failed"
-        ),
-        result={
-            "case_count": len(results),
-            "passed_count": sum(bool(result["passed"]) for result in results),
-            "cases": _JSON.validate_python(list(results)),
-            "coverage": _JSON.validate_python(coverage),
-        },
+        outcome="passed" if case_outcome == "passed" and all(coverage.values()) else "failed",
+        result=result | {"coverage": _JSON.validate_python(coverage)},
         attempts=tuple(provider_attempt_evidence(attempt) for attempt in attempts),
         completed_at=completed_at,
     )

@@ -20,7 +20,7 @@ from job_finder.benchmarks.manifests import (
 )
 from job_finder.benchmarks.provider_attempts import (
     provider_attempt_evidence,
-    store_provider_attempts,
+    store_executed_evidence,
 )
 from job_finder.benchmarks.qualification_evidence import (
     ExperimentInputId,
@@ -28,7 +28,6 @@ from job_finder.benchmarks.qualification_evidence import (
     QualificationEvidenceId,
     RelevanceExperimentInput,
     experiment_input_id,
-    store_qualification_evidence,
 )
 from job_finder.benchmarks.scoring import EvaluationMetrics, score_results, score_trial
 from job_finder.discovery.exchange_rates import format_compensation_rates
@@ -138,19 +137,14 @@ def execute_relevance_experiment(
         attempts=tuple(provider_attempt_evidence(attempt) for attempt in attempts),
         completed_at=completed_at,
     )
-    with connection.transaction():
-        evidence_id = store_qualification_evidence(
-            connection, evidence, created_at=completed_at, created_by=created_by
-        )
-        store_provider_attempts(
-            connection,
-            evidence,
-            attempts,
-            provider=provider,
-            created_at=completed_at,
-            created_by=created_by,
-        )
-    return evidence_id
+    return store_executed_evidence(
+        connection,
+        evidence,
+        attempts,
+        provider=provider,
+        created_at=completed_at,
+        created_by=created_by,
+    )
 
 
 def _load_frozen_input(

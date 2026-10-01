@@ -11,7 +11,9 @@ from pydantic import JsonValue, TypeAdapter
 from job_finder.benchmarks.qualification_evidence import (
     ProviderAttemptEvidence,
     QualificationEvidence,
+    QualificationEvidenceId,
     qualification_evidence_id,
+    store_qualification_evidence,
 )
 from job_finder.evaluation.models import ModelCallAttempt
 
@@ -30,6 +32,35 @@ def provider_attempt_evidence(attempt: ModelCallAttempt) -> ProviderAttemptEvide
         response=attempt.raw_response,
         observed_at=attempt.observed_at,
     )
+
+
+def store_executed_evidence(
+    connection: psycopg.Connection[tuple[object, ...]],
+    evidence: QualificationEvidence,
+    attempts: Sequence[ModelCallAttempt],
+    *,
+    provider: Provider | None = None,
+    providers: Sequence[Provider] | None = None,
+    created_at: datetime,
+    created_by: str,
+) -> QualificationEvidenceId:
+    if not attempts and evidence.phase != "composition":
+        raise ValueError("Executed model phase evidence requires at least one provider attempt")
+    with connection.transaction():
+        evidence_id = store_qualification_evidence(
+            connection, evidence, created_at=created_at, created_by=created_by
+        )
+        if attempts:
+            store_provider_attempts(
+                connection,
+                evidence,
+                attempts,
+                provider=provider,
+                providers=providers,
+                created_at=created_at,
+                created_by=created_by,
+            )
+    return evidence_id
 
 
 def store_provider_attempts(
