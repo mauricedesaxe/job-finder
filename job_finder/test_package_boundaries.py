@@ -48,7 +48,6 @@ _WEB_PUBLIC_SYMBOLS = {
     "security.py": frozenset(
         {
             "SecurityHeadersMiddleware",
-            "authenticate_session",
             "csrf_token",
             "ensure_csrf_token",
             "form_text",

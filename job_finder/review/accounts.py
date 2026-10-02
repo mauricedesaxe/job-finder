@@ -141,13 +141,6 @@ class AccountService:
                 (_digest(token),),
             )
 
-    def revoke_user_sessions(self, user_id: UUID) -> None:
-        with self.connect() as connection, connection.transaction():
-            _ = connection.execute(
-                "UPDATE review_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = %s AND revoked_at IS NULL",
-                (user_id,),
-            )
-
     def list_members(self) -> tuple[Account, ...]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -321,13 +314,6 @@ class AccountService:
             )
             _audit(connection, user_id, user_id, "password_reset")
             return True
-
-    def revoke_link(self, token: str) -> None:
-        with self.connect() as connection, connection.transaction():
-            _ = connection.execute(
-                "UPDATE review_account_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = %s AND consumed_at IS NULL AND revoked_at IS NULL",
-                (_digest(token),),
-            )
 
 
 def _email(value: str) -> str:
