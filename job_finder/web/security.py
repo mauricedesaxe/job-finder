@@ -42,11 +42,6 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
-def authenticate_session(request: Request) -> None:
-    request.session.clear()
-    request.session.update({"authenticated": True, "csrf_token": secrets.token_urlsafe(32)})
-
-
 def ensure_csrf_token(request: Request) -> str:
     token = request.session.get("csrf_token")
     if isinstance(token, str):
