@@ -117,11 +117,9 @@ class PipelineBoundaries:
     model_call_started: Callable[[str], None] | None = None
 
 
-class PipelineServiceModel(BaseModel):
+class DiscoverySummary(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-
-class DiscoverySummary(PipelineServiceModel):
     query_count: int
     unavailable_query_count: int
     discovered_count: int
@@ -138,7 +136,9 @@ class DiscoverySummary(PipelineServiceModel):
             )
 
 
-class ProcessingSummary(PipelineServiceModel):
+class ProcessingSummary(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
     claimed_count: int
     terminal_count: int
     terminal_error_count: int

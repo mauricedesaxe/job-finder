@@ -10,11 +10,9 @@ from job_finder.jobs.listings import job_id_for_url
 from job_finder.pipeline.connection import Connection, require_autocommit
 
 
-class DiscoveryModel(BaseModel):
+class DiscoveryRegistration(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-
-class DiscoveryRegistration(DiscoveryModel):
     discovered_count: int = Field(ge=0)
     new_work_count: int = Field(ge=0)
     processed_url_count: int = Field(default=0, ge=0)
