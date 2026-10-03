@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from job_finder.database import Connection
 from job_finder.evaluation.models import PromptReleaseId, RelevanceReleaseId
+from job_finder.pipeline.connection import acquire_transaction_lock, require_autocommit
 
 WorkItemState = Literal["pending", "leased", "failed", "completed", "terminal_error"]
 ReevaluationOutcome = Literal[
@@ -106,27 +107,24 @@ JobReevaluationResult: TypeAlias = (
 def request_job_reevaluation(
     connection: Connection, command: JobReevaluationCommand
 ) -> JobReevaluationResult:
-    if not connection.autocommit:
-        raise ValueError("Job reevaluation requires an autocommit connection")
+    require_autocommit(connection, operation="Job reevaluation")
     with connection.transaction():
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"job_reevaluation_key:{command.idempotency_key}",),
-        ).fetchone()
+        acquire_transaction_lock(
+            connection,
+            f"job_reevaluation_key:{command.idempotency_key}",
+        )
         existing = _load_reevaluation_receipt(connection, command.idempotency_key)
         if existing is not None:
             if not _reevaluation_receipt_matches(existing, command):
                 return JobReevaluationKeyConflict(command.idempotency_key)
             return _reevaluation_result(existing, replayed=True)
 
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"job_reevaluation_source:{command.expected_decision_id}",),
-        ).fetchone()
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"job_reevaluation_snapshot:{command.expected_snapshot_id}",),
-        ).fetchone()
+        acquire_transaction_lock(
+            connection, f"job_reevaluation_source:{command.expected_decision_id}"
+        )
+        acquire_transaction_lock(
+            connection, f"job_reevaluation_snapshot:{command.expected_snapshot_id}"
+        )
         source = connection.execute(
             """
             SELECT s.job_id, d.snapshot_id, d.pipeline_run_id,

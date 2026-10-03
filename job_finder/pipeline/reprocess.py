@@ -11,6 +11,7 @@ from job_finder.jobs.structural_filter import (
     GENERIC_TITLE_REASON,
     NON_ROLE_TITLE_REASON,
 )
+from job_finder.pipeline.connection import require_autocommit
 
 _MIS_TITLED_REASON_PREFIXES = (
     NON_ROLE_TITLE_REASON,
@@ -28,11 +29,6 @@ class _ReprocessPolicy:
     extra_from: sql.SQL
     predicate: sql.SQL
     params: tuple[object, ...]
-
-
-def _require_autocommit(connection: Connection[tuple[object, ...]]) -> None:
-    if not connection.autocommit:
-        raise ValueError("Reprocessing requires an autocommit connection")
 
 
 def _mis_titled_predicates() -> tuple[str, ...]:
@@ -111,7 +107,7 @@ def _reset_jobs(
     job_ids: tuple[UUID, ...],
     policy: _ReprocessPolicy,
 ) -> int:
-    _require_autocommit(connection)
+    require_autocommit(connection, operation="Reprocessing")
     reset = 0
     for start in range(0, len(job_ids), _CHUNK):
         reset += _reset_chunk(connection, job_ids[start : start + _CHUNK], policy)

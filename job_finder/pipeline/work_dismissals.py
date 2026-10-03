@@ -7,6 +7,7 @@ from typing import Literal, TypeAlias, cast
 from uuid import UUID
 
 from job_finder.database import Connection
+from job_finder.pipeline.connection import acquire_transaction_lock, require_autocommit
 
 WorkItemState = Literal["pending", "leased", "failed", "completed", "terminal_error"]
 RecoveryOutcome = Literal["applied", "stale_state", "active_lease", "not_found"]
@@ -88,13 +89,9 @@ WorkDismissalResult: TypeAlias = (
 
 
 def dismiss_work(connection: Connection, command: WorkDismissalCommand) -> WorkDismissalResult:
-    if not connection.autocommit:
-        raise ValueError("Work dismissal requires an autocommit connection")
+    require_autocommit(connection, operation="Work dismissal")
     with connection.transaction():
-        _ = connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"work_dismissal:{command.idempotency_key}",),
-        ).fetchone()
+        acquire_transaction_lock(connection, f"work_dismissal:{command.idempotency_key}")
         existing = _load_dismissal_receipt(connection, command.idempotency_key)
         if existing is not None:
             if not _dismissal_receipt_matches(existing, command):
