@@ -65,6 +65,7 @@ _WEB_PUBLIC_SYMBOLS = {
             "document",
             "operations_sidebar_page",
             "operations_sub_sidebar",
+            "query_notice",
             "relative_time",
             "sidebar",
             "sidebar_page",

@@ -118,6 +118,7 @@ from job_finder.web.shell import (
     absolute_time,
     document,
     operations_sidebar_page,
+    query_notice,
     state_response,
     timestamp,
 )
@@ -187,7 +188,7 @@ def register_operations_routes(
             control_error = str(error)
         else:
             control_error = None
-        notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
+        notice = query_notice(request.query_params, _OPERATIONS_NOTICES)
         return HTMLResponse(
             document(
                 operations_sidebar_page(
@@ -366,7 +367,7 @@ def register_operations_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        notice = _OPERATIONS_NOTICES.get(request.query_params.get("notice", ""))
+        notice = query_notice(request.query_params, _OPERATIONS_NOTICES)
         next_href = (
             _activity_href(request.query_params, cursor=page.next_cursor)
             if page.next_cursor is not None
@@ -454,7 +455,7 @@ def register_operations_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        notice = _WORK_ACTION_NOTICES.get(request.query_params.get("notice", ""))
+        notice = query_notice(request.query_params, _WORK_ACTION_NOTICES)
         return HTMLResponse(
             document(
                 operations_sidebar_page(

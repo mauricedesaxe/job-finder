@@ -33,7 +33,7 @@ from job_finder.qualification_target_service import (
 )
 from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, verified_csrf_token
-from job_finder.web.shell import document, sidebar_page, state_response
+from job_finder.web.shell import document, query_notice, sidebar_page, state_response
 
 _logger = logging.getLogger(__name__)
 
@@ -55,9 +55,7 @@ def register_qualification_target_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(
-            request, connect, token, _TARGET_NOTICES.get(request.query_params.get("notice", ""))
-        )
+        return _page(request, connect, token, query_notice(request.query_params, _TARGET_NOTICES))
 
     @app.route("/configuration/qualification-targets/candidate", methods=["POST"])
     async def create_candidate(request: Request) -> HTMLResponse | RedirectResponse:

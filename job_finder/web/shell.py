@@ -1,6 +1,7 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -51,6 +52,10 @@ _HOUR = 60 * _MINUTE
 _DAY = 24 * _HOUR
 _MONTH = 30 * _DAY
 _YEAR = 365 * _DAY
+
+
+def query_notice(query: Mapping[str, str], notices: Mapping[str, str]) -> str | None:
+    return notices.get(query.get("notice", ""))
 
 
 def sidebar_page(

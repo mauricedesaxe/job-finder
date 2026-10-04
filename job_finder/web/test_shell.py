@@ -9,6 +9,7 @@ from job_finder.access_policy import Capability
 from job_finder.web.shell import (
     absolute_time,
     operations_sub_sidebar,
+    query_notice,
     relative_time,
     sidebar,
     timestamp,
@@ -20,6 +21,14 @@ ALL_GRANTS = frozenset(Capability)
 
 def _relative(seconds: float) -> str:
     return relative_time(NOW, now=datetime.fromtimestamp(NOW.timestamp() + seconds, tz=UTC))
+
+
+def test_query_notice_returns_only_allowlisted_messages() -> None:
+    notices = {"saved": "Saved."}
+
+    assert query_notice({"notice": "saved"}, notices) == "Saved."
+    assert query_notice({}, notices) is None
+    assert query_notice({"notice": "<script>alert(1)</script>"}, notices) is None
 
 
 def test_relative_time_reports_just_now_under_a_minute() -> None:

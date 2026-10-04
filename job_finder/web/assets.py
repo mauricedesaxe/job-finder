@@ -16,16 +16,11 @@ def _hashed_static_assets(directory: Path) -> dict[str, Path]:
     return assets
 
 
-def _hashed_static_urls(assets: dict[str, Path]) -> dict[str, str]:
-    urls: dict[str, str] = {}
-    for hashed_name, path in assets.items():
-        original = f"{path.stem}{path.suffix}"
-        urls[original] = f"/static/{hashed_name}"
-    return urls
-
-
 _STATIC_ASSETS = _hashed_static_assets(_STATIC_DIR)
-_STATIC_URLS = _hashed_static_urls(_STATIC_ASSETS)
+_STATIC_URLS = {
+    f"{path.stem}{path.suffix}": f"/static/{hashed_name}"
+    for hashed_name, path in _STATIC_ASSETS.items()
+}
 
 
 def static_url(name: str) -> str:
