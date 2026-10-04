@@ -48,7 +48,7 @@ from job_finder.database import ConnectionFactory
 from job_finder.evaluation.qualification_components import QualificationTargetId
 from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, verified_csrf_token
-from job_finder.web.shell import document, sidebar_page, state_response
+from job_finder.web.shell import document, query_notice, sidebar_page, state_response
 
 _logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def register_qualification_promotion_routes(
         if token is None:
             return HTMLResponse(status_code=401)
         return _page(
-            request, connect, token, _PROMOTION_NOTICES.get(request.query_params.get("notice", ""))
+            request, connect, token, query_notice(request.query_params, _PROMOTION_NOTICES)
         )
 
     @app.route("/configuration/qualification-promotion/preview", methods=["POST"])

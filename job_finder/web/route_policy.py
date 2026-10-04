@@ -27,7 +27,12 @@ def compile_route_policies(
         if duplicates:
             raise ValueError(f"Duplicate routes: {duplicates}")
         actual.update(route_keys)
-        _bind_route(bound, route)
+        for method in route.methods:
+            key = _route_key(method, route.path)
+            policy = ROUTE_POLICIES.get(key)
+            if policy is None:
+                raise ValueError(f"Route has no access policy: {key}")
+            bound[(route.endpoint, method)] = policy
     if actual != expected:
         raise ValueError(
             f"Route policy mismatch; missing={expected - actual}, extra={actual - expected}"
@@ -54,13 +59,3 @@ def _expected_routes(*, review_routes: bool, split_routes: bool) -> set[RouteKey
 
 def _route_key(method: str, path: str) -> RouteKey:
     return ("GET" if method == "HEAD" else method, path)
-
-
-def _bind_route(bound: dict[tuple[object, str], RoutePolicy], route: Route) -> None:
-    assert route.methods is not None
-    for method in route.methods:
-        key = _route_key(method, route.path)
-        policy = ROUTE_POLICIES.get(key)
-        if policy is None:
-            raise ValueError(f"Route has no access policy: {key}")
-        bound[(route.endpoint, method)] = policy

@@ -66,7 +66,7 @@ from job_finder.qualification_definition_service import (
 )
 from job_finder.web.principal import actor_email, current_account
 from job_finder.web.security import csrf_token, verified_csrf_token
-from job_finder.web.shell import document, sidebar_page, state_response
+from job_finder.web.shell import document, query_notice, sidebar_page, state_response
 
 _logger = logging.getLogger(__name__)
 
@@ -91,9 +91,7 @@ def register_split_configuration_routes(
         token = csrf_token(request)
         if token is None:
             return HTMLResponse(status_code=401)
-        return _page(
-            request, connect, token, _SPLIT_NOTICES.get(request.query_params.get("notice", ""))
-        )
+        return _page(request, connect, token, query_notice(request.query_params, _SPLIT_NOTICES))
 
     @app.route("/configuration/acquisition/draft", methods=["POST"])
     async def save_acquisition(request: Request) -> HTMLResponse | RedirectResponse:
