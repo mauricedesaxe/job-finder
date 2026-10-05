@@ -58,12 +58,16 @@ def compare_runs(
         raise ValueError("Run comparison requires exact release targets")
     if baseline.target == candidate.target:
         raise ValueError("Baseline and candidate release targets must differ")
-    baseline_results = _indexed_results(manifest, baseline)
-    candidate_results = _indexed_results(manifest, candidate)
     baseline_metrics = _scoring.score_results(manifest, baseline.results)
     candidate_metrics = _scoring.score_results(manifest, candidate.results)
     if baseline.metrics != baseline_metrics or candidate.metrics != candidate_metrics:
         raise ValueError("Run metrics must match case-level evidence")
+    baseline_results = {
+        (result.case_position, result.trial_index): result for result in baseline.results
+    }
+    candidate_results = {
+        (result.case_position, result.trial_index): result for result in candidate.results
+    }
     cases: list[EvaluationCaseTransition] = []
     improvements = 0
     regressions = 0
@@ -146,23 +150,6 @@ def promotion_eligibility_failures(
     if candidate.false_negative_rate > baseline.false_negative_rate:
         failures.append("Candidate regresses against baseline false negatives")
     return tuple(failures)
-
-
-def _indexed_results(
-    manifest: _benchmark_manifests.EvaluationManifest, run: _executions.EvaluationRun
-) -> dict[tuple[int, int], _scoring.EvaluationTrialResult]:
-    indexed = {(result.case_position, result.trial_index): result for result in run.results}
-    required = {
-        (case.position, trial_index)
-        for case in manifest.cases
-        for trial_index in range(case.trial_count)
-    }
-    if len(indexed) != len(run.results) or set(indexed) != required:
-        raise ValueError("Run results must cover every manifest trial exactly once")
-    expected = {case.position: case.expected_outcome for case in manifest.cases}
-    if any(result.expected_outcome != expected[result.case_position] for result in run.results):
-        raise ValueError("Run results must match manifest expectations")
-    return indexed
 
 
 def _transition(
