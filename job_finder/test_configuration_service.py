@@ -26,7 +26,6 @@ from job_finder.configuration_service import (
     PublishedActiveSearchConfiguration,
     list_search_configuration_revisions,
     preview_search_configuration,
-    preview_search_configuration_detailed,
     validate_search_configuration,
 )
 from job_finder.evaluation.prompt_releases import build_prompt_release
@@ -136,17 +135,6 @@ def test_preview_returns_a_frozen_stable_summary() -> None:
     assert ConfigurationPreview.model_validate(preview.model_dump()) == preview
     with pytest.raises(ValidationError, match="frozen"):
         setattr(preview, "prompt_release_name", "changed")
-
-
-def test_detailed_preview_returns_the_full_release_behind_the_summary() -> None:
-    configuration = DEFAULT_SEARCH_CONFIGURATION.model_copy(
-        update={"search_keywords": ("first keyword", "second keyword")}
-    )
-
-    preview = preview_search_configuration_detailed(configuration)
-
-    assert preview.summary == preview_search_configuration(configuration)
-    assert preview.prompt_release == build_prompt_release(configuration)
 
 
 @pytest.mark.parametrize(

@@ -124,11 +124,6 @@ class ConfigurationPreview(ConfigurationServiceModel):
     prompt_summaries: Annotated[tuple[PromptSummary, ...], Field(max_length=100)]
 
 
-class DetailedConfigurationPreview(ConfigurationServiceModel):
-    summary: ConfigurationPreview
-    prompt_release: PromptRelease
-
-
 class ConfigurationRevisionNotFound(ValueError):
     pass
 
@@ -325,26 +320,6 @@ def preview_search_configuration(
         release,
         search_sample_limit=search_sample_limit,
         prompt_summary_limit=prompt_summary_limit,
-    )
-
-
-def preview_search_configuration_detailed(
-    configuration: SearchConfiguration,
-    *,
-    search_sample_limit: int = DEFAULT_RESULT_LIMIT,
-    prompt_summary_limit: int = DEFAULT_RESULT_LIMIT,
-) -> DetailedConfigurationPreview:
-    _require_result_limit(search_sample_limit)
-    _require_result_limit(prompt_summary_limit)
-    release = build_prompt_release(configuration)
-    return DetailedConfigurationPreview(
-        summary=_configuration_preview(
-            configuration,
-            release,
-            search_sample_limit=search_sample_limit,
-            prompt_summary_limit=prompt_summary_limit,
-        ),
-        prompt_release=release,
     )
 
 
