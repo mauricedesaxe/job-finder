@@ -22,6 +22,7 @@ from job_finder.evaluation.models import (
     ProviderRequestObservation,
 )
 from job_finder.evaluation.openrouter import (
+    _canonical_json_digest,
     HttpResponse,
     ModelCallPersistence,
     PendingModelCallUsage,
@@ -875,9 +876,22 @@ def test_reuses_an_accepted_request_without_calling_openrouter() -> None:
     assert result == CriterionAccepted(
         prompt_name=prompt.definition.name, passed=True, reason="stored"
     )
-    assert len(model_request_id(context, prompt)) == 64
-    assert model_request_id(context, prompt) == model_request_id(context, prompt)
+    assert (
+        model_request_id(context, prompt)
+        == "c996b20bfb0142e0136940ca68a946446a96ecb442d82af50ea741af0d9279e8"
+    )
+    assert (
+        prompt_input_digest({"job": "caf\u00e9", "nested": "line\nvalue"})
+        == "4fc162f7d743d9ae2e1b58f436ceae521af68e4e18d48b02f5e132a24e843cf0"
+    )
     assert prompt_input_digest({"job": "job body"}) != prompt_input_digest({"job": "changed"})
+
+
+def test_canonical_json_digest_is_stable_for_nested_projection_payloads() -> None:
+    assert (
+        _canonical_json_digest({"attempt": {"answer": "caf\u00e9", "scores": [1, 2]}, "ok": True})
+        == "665349c51d4fd67bbb23995b8a99fc4a64ef348492909691a45c607e6e12aabd"
+    )
 
 
 def test_rejects_a_context_for_different_prompt_input() -> None:
