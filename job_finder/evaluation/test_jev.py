@@ -24,7 +24,6 @@ from job_finder.evaluation.jev import (
     JevSystemOneResponse,
     evaluate_prompt,
     evaluate_persisted_prompt,
-    jev_policy_digest,
     summarize_observations,
 )
 from job_finder.evaluation.models import (
@@ -776,12 +775,6 @@ def test_summarizes_tokens_cost_and_interpolated_latency_percentiles() -> None:
     metrics_with_failed_attempt = summarize_observations(observations, (50, 100, 300))
     assert metrics_with_failed_attempt.request_count == 3
     assert metrics_with_failed_attempt.p50_latency_ms == 100
-
-
-def test_jev_policy_identity_is_stable() -> None:
-    digest = jev_policy_digest("1 EUR ~= 1.10 USD")
-    assert digest == "21b93830db6d2d425e16d4ed521615fc96bffc17f862034ac901cde3eb09251b"
-    assert digest != jev_policy_digest("1 EUR ~= 1.20 USD")
 
 
 @pytest.mark.parametrize(

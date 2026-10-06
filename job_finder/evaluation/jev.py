@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -301,29 +299,6 @@ ATOMIC_QUESTIONS: Mapping[str, Mapping[str, JevNoulQuestionTemplate]] = MappingP
         ),
     }
 )
-
-
-def jev_policy_digest(rates: str, policy: JevPolicy = "faithful") -> str:
-    questions: Mapping[str, object]
-    if policy == "faithful":
-        questions = JEV_QUESTIONS
-    else:
-        questions = ATOMIC_QUESTIONS
-    payload = {
-        "model": JEV_MODEL,
-        "pass_threshold": JEV_PASS_THRESHOLD,
-        "rates": rates,
-        "questions": {
-            criterion: (
-                question.model_dump(mode="json")
-                if isinstance(question, JevNoulQuestionTemplate)
-                else {name: template.model_dump(mode="json") for name, template in question.items()}
-            )
-            for criterion, question in questions.items()
-        },
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _resolve_execution_policy(

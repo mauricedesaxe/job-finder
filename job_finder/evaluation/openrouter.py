@@ -486,9 +486,7 @@ def enqueue_model_call_projection(
     payload = TypeAdapter(dict[str, JsonValue]).validate_json(
         TypeAdapter(ModelCallAttempt).dump_json(projection_attempt)
     )
-    payload_digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    payload_digest = _canonical_json_digest(payload)
     projection_id = hashlib.sha256(f"model_call:{attempt.id}".encode()).hexdigest()
     _ = connection.execute(
         """
@@ -508,12 +506,11 @@ def enqueue_model_call_projection(
 
 
 def prompt_input_digest(values: Mapping[str, str]) -> InputDigest:
-    encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
-    return InputDigest(hashlib.sha256(encoded).hexdigest())
+    return InputDigest(_canonical_json_digest(dict(values)))
 
 
 def model_request_id(context: ModelCallContext, prompt: PromptVersion) -> ModelRequestId:
-    identity = [
+    identity: list[JsonValue] = [
         str(context.pipeline_run_id),
         str(context.processing_attempt_id),
         context.operation_key,
@@ -521,8 +518,12 @@ def model_request_id(context: ModelCallContext, prompt: PromptVersion) -> ModelR
         str(prompt.id),
         str(context.input_digest),
     ]
-    encoded = json.dumps(identity, separators=(",", ":")).encode()
-    return ModelRequestId(hashlib.sha256(encoded).hexdigest())
+    return ModelRequestId(_canonical_json_digest(identity))
+
+
+def _canonical_json_digest(value: JsonValue) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _render_messages(
