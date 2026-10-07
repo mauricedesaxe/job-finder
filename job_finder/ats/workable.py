@@ -4,6 +4,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from job_finder.ats.hosts import ats_source_for_hostname
 from job_finder.ats.models import AtsAvailable, normalize_workplace_type, unique_locations
 from job_finder.urls import parse_http_url
 
@@ -30,9 +31,9 @@ class _WorkableResponse(_WorkableWireModel):
 
 def parse_workable_url(url: str) -> tuple[str, str] | None:
     parsed = parse_http_url(url)
-    if parsed is None or parsed.hostname is None:
+    if parsed is None:
         return None
-    if parsed.hostname != "apply.workable.com":
+    if ats_source_for_hostname(parsed.hostname) != "workable":
         return None
     segments = tuple(segment for segment in parsed.path.split("/") if segment)
     try:

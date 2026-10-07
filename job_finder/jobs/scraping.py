@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+
+from job_finder.ats.hosts import ats_source_for_hostname
 from job_finder.jobs.listings import JobListing, JobSource
 from job_finder.urls import parse_http_url
 
@@ -53,21 +55,12 @@ def extract_company_from_url(url: str) -> str:
 
 def detect_source(url: str) -> JobSource:
     parsed = parse_http_url(url)
-    if parsed is None or parsed.hostname is None:
+    if parsed is None:
         return "other"
-    if parsed.hostname == "jobs.ashbyhq.com":
+    source = ats_source_for_hostname(parsed.hostname)
+    if source == "ashby":
         return "ashbyhq"
-    if parsed.hostname == "jobs.lever.co":
-        return "lever"
-    if parsed.hostname in (
-        "boards.greenhouse.io",
-        "job-boards.greenhouse.io",
-        "boards.eu.greenhouse.io",
-    ):
-        return "greenhouse"
-    if parsed.hostname == "apply.workable.com":
-        return "workable"
-    return "other"
+    return source or "other"
 
 
 def extract_title(markdown: str) -> str:

@@ -4,6 +4,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictInt
 
+from job_finder.ats.hosts import ats_source_for_hostname
 from job_finder.ats.models import (
     AtsAvailable,
     CompensationObservation,
@@ -81,9 +82,9 @@ class _AshbyResponse(_AshbyWireModel):
 
 def parse_ashby_url(url: str) -> tuple[str, str] | None:
     parsed = parse_http_url(url)
-    if parsed is None or parsed.hostname is None:
+    if parsed is None:
         return None
-    if parsed.hostname != "jobs.ashbyhq.com":
+    if ats_source_for_hostname(parsed.hostname) != "ashby":
         return None
     segments = tuple(segment for segment in parsed.path.split("/") if segment)
     if len(segments) < 2:

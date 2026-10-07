@@ -1,6 +1,7 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
 from job_finder.jobs.scraping import (
@@ -23,12 +24,20 @@ def test_extracts_company_from_supported_job_board_urls() -> None:
     assert extract_company_from_url("https://jobs.ashbyhq.com/") == "Unknown"
 
 
-def test_detects_the_job_source() -> None:
-    assert detect_source("https://jobs.ashbyhq.com/acme/123") == "ashbyhq"
-    assert detect_source("https://jobs.lever.co/company/abc") == "lever"
-    assert detect_source("https://boards.greenhouse.io/co/jobs/1") == "greenhouse"
-    assert detect_source("https://apply.workable.com/mlabs/j/C07B32BD46") == "workable"
-    assert detect_source("https://example.com/jobs/1") == "other"
+@pytest.mark.parametrize(
+    ("url", "source"),
+    (
+        ("https://jobs.ashbyhq.com/acme/123", "ashbyhq"),
+        ("https://jobs.lever.co/company/abc", "lever"),
+        ("https://boards.greenhouse.io/co/jobs/1", "greenhouse"),
+        ("https://job-boards.greenhouse.io/co/jobs/1", "greenhouse"),
+        ("https://boards.eu.greenhouse.io/co/jobs/1", "greenhouse"),
+        ("https://apply.workable.com/mlabs/j/C07B32BD46", "workable"),
+        ("https://example.com/jobs/1", "other"),
+    ),
+)
+def test_detects_the_job_source(url: str, source: str) -> None:
+    assert detect_source(url) == source
 
 
 def test_extracts_titles_in_precedence_order() -> None:

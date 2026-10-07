@@ -5,6 +5,8 @@ from typing import Annotated, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from job_finder.ats.hosts import ats_source_for_hostname
+from job_finder.ats.models import AtsSource
 from job_finder.jobs.listings import JobListing
 from job_finder.urls import parse_http_url
 
@@ -60,9 +62,10 @@ def structural_filter(job: JobListing) -> StructuralDecision:
     if parsed is None or parsed.hostname is None:
         return StructuralRejection(reason=f"Invalid job URL ({job.url})")
     segments = tuple(segment for segment in parsed.path.split("/") if segment)
-    if parsed.hostname == "jobs.lever.co" and segments[:1] in (("jobgether",), ("toptal",)):
+    ats_source = ats_source_for_hostname(parsed.hostname)
+    if ats_source == "lever" and segments[:1] in (("jobgether",), ("toptal",)):
         return StructuralRejection(reason=f"Aggregator/marketplace listing ({job.url})")
-    if _is_careers_index(parsed.hostname, segments):
+    if _is_careers_index(ats_source, segments):
         return StructuralRejection(reason=f"Careers-index page, not a specific role ({job.url})")
     if any(pattern.search(job.title) for pattern in _GENERIC_TITLE_PATTERNS):
         return StructuralRejection(reason=f"{GENERIC_TITLE_REASON} ({job.title})")
@@ -73,17 +76,5 @@ def structural_filter(job: JobListing) -> StructuralDecision:
     return StructuralPass()
 
 
-def _is_careers_index(hostname: str, segments: tuple[str, ...]) -> bool:
-    if len(segments) != 1:
-        return False
-    return (
-        hostname == "apply.workable.com"
-        or hostname == "jobs.lever.co"
-        or hostname
-        in (
-            "boards.greenhouse.io",
-            "job-boards.greenhouse.io",
-            "boards.eu.greenhouse.io",
-        )
-        or hostname == "jobs.ashbyhq.com"
-    )
+def _is_careers_index(source: AtsSource | None, segments: tuple[str, ...]) -> bool:
+    return len(segments) == 1 and source is not None

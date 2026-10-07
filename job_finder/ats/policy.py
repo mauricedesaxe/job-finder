@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from job_finder.ats.hosts import ats_source_for_hostname
 from job_finder.ats.models import AtsAvailable, AtsEvidence, AtsSource
 from job_finder.jobs.structural_filter import (
     StructuralDecision,
@@ -19,21 +20,9 @@ _LOCATION_QUESTION = re.compile(
 
 def detect_ats_source(url: str) -> AtsSource | None:
     parsed = parse_http_url(url)
-    if parsed is None or parsed.hostname is None:
+    if parsed is None:
         return None
-    if parsed.hostname == "jobs.lever.co":
-        return "lever"
-    if parsed.hostname == "jobs.ashbyhq.com":
-        return "ashby"
-    if parsed.hostname in (
-        "boards.greenhouse.io",
-        "job-boards.greenhouse.io",
-        "boards.eu.greenhouse.io",
-    ):
-        return "greenhouse"
-    if parsed.hostname == "apply.workable.com":
-        return "workable"
-    return None
+    return ats_source_for_hostname(parsed.hostname)
 
 
 def ats_structural_filter(evidence: AtsEvidence) -> StructuralDecision:
