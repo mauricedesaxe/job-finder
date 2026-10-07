@@ -6,6 +6,7 @@ from typing import ClassVar, override
 
 from pydantic import BaseModel, ConfigDict, StrictInt
 
+from job_finder.ats.hosts import ats_source_for_hostname
 from job_finder.ats.models import ApplicationQuestion, AtsAvailable, unique_locations
 from job_finder.urls import parse_http_url
 
@@ -47,13 +48,9 @@ class _GreenhouseJob(_GreenhouseWireModel):
 
 def parse_greenhouse_url(url: str) -> tuple[str, str] | None:
     parsed = parse_http_url(url)
-    if parsed is None or parsed.hostname is None:
+    if parsed is None:
         return None
-    if parsed.hostname not in (
-        "boards.greenhouse.io",
-        "job-boards.greenhouse.io",
-        "boards.eu.greenhouse.io",
-    ):
+    if ats_source_for_hostname(parsed.hostname) != "greenhouse":
         return None
     segments = tuple(segment for segment in parsed.path.split("/") if segment)
     try:

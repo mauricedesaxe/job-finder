@@ -41,6 +41,7 @@ def test_rejects_aggregator_listings(url: str) -> None:
         "https://apply.workable.com/walletconnect/",
         "https://jobs.lever.co/acme",
         "https://boards.greenhouse.io/acme/",
+        "https://job-boards.greenhouse.io/acme/",
         "https://boards.eu.greenhouse.io/acme/",
         "https://jobs.ashbyhq.com/acme",
     ),
