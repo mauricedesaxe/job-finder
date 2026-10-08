@@ -10,15 +10,12 @@ from pydantic import JsonValue
 
 from job_finder.jobs.decisions import (
     CompanyPolicy,
-    DecisionOutcome,
-    DecisionStage,
     DecisionStore,
     PersistedDecision,
     TerminalDecision,
     decision_digest,
     normalize_ledger_text,
 )
-from job_finder.jobs.enrichment import EnrichedJob
 
 EnqueueReviewItem = Callable[[psycopg.Connection[tuple[object, ...]], str, date], None]
 
@@ -279,53 +276,22 @@ def _insert_decision(
     ).fetchone()
     if row is None:
         raise RuntimeError("Could not read the terminal decision")
-    outcome_value = _parse_decision_outcome(str(row[2]))
-    return PersistedDecision(
-        decision_id=str(row[0]),
-        snapshot_id=str(row[1]),
-        outcome=outcome_value,
-        matched_profile=str(row[3]) if row[3] is not None else None,
-        reason=str(row[4]),
-        job=EnrichedJob(
-            title=str(row[5]),
-            company=str(row[6]),
-            description=str(row[7]),
-            location=str(row[8]),
-        ),
-        decision_stage=_parse_decision_stage(str(row[9])),
+    return PersistedDecision.model_validate(
+        {
+            "decision_id": row[0],
+            "snapshot_id": row[1],
+            "outcome": row[2],
+            "matched_profile": row[3],
+            "reason": row[4],
+            "job": {
+                "title": row[5],
+                "company": row[6],
+                "description": row[7],
+                "location": row[8],
+            },
+            "decision_stage": row[9],
+        }
     )
-
-
-def _parse_decision_stage(value: str) -> DecisionStage:
-    match value:
-        case "ats_structural":
-            return "ats_structural"
-        case "structural":
-            return "structural"
-        case "evaluation":
-            return "evaluation"
-        case "qualified":
-            return "qualified"
-        case "company_policy":
-            return "company_policy"
-        case _:
-            raise RuntimeError(f"Unknown decision stage: {value}")
-
-
-def _parse_decision_outcome(value: str) -> DecisionOutcome:
-    match value:
-        case "qualified":
-            return "qualified"
-        case "rejected":
-            return "rejected"
-        case "duplicate":
-            return "duplicate"
-        case "company_blocked":
-            return "company_blocked"
-        case "company_applied":
-            return "company_applied"
-        case _:
-            raise RuntimeError(f"Unknown decision outcome: {value}")
 
 
 def _insert_receipt(
