@@ -185,17 +185,7 @@ def load_search_configuration_revision(
         raise SearchConfigurationRevisionNotFound(
             f"Search configuration revision not found: {revision_id}"
         )
-    revision = SearchConfigurationRevision.model_validate(
-        {
-            "id": revision_id,
-            "configuration": row[0],
-            "created_at": row[1],
-            "created_by": row[2],
-        }
-    )
-    if search_configuration_revision_id(revision.configuration) != revision.id:
-        raise SearchConfigurationError(f"Search configuration revision is corrupt: {revision_id}")
-    return revision
+    return _parse_search_configuration_revision(revision_id, row[0], row[1], row[2])
 
 
 def store_search_configuration_revision(
@@ -328,16 +318,7 @@ def load_active_search_configuration(connection: Connection) -> ActiveSearchConf
     ).fetchone()
     if row is None:
         raise SearchConfigurationError("Active search configuration is missing")
-    revision = SearchConfigurationRevision.model_validate(
-        {
-            "id": row[3],
-            "configuration": row[4],
-            "created_at": row[5],
-            "created_by": row[6],
-        }
-    )
-    if search_configuration_revision_id(revision.configuration) != revision.id:
-        raise SearchConfigurationError(f"Search configuration revision is corrupt: {revision.id}")
+    revision = _parse_search_configuration_revision(row[3], row[4], row[5], row[6])
     return ActiveSearchConfiguration(
         generation=int(str(row[0])),
         revision=revision,
@@ -381,19 +362,34 @@ def compare_and_swap_active_search_configuration(
         ).fetchone()
     if row is None:
         return None
+    revision = _parse_search_configuration_revision(row[3], row[4], row[5], row[6])
     return ActiveSearchConfiguration.model_validate(
         {
             "generation": row[0],
             "activated_at": row[1],
             "activated_by": row[2],
-            "revision": {
-                "id": row[3],
-                "configuration": row[4],
-                "created_at": row[5],
-                "created_by": row[6],
-            },
+            "revision": revision,
         }
     )
+
+
+def _parse_search_configuration_revision(
+    revision_id: object,
+    configuration: object,
+    created_at: object,
+    created_by: object,
+) -> SearchConfigurationRevision:
+    revision = SearchConfigurationRevision.model_validate(
+        {
+            "id": revision_id,
+            "configuration": configuration,
+            "created_at": created_at,
+            "created_by": created_by,
+        }
+    )
+    if search_configuration_revision_id(revision.configuration) != revision.id:
+        raise SearchConfigurationError(f"Search configuration revision is corrupt: {revision.id}")
+    return revision
 
 
 def _canonical_configuration(configuration: SearchConfiguration) -> str:
