@@ -14,7 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import ats_structural_filter, format_ats_description
-from job_finder.evaluation.models import EvaluationOutcome, EvaluationResult, evaluation_outcome
+from job_finder.evaluation.models import (
+    EvaluationOutcome,
+    EvaluationResult,
+    evaluation_failure_kind,
+    evaluation_outcome,
+)
 from job_finder.jobs.listings import JobListing
 from job_finder.jobs.scraping import detect_source, extract_company_from_url
 from job_finder.jobs.structural_filter import StructuralRejection, structural_filter
@@ -220,21 +225,18 @@ def score_evaluation_corpus(
 ) -> EvaluationCorpusReport:
     if not results:
         raise ValueError("Evaluation results cannot be empty")
-    false_positives = sum(
-        result.expected_outcome == "rejected" and result.actual_outcome == "qualified"
+    failure_kinds = tuple(
+        evaluation_failure_kind(result.expected_outcome, result.actual_outcome)
         for result in results
     )
-    false_negatives = sum(
-        result.expected_outcome == "qualified" and result.actual_outcome == "rejected"
-        for result in results
-    )
-    operational = sum(result.actual_outcome is None for result in results)
+    false_positives = failure_kinds.count("false_positive")
+    false_negatives = failure_kinds.count("false_negative")
+    operational = failure_kinds.count("operational")
     rejected_count = sum(result.expected_outcome == "rejected" for result in results)
     qualified_count = len(results) - rejected_count
-    correct = len(results) - false_positives - false_negatives - operational
     return EvaluationCorpusReport(
         result_count=len(results),
-        correct_count=correct,
+        correct_count=failure_kinds.count(None),
         false_positive_count=false_positives,
         false_negative_count=false_negatives,
         operational_failure_count=operational,

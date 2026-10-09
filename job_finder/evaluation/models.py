@@ -102,6 +102,7 @@ EvaluationResult = Annotated[
     Field(discriminator="kind"),
 ]
 EvaluationOutcome = Literal["qualified", "rejected"]
+EvaluationFailureKind = Literal["false_positive", "false_negative", "operational"]
 
 
 def evaluation_outcome(result: EvaluationResult) -> EvaluationOutcome | None:
@@ -114,6 +115,17 @@ def evaluation_outcome(result: EvaluationResult) -> EvaluationOutcome | None:
             return None
         case _:
             assert_never(result)
+
+
+def evaluation_failure_kind(
+    expected: EvaluationOutcome,
+    actual: EvaluationOutcome | None,
+) -> EvaluationFailureKind | None:
+    if actual is None:
+        return "operational"
+    if actual == expected:
+        return None
+    return "false_positive" if actual == "qualified" else "false_negative"
 
 
 @dataclass(frozen=True)
