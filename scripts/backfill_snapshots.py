@@ -22,8 +22,9 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 from job_finder.ats.client import fetch_ats_data
 from job_finder.ats.models import AtsAvailable
 from job_finder.ats.policy import detect_ats_source, format_ats_description
-from job_finder.config import BackfillSettings
+from job_finder.config import DatabaseSettings
 from job_finder.database import apply_migrations
+from job_finder.jobs.listings import THIN_BODY_THRESHOLD
 
 WORKER_COUNT = 12
 
@@ -51,8 +52,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv, namespace=_Arguments())
     dry_run = bool(arguments.dry_run)
-    settings = BackfillSettings.from_environment()
-    with psycopg.connect(settings.postgres_dsn, autocommit=True) as connection:
+    database = DatabaseSettings.from_environment()
+    with psycopg.connect(database.postgres_dsn, autocommit=True) as connection:
         applied = apply_migrations(connection)
         print(f"migrations applied: {len(applied)}", flush=True)
         rows: list[tuple[object, ...]] = connection.execute(
@@ -99,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     body_length=candidate.body_length,
                     has_compensation=candidate.has_compensation,
                     evidence=evidence,
-                    min_body_length=settings.min_body_length,
+                    min_body_length=THIN_BODY_THRESHOLD,
                 )
                 if correction is None:
                     continue
