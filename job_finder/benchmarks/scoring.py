@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import ClassVar, Literal, Self
+from typing import ClassVar, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 import job_finder.benchmarks.manifests as _benchmark_manifests
 from job_finder.benchmarks.identity import canonical_digest
 from job_finder.evaluation.models import (
+    EvaluationFailureKind,
     EvaluationOutcome,
     EvaluationResult,
+    evaluation_failure_kind,
     evaluation_outcome,
 )
 
@@ -26,12 +28,12 @@ class EvaluationTrialResult(_EvaluationModel):
     trial_index: int = Field(ge=0)
     expected_outcome: EvaluationOutcome
     actual_outcome: EvaluationOutcome | None
-    failure_kind: Literal["false_positive", "false_negative", "operational"] | None
+    failure_kind: EvaluationFailureKind | None
     reason: str
 
     @model_validator(mode="after")
     def classification_matches_outcomes(self) -> Self:
-        expected_failure = _failure_kind(self.expected_outcome, self.actual_outcome)
+        expected_failure = evaluation_failure_kind(self.expected_outcome, self.actual_outcome)
         if self.failure_kind != expected_failure:
             raise ValueError("Trial failure kind must match its expected and actual outcomes")
         return self
@@ -58,7 +60,7 @@ def score_trial(
     result: EvaluationResult,
 ) -> EvaluationTrialResult:
     actual = evaluation_outcome(result)
-    failure = _failure_kind(case.expected_outcome, actual)
+    failure = evaluation_failure_kind(case.expected_outcome, actual)
     result_id = canonical_digest(
         {"run_id": run_id, "case_position": case.position, "trial_index": trial_index}
     )
@@ -115,16 +117,6 @@ def score_results(
         false_positive_rate=_rate(false_positives, negative_trials),
         false_negative_rate=_rate(false_negatives, positive_trials),
     )
-
-
-def _failure_kind(
-    expected: EvaluationOutcome, actual: EvaluationOutcome | None
-) -> Literal["false_positive", "false_negative", "operational"] | None:
-    if actual is None:
-        return "operational"
-    if actual == expected:
-        return None
-    return "false_positive" if actual == "qualified" else "false_negative"
 
 
 def _rate(count: int, denominator: int) -> Decimal:
