@@ -53,11 +53,15 @@ from job_finder.pipeline.reevaluations import (
 from job_finder.operations.activity import (
     ActivityPage,
     ActivityQuery,
-    ActivityRun,
     load_activity_page,
 )
 from job_finder.operations.health import OperationsHealth, load_operations_snapshot
-from job_finder.operations.run_history import RunNotFound, load_pipeline_runs, load_run_detail
+from job_finder.operations.run_history import (
+    RunListItem,
+    RunNotFound,
+    load_pipeline_runs,
+    load_run_detail,
+)
 from job_finder.operations.work_history import WorkItemNotFound, load_work_item_detail
 
 
@@ -1612,7 +1616,7 @@ def test_activity_page_merges_runs_and_work_with_filters_and_pagination(
         assert defaults.hidden_no_op_count == 1
 
         run_entry = next(e for e in everything.entries if e.entry_type == "run")
-        assert isinstance(run_entry.item, ActivityRun)
+        assert isinstance(run_entry.item, RunListItem)
         assert run_entry.item.model_calls == 1
         assert run_entry.item.known_cost_usd == Decimal("0.5")
         assert run_entry.item.processing_attempts == 1

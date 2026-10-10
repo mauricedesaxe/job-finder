@@ -47,7 +47,6 @@ from job_finder.operations.activity import (
     ActivityEntry,
     ActivityPage,
     ActivityQuery,
-    ActivityRun,
     ActivityService,
     ActivityWork,
 )
@@ -66,7 +65,7 @@ from job_finder.operations.control_plane import (
     ScheduleStatus,
     ScheduleView,
 )
-from job_finder.operations.run_history import RunDetail, RunNotFound, RunsService
+from job_finder.operations.run_history import RunDetail, RunListItem, RunNotFound, RunsService
 from job_finder.operations.service import OperationsService
 from job_finder.operations.spend import (
     AnalyticsService,
@@ -1050,14 +1049,14 @@ def _activity_filter_form(params: QueryParams) -> object:
 
 
 def _activity_row(entry: ActivityEntry, *, now: datetime) -> object:
-    if isinstance(entry.item, ActivityRun):
+    if isinstance(entry.item, RunListItem):
         return _activity_run_row(entry, now=now)
     return _activity_work_row(entry, now=now)
 
 
 def _activity_run_row(entry: ActivityEntry, *, now: datetime) -> object:
     run = entry.item
-    assert isinstance(run, ActivityRun)
+    assert isinstance(run, RunListItem)
     timing = (timestamp(run.started_at, now=now),)
     if run.completed_at is not None:
         elapsed = max(0, int((run.completed_at - run.started_at).total_seconds()))
