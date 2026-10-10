@@ -18,7 +18,6 @@ from job_finder.operations._common import OperationsUnavailable, PipelineRunStat
 from job_finder.operations.activity import (
     ActivityEntry,
     ActivityQuery,
-    ActivityRun,
     ActivityWork,
     decode_activity_cursor,
     encode_activity_cursor,
@@ -230,8 +229,8 @@ def test_completed_orchestration_runs_without_work_are_idle_ticks() -> None:
     assert item(0, 1).idle_tick is False
 
 
-def _activity_run(status: PipelineRunStatus) -> ActivityRun:
-    return ActivityRun(
+def _activity_run(status: PipelineRunStatus) -> RunListItem:
+    return RunListItem(
         id=UUID(int=1),
         kind="orchestration",
         status=status,
@@ -273,20 +272,20 @@ def _activity_work(state: str, *, dismissed: bool = False) -> ActivityWork:
     ],
 )
 def test_activity_entries_map_to_one_unified_status(
-    item: ActivityRun | ActivityWork, expected: str
+    item: RunListItem | ActivityWork, expected: str
 ) -> None:
     entry = ActivityEntry(occurred_at=NOW, ref="ref", item=item)
 
     assert entry.status == expected
 
 
-def _activity_entry(item: ActivityRun | ActivityWork) -> ActivityEntry:
+def _activity_entry(item: RunListItem | ActivityWork) -> ActivityEntry:
     return ActivityEntry(occurred_at=NOW, ref="ref", item=item)
 
 
-def _productive_run() -> ActivityRun:
+def _productive_run() -> RunListItem:
     run = _activity_run("completed")
-    return ActivityRun(
+    return RunListItem(
         id=run.id,
         kind=run.kind,
         status=run.status,
@@ -312,7 +311,7 @@ def _productive_run() -> ActivityRun:
     ],
 )
 def test_activity_entries_know_whether_they_did_something(
-    item: ActivityRun | ActivityWork, expected: bool
+    item: RunListItem | ActivityWork, expected: bool
 ) -> None:
     assert _activity_entry(item).did_something is expected
 

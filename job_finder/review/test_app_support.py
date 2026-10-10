@@ -74,7 +74,6 @@ from job_finder.operations.activity import (
     ActivityEntry,
     ActivityPage,
     ActivityQuery,
-    ActivityRun,
     ActivityService,
     ActivityWork,
 )
@@ -492,19 +491,7 @@ def helper_activity_run_entry(
     return ActivityEntry(
         occurred_at=item.started_at,
         ref=str(item.id),
-        item=ActivityRun(
-            id=item.id,
-            kind=item.kind,
-            status=item.status,
-            started_at=item.started_at,
-            completed_at=item.completed_at,
-            discoveries=item.discoveries,
-            processing_attempts=item.processing_attempts,
-            processed_jobs=item.processed_jobs,
-            model_calls=item.model_calls,
-            known_cost_usd=item.known_cost_usd,
-            error_summary=item.error_summary,
-        ),
+        item=item,
     )
 
 

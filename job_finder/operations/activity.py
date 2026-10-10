@@ -17,6 +17,7 @@ from job_finder.operations._common import (
     WorkItemState,
     error_summary,
 )
+from job_finder.operations.run_history import RunListItem
 
 ActivityEntryStatus = Literal["running", "completed", "failed", "retrying", "terminal", "dismissed"]
 ActivityEntryType = Literal["run", "work"]
@@ -24,30 +25,6 @@ ActivityEntryType = Literal["run", "work"]
 ACTIVITY_STATUSES: frozenset[str] = frozenset(
     {"running", "completed", "failed", "retrying", "terminal", "dismissed"}
 )
-
-
-@dataclass(frozen=True)
-class ActivityRun:
-    id: UUID
-    kind: str
-    status: PipelineRunStatus
-    started_at: datetime
-    completed_at: datetime | None
-    discoveries: int
-    processing_attempts: int
-    processed_jobs: int
-    model_calls: int
-    known_cost_usd: Decimal
-    error_summary: str | None
-
-    @property
-    def idle_tick(self) -> bool:
-        return (
-            self.kind == "orchestration"
-            and self.status == "completed"
-            and self.discoveries == 0
-            and self.processing_attempts == 0
-        )
 
 
 @dataclass(frozen=True)
@@ -65,19 +42,19 @@ class ActivityWork:
 class ActivityEntry:
     occurred_at: datetime
     ref: str
-    item: ActivityRun | ActivityWork
+    item: RunListItem | ActivityWork
 
     @property
     def entry_type(self) -> ActivityEntryType:
-        return "run" if isinstance(self.item, ActivityRun) else "work"
+        return "run" if isinstance(self.item, RunListItem) else "work"
 
     @property
     def kind(self) -> str:
-        return self.item.kind if isinstance(self.item, ActivityRun) else "work"
+        return self.item.kind if isinstance(self.item, RunListItem) else "work"
 
     @property
     def status(self) -> ActivityEntryStatus:
-        if isinstance(self.item, ActivityRun):
+        if isinstance(self.item, RunListItem):
             return cast(ActivityEntryStatus, self.item.status)
         if self.item.dismissed:
             return "dismissed"
@@ -319,7 +296,7 @@ def _parse_activity_row(row: tuple[object, ...]) -> ActivityEntry:
     raise RuntimeError("Activity entry type is invalid")
 
 
-def _parse_activity_run(row: tuple[object, ...]) -> ActivityRun:
+def _parse_activity_run(row: tuple[object, ...]) -> RunListItem:
     run_id, kind, status, started_at, completed_at = row[1], row[2], row[3], row[4], row[5]
     if not isinstance(run_id, str) or not kind or not isinstance(started_at, datetime):
         raise RuntimeError("Pipeline run activity is invalid")
@@ -327,7 +304,7 @@ def _parse_activity_run(row: tuple[object, ...]) -> ActivityRun:
         raise RuntimeError("Pipeline run activity status is invalid")
     if completed_at is not None and not isinstance(completed_at, datetime):
         raise RuntimeError("Pipeline run activity completion is invalid")
-    return ActivityRun(
+    return RunListItem(
         id=UUID(run_id),
         kind=str(kind),
         status=cast(PipelineRunStatus, str(status)),
