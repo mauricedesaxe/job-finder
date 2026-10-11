@@ -33,11 +33,7 @@ from job_finder.mcp_tools.common import APPEND_ONLY, CAS_WRITE, READ_ONLY, McpDe
 
 
 def register_release_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
-    read_only = READ_ONLY
-    append_only = APPEND_ONLY
-    cas_write = CAS_WRITE
-
-    @mcp.tool(annotations=append_only)
+    @mcp.tool(annotations=APPEND_ONLY)
     def release_target_candidate_create(
         prompt_release_id: Annotated[PromptReleaseId, Field(pattern=r"^[0-9a-f]{64}$")],
         relevance_release_id: Annotated[
@@ -61,7 +57,7 @@ def register_release_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
         except (PromptReleaseError, RelevanceReleaseError, ValueError) as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def release_target_active_get() -> ActiveReleaseTarget:
         """Get the active release target and its CAS generation."""
         try:
@@ -70,7 +66,7 @@ def register_release_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
         except ReleaseTargetLifecycleError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def release_target_compare(
         baseline_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         candidate_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
@@ -82,7 +78,7 @@ def register_release_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
         except ValueError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=append_only)
+    @mcp.tool(annotations=APPEND_ONLY)
     def release_target_decide(
         baseline_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         candidate_run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
@@ -108,7 +104,7 @@ def register_release_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
         except ValueError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=cas_write)
+    @mcp.tool(annotations=CAS_WRITE)
     def release_target_activate(
         promotion_decision_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         expected_active_target: ReleaseTarget,

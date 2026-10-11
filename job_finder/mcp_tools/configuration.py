@@ -30,27 +30,25 @@ from job_finder.search_configuration import SearchConfiguration, SearchConfigura
 
 
 def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
-    read_only = READ_ONLY
-
     def parse_configuration(candidate: object) -> SearchConfiguration:
         validation = validate_search_configuration(candidate)
         if isinstance(validation, ConfigurationInvalid):
             raise ToolError("Search configuration is invalid; call configuration_validate")
         return validation.configuration
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_active_get() -> PublishedActiveSearchConfiguration:
         """Get the currently active published search configuration and CAS generation."""
         with dependencies.connect() as connection:
             return get_active_search_configuration(connection)
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_draft_get() -> SearchConfigurationDraft:
         """Get the mutable search configuration draft and its CAS version."""
         with dependencies.connect() as connection:
             return get_search_configuration_draft(connection)
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_validate(
         candidate: dict[str, object],
         issue_limit: Annotated[int, Field(ge=1, le=100)] = DEFAULT_RESULT_LIMIT,
@@ -58,7 +56,7 @@ def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) ->
         """Validate an untrusted configuration candidate without storing it."""
         return validate_search_configuration(candidate, issue_limit=issue_limit)
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_preview(
         configuration: dict[str, object],
         search_sample_limit: Annotated[int, Field(ge=1, le=100)] = DEFAULT_RESULT_LIMIT,
@@ -71,7 +69,7 @@ def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) ->
             prompt_summary_limit=prompt_summary_limit,
         )
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_revision_list(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
         cursor: ConfigurationRevisionCursor | None = None,
@@ -80,7 +78,7 @@ def register_configuration_tools(mcp: FastMCP, dependencies: McpDependencies) ->
         with dependencies.connect() as connection:
             return list_search_configuration_revisions(connection, limit=limit, cursor=cursor)
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def configuration_revision_get(
         revision_id: ConfigurationRevisionId,
     ) -> ConfigurationRevisionDetails:

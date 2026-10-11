@@ -26,10 +26,7 @@ from job_finder.review.feedback import (
 
 
 def register_feedback_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
-    read_only = READ_ONLY
-    append_only = APPEND_ONLY
-
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def feedback_list(
         curation: FeedbackCurationFilter = "all",
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
@@ -44,7 +41,7 @@ def register_feedback_tools(mcp: FastMCP, dependencies: McpDependencies) -> None
                 offset=offset,
             )
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def feedback_get(review_event_id: UUID) -> ReviewFeedback:
         """Get one exact feedback revision, including curation and frozen-manifest usage."""
         try:
@@ -53,7 +50,7 @@ def register_feedback_tools(mcp: FastMCP, dependencies: McpDependencies) -> None
         except ReviewFeedbackNotFound as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=append_only)
+    @mcp.tool(annotations=APPEND_ONLY)
     def feedback_curate(
         review_event_id: UUID,
         action: Literal["include", "exclude"],

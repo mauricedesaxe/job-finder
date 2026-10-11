@@ -38,11 +38,7 @@ _DEFAULT_MAX_FALSE_NEGATIVE_RATE = Decimal("0.10")
 
 
 def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> None:
-    read_only = READ_ONLY
-    append_only = APPEND_ONLY
-    provider_write = PROVIDER_WRITE
-
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def manifest_preview(
         regular_trial_count: Annotated[int, Field(gt=0)] = 1,
         critical_trial_count: Annotated[int, Field(gt=1)] = 3,
@@ -63,7 +59,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         with dependencies.connect() as connection:
             return preview_manifest(connection, policy)
 
-    @mcp.tool(annotations=append_only)
+    @mcp.tool(annotations=APPEND_ONLY)
     def manifest_create(
         idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
         regular_trial_count: Annotated[int, Field(gt=0)] = 1,
@@ -96,7 +92,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         except ManifestOperationError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def manifest_get(
         manifest_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
     ) -> ManifestSummary:
@@ -107,7 +103,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         except ManifestOperationError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def manifest_list(
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
         offset: Annotated[int, Field(ge=0)] = 0,
@@ -116,7 +112,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         with dependencies.connect() as connection:
             return list_manifests(connection, limit=limit, offset=offset)
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def evaluation_execution_get(
         execution_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
     ) -> EvaluationExecutionState:
@@ -127,7 +123,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         except ValueError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=provider_write)
+    @mcp.tool(annotations=PROVIDER_WRITE)
     def evaluation_run(
         idempotency_key: Annotated[str, Field(min_length=1, max_length=200)],
         manifest_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
@@ -151,7 +147,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         except (PromptReleaseError, RelevanceReleaseError, ValueError) as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def evaluation_run_get(
         run_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
     ) -> EvaluationRun:
@@ -162,7 +158,7 @@ def register_benchmark_tools(mcp: FastMCP, dependencies: McpDependencies) -> Non
         except ValueError as error:
             raise ToolError(str(error)) from error
 
-    @mcp.tool(annotations=read_only)
+    @mcp.tool(annotations=READ_ONLY)
     def langfuse_projection_status(
         failure_limit: Annotated[int, Field(ge=0, le=100)] = 20,
     ) -> ProjectionQueueStatus:
