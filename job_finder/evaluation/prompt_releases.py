@@ -26,6 +26,7 @@ from job_finder.evaluation.prompts import (
     TITLE_DEDUPLICATION,
     WORK_CULTURE,
     PromptDefinition,
+    PromptOutput,
     PromptPhase,
 )
 
@@ -380,8 +381,7 @@ def build_prompt_version(prompt: PromptDefinition) -> PromptVersion:
         "required": list(prompt.inputs),
         "additionalProperties": False,
     }
-    output_schema = _output_schema(prompt)
-    tool_name, tool_description = _tool(prompt)
+    output_schema, tool_name, tool_description = _output_contract(prompt.output)
     parameters: dict[str, JsonValue] = {
         "temperature": 0,
         "max_tokens": prompt.max_tokens,
@@ -493,24 +493,23 @@ def _input_names(input_schema: dict[str, JsonValue]) -> tuple[str, ...]:
     return _STRINGS.validate_python(input_schema.get("required"))
 
 
-def _output_schema(prompt: PromptDefinition) -> dict[str, JsonValue]:
-    match prompt.output:
+def _output_contract(output: PromptOutput) -> tuple[dict[str, JsonValue], str, str]:
+    match output:
         case "evaluation":
-            return EVALUATION_OUTPUT_SCHEMA
+            return (
+                EVALUATION_OUTPUT_SCHEMA,
+                "evaluate_job",
+                "Submit the evaluation result for a job listing",
+            )
         case "enrichment":
-            return ENRICHMENT_OUTPUT_SCHEMA
-        case "deduplication":
-            return DEDUPLICATION_OUTPUT_SCHEMA
-
-
-def _tool(prompt: PromptDefinition) -> tuple[str, str]:
-    match prompt.output:
-        case "evaluation":
-            return "evaluate_job", "Submit the evaluation result for a job listing"
-        case "enrichment":
-            return "enrich_job", "Submit the normalized and cleaned job data"
+            return (
+                ENRICHMENT_OUTPUT_SCHEMA,
+                "enrich_job",
+                "Submit the normalized and cleaned job data",
+            )
         case "deduplication":
             return (
+                DEDUPLICATION_OUTPUT_SCHEMA,
                 "check_duplicate",
                 "Decide whether the new job title refers to the same role as any existing title at the same company",
             )
