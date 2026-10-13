@@ -10,7 +10,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from job_finder.database import Connection, ConnectionFactory
-from job_finder.review.queue import ReviewDecision, ReviewJob, ReviewOutcome
+from job_finder.review.queue import (
+    ReviewDecision,
+    ReviewJob,
+    ReviewOutcome,
+    review_job_from_storage,
+)
 
 FeedbackCurationFilter = Literal["all", "uncurated", "included", "excluded"]
 TargetProfile = Literal[
@@ -153,7 +158,7 @@ def list_review_feedback(
         raise ValueError("Feedback offset cannot be negative")
     action = {"included": "include", "excluded": "exclude"}.get(curation)
     rows = connection.execute(
-        _FEEDBACK_QUERY
+        _FEEDBACK_SUMMARY_QUERY
         + """
         WHERE NOT EXISTS (
           SELECT 1 FROM review_events newer
@@ -168,7 +173,7 @@ def list_review_feedback(
         """,
         (curation, curation, action, limit + 1, offset),
     ).fetchall()
-    items = tuple(_summarize_review_feedback(_parse_review_feedback(row)) for row in rows[:limit])
+    items = tuple(_parse_review_feedback_summary(row) for row in rows[:limit])
     return ReviewFeedbackPage(
         items=items,
         next_offset=offset + limit if len(rows) > limit else None,
@@ -292,6 +297,25 @@ def record_review(connection: Connection, review: ReviewSubmission) -> ReviewSub
         return ReviewSaved(review_event_id=event_id)
 
 
+_FEEDBACK_SUMMARY_QUERY = """
+    WITH current_curations AS (
+      SELECT DISTINCT ON (review_event_id) *
+      FROM evaluation_case_curations
+      ORDER BY review_event_id, created_at DESC, id DESC
+    )
+    SELECT e.id, e.decision, e.target_profile, e.primary_reason, e.created_at,
+           d.outcome, s.title, s.company,
+           c.id, c.action, c.expected_outcome, c.critical,
+           (SELECT count(*) FROM evaluation_manifest_cases mc
+            WHERE mc.review_event_id = e.id)
+    FROM review_events e
+    JOIN review_items i ON i.id = e.review_item_id
+    JOIN evaluation_decisions d ON d.id = i.evaluation_id
+    JOIN job_snapshots s ON s.id = d.snapshot_id
+    LEFT JOIN current_curations c ON c.review_event_id = e.id
+    """
+
+
 _FEEDBACK_QUERY = """
     WITH current_curations AS (
       SELECT DISTINCT ON (review_event_id) *
@@ -324,25 +348,21 @@ _FEEDBACK_QUERY = """
 
 
 def _parse_review_feedback(row: tuple[object, ...]) -> ReviewFeedback:
-    job: dict[str, object] = {
-        "title": row[14],
-        "company": row[15],
-        "url": row[16],
-        "source": row[17],
-        "description": row[18],
-        "location": row[19],
-        "keywords": row[20],
-        "date_posted": row[21],
-    }
-    compensation = row[22:27]
-    if any(value is not None for value in compensation):
-        job["compensation"] = {
-            "minimum": compensation[0],
-            "maximum": compensation[1],
-            "currency": compensation[2],
-            "period": compensation[3],
-            "source": compensation[4],
-        }
+    job = review_job_from_storage(
+        title=row[14],
+        company=row[15],
+        url=row[16],
+        source=row[17],
+        description=row[18],
+        location=row[19],
+        keywords=row[20],
+        date_posted=row[21],
+        compensation_minimum=row[22],
+        compensation_maximum=row[23],
+        compensation_currency=row[24],
+        compensation_period=row[25],
+        compensation_source=row[26],
+    )
     curation: dict[str, object] | None = None
     if row[27] is not None:
         curation = {
@@ -377,27 +397,27 @@ def _parse_review_feedback(row: tuple[object, ...]) -> ReviewFeedback:
     )
 
 
-def _summarize_review_feedback(feedback: ReviewFeedback) -> ReviewFeedbackSummary:
-    curation = None
-    if feedback.curation is not None:
+def _parse_review_feedback_summary(row: tuple[object, ...]) -> ReviewFeedbackSummary:
+    curation: dict[str, object] | None = None
+    if row[8] is not None:
         curation = {
-            "id": feedback.curation.id,
-            "action": feedback.curation.action,
-            "expected_outcome": feedback.curation.expected_outcome,
-            "critical": feedback.curation.critical,
+            "id": row[8],
+            "action": row[9],
+            "expected_outcome": row[10],
+            "critical": row[11],
         }
     return ReviewFeedbackSummary.model_validate(
         {
-            "review_event_id": feedback.review_event_id,
-            "decision": feedback.decision,
-            "target_profile": feedback.target_profile,
-            "primary_reason": feedback.primary_reason,
-            "created_at": feedback.created_at,
-            "original_outcome": feedback.original_outcome,
-            "title": feedback.job.title,
-            "company": feedback.job.company,
+            "review_event_id": row[0],
+            "decision": row[1],
+            "target_profile": row[2],
+            "primary_reason": row[3],
+            "created_at": row[4],
+            "original_outcome": row[5],
+            "title": row[6],
+            "company": row[7],
             "curation": curation,
-            "frozen_manifest_count": feedback.frozen_manifest_count,
+            "frozen_manifest_count": row[12],
         }
     )
 

@@ -41,6 +41,46 @@ class Compensation(_ReviewQueueModel):
     source: str | None = None
 
 
+def review_job_from_storage(
+    *,
+    title: object,
+    company: object,
+    url: object,
+    source: object,
+    description: object,
+    location: object,
+    keywords: object,
+    date_posted: object,
+    compensation_minimum: object = None,
+    compensation_maximum: object = None,
+    compensation_currency: object = None,
+    compensation_period: object = None,
+    compensation_source: object = None,
+) -> ReviewJob:
+    compensation = {
+        "minimum": compensation_minimum,
+        "maximum": compensation_maximum,
+        "currency": compensation_currency,
+        "period": compensation_period,
+        "source": compensation_source,
+    }
+    return ReviewJob.model_validate(
+        {
+            "title": title,
+            "company": company,
+            "url": url,
+            "source": source,
+            "description": description,
+            "location": location,
+            "keywords": keywords,
+            "date_posted": date_posted,
+            "compensation": compensation
+            if any(value is not None for value in compensation.values())
+            else None,
+        }
+    )
+
+
 class ReviewItem(_ReviewQueueModel):
     review_day: date
     id: UUID
@@ -262,26 +302,22 @@ def deterministic_rejected_sample(
 def _parse_review_item(
     row: tuple[object, ...], event: tuple[object, ...] | None = None
 ) -> ReviewItem:
-    job: dict[str, object] = {
-        "title": row[9],
-        "company": row[10],
-        "url": row[11],
-        "source": row[12],
-        "description": row[13],
-        "location": row[14],
-        "keywords": row[15],
-        "date_posted": row[16],
-    }
-    if event is None:
-        compensation_fields = row[17:22]
-        if any(value is not None for value in compensation_fields):
-            job["compensation"] = {
-                "minimum": compensation_fields[0],
-                "maximum": compensation_fields[1],
-                "currency": compensation_fields[2],
-                "period": compensation_fields[3],
-                "source": compensation_fields[4],
-            }
+    compensation = row[17:22] if event is None else (None,) * 5
+    job = review_job_from_storage(
+        title=row[9],
+        company=row[10],
+        url=row[11],
+        source=row[12],
+        description=row[13],
+        location=row[14],
+        keywords=row[15],
+        date_posted=row[16],
+        compensation_minimum=compensation[0],
+        compensation_maximum=compensation[1],
+        compensation_currency=compensation[2],
+        compensation_period=compensation[3],
+        compensation_source=compensation[4],
+    )
     fields: dict[str, object] = {
         "review_day": row[0],
         "id": row[1],

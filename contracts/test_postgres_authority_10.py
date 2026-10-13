@@ -233,8 +233,22 @@ def test_curates_immutable_feedback_into_a_repeated_trial_manifest(
             qualified_feedback.review_event_id,
         )
         frozen_feedback = load_review_feedback(connection, qualified_feedback.review_event_id)
-        assert frozen_feedback.frozen_manifest_count == 2
+        summary = excluded.items[0]
+        assert summary.decision == frozen_feedback.decision
+        assert summary.target_profile == frozen_feedback.target_profile
+        assert summary.primary_reason == frozen_feedback.primary_reason
+        assert summary.created_at == frozen_feedback.created_at
+        assert summary.original_outcome == frozen_feedback.original_outcome
+        assert summary.title == frozen_feedback.job.title
+        assert summary.company == frozen_feedback.job.company
+        assert summary.curation is not None
         assert frozen_feedback.curation is not None
+        assert summary.curation.id == frozen_feedback.curation.id
+        assert summary.curation.action == frozen_feedback.curation.action
+        assert summary.curation.expected_outcome == frozen_feedback.curation.expected_outcome
+        assert summary.curation.critical == frozen_feedback.curation.critical
+        assert summary.frozen_manifest_count == frozen_feedback.frozen_manifest_count
+        assert frozen_feedback.frozen_manifest_count == 2
         assert frozen_feedback.curation.action == "exclude"
         projection_status = load_projection_queue_status(connection)
         assert projection_status.pending_count >= 3
