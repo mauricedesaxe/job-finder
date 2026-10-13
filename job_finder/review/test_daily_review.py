@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from job_finder.review.feedback import ReviewSubmission
@@ -9,6 +10,7 @@ from job_finder.review.queue import (
     ReviewJob,
     ReviewQueue,
     deterministic_rejected_sample,
+    review_job_from_storage,
 )
 
 
@@ -73,6 +75,41 @@ def test_treats_a_blank_feedback_note_as_absent() -> None:
     )
 
     assert review.note is None
+
+
+def test_reconstructs_review_job_compensation_from_storage_fields() -> None:
+    job = review_job_from_storage(
+        title="Applied AI Engineer",
+        company="Acme",
+        url="https://example.com/jobs/1",
+        source="other",
+        description="Build useful tools.",
+        location="Remote",
+        keywords=("python",),
+        date_posted=date(2026, 9, 9),
+        compensation_minimum=Decimal("120000"),
+        compensation_currency="USD",
+    )
+
+    assert job.compensation is not None
+    assert job.compensation.minimum == Decimal("120000")
+    assert job.compensation.maximum is None
+    assert job.compensation.currency == "USD"
+
+
+def test_omits_review_job_compensation_when_all_storage_fields_are_null() -> None:
+    job = review_job_from_storage(
+        title="Applied AI Engineer",
+        company="Acme",
+        url="https://example.com/jobs/1",
+        source="other",
+        description="Build useful tools.",
+        location="Remote",
+        keywords=("python",),
+        date_posted=None,
+    )
+
+    assert job.compensation is None
 
 
 def _item(review_day: date, value: int) -> ReviewItem:
