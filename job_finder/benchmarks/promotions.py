@@ -176,6 +176,12 @@ def load_promotion_decision(
     ).fetchone()
     if row is None:
         return None
+    policy = _benchmark_manifests.load_manifest(connection, str(row[1])).policy
+    baseline_metrics = _scoring.EvaluationMetrics.model_validate(row[11])
+    candidate_metrics = _scoring.EvaluationMetrics.model_validate(row[12])
+    eligibility_failures = _comparisons.promotion_eligibility_failures(
+        policy, baseline_metrics, candidate_metrics
+    )
     return PromptPromotionDecision.model_validate(
         {
             "id": row[0],
@@ -193,16 +199,8 @@ def load_promotion_decision(
             "comparison_id": row[8],
             "decision": row[9],
             "reason": row[10],
-            "eligible": not _comparisons.promotion_eligibility_failures(
-                _benchmark_manifests.load_manifest(connection, str(row[1])).policy,
-                _scoring.EvaluationMetrics.model_validate(row[11]),
-                _scoring.EvaluationMetrics.model_validate(row[12]),
-            ),
-            "eligibility_failures": _comparisons.promotion_eligibility_failures(
-                _benchmark_manifests.load_manifest(connection, str(row[1])).policy,
-                _scoring.EvaluationMetrics.model_validate(row[11]),
-                _scoring.EvaluationMetrics.model_validate(row[12]),
-            ),
+            "eligible": not eligibility_failures,
+            "eligibility_failures": eligibility_failures,
             "actor": row[13],
             "created_at": row[14],
         }
