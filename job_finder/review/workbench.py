@@ -48,7 +48,7 @@ from job_finder.review.queue import (
     ReviewQueueLoader,
 )
 from job_finder.web.principal import actor_email, current_account
-from job_finder.web.security import csrf_token, form_text, valid_csrf
+from job_finder.web.security import csrf_token, form_text, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
 
 _logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ class ReviewWorkbench:
         self, review_item_id: str, request: Request
     ) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return _conflict_response("This review form expired. Reload the page.")
         try:
             item_id = UUID(review_item_id)

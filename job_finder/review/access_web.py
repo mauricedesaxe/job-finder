@@ -68,7 +68,7 @@ from job_finder.review.owner_access import (
 from job_finder.web.security import (
     ensure_csrf_token,
     form_text,
-    valid_csrf,
+    verified_csrf_token,
 )
 from job_finder.web.principal import actor_email
 from job_finder.web.shell import (
@@ -143,7 +143,7 @@ def register_access_routes(
     @app.route("/setup", methods=["POST"], name="create_review_app_setup_submit")
     async def setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return HTMLResponse(
                 document(_setup_content("", "This setup form expired. Reload and try again.")),
                 status_code=403,
@@ -228,7 +228,7 @@ def register_access_routes(
     @app.route("/setup/providers", methods=["POST"], name="create_review_app_provider_setup_submit")
     async def provider_setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response(
                 "Provider setup failed",
                 "This setup form expired. Reload and try again.",
@@ -309,7 +309,7 @@ def register_access_routes(
     )
     async def provider_setup_continue(request: Request) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response(
                 "Provider setup failed",
                 "This setup form expired. Reload and try again.",
@@ -372,7 +372,7 @@ def register_access_routes(
     @app.route("/setup/budget", methods=["POST"], name="create_review_app_budget_setup_submit")
     async def budget_setup_submit(request: Request) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response(
                 "Budget setup failed",
                 "This setup form expired. Reload and try again.",
@@ -466,7 +466,7 @@ def register_access_routes(
                 status_code=503,
             )
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response(
                 "Test search was not started", "Reload the page and try again.", status_code=403
             )
@@ -521,7 +521,7 @@ async def _submit_login(
     login_attempt_lock: Lock,
 ) -> HTMLResponse | RedirectResponse:
     form = await request.form()
-    if not valid_csrf(request, form_text(form, "csrf_token")):
+    if verified_csrf_token(request, form) is None:
         return state_response(
             "Sign in failed", "This sign-in form expired. Reload and try again.", status_code=403
         )
@@ -597,7 +597,7 @@ async def _submit_logout(
     request: Request, accounts: AccountService
 ) -> HTMLResponse | RedirectResponse:
     form = await request.form()
-    if not valid_csrf(request, form_text(form, "csrf_token")):
+    if verified_csrf_token(request, form) is None:
         return state_response(
             "Sign out failed",
             "Reload the page and try again.",

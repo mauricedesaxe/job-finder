@@ -33,7 +33,7 @@ from job_finder.review.accounts import Account, AccountRole, AccountService, Acc
 from job_finder.review.owner_access import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from job_finder.web.assets import static_url
 from job_finder.web.principal import current_account
-from job_finder.web.security import ensure_csrf_token, form_text, valid_csrf
+from job_finder.web.security import ensure_csrf_token, form_text, verified_csrf_token
 from job_finder.web.shell import document, sidebar_page, state_response
 
 
@@ -71,7 +71,7 @@ def register_member_routes(app: FastHTML, *, accounts: AccountService) -> None:
     @app.route("/members/invite", methods=["POST"], name="member_invite_submit")
     async def invite_submit(request: Request) -> HTMLResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response("Invite failed", "Reload and try again.", status_code=403)
         actor = current_account(request)
         preset = _preset(form_text(form, "preset"))
@@ -93,7 +93,7 @@ def register_member_routes(app: FastHTML, *, accounts: AccountService) -> None:
     @app.route("/members/{member_id}", methods=["POST"], name="member_update")
     async def member_update(request: Request, member_id: str) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response("Change failed", "Reload and try again.", status_code=403)
         actor = current_account(request)
         try:
@@ -121,7 +121,7 @@ def register_member_routes(app: FastHTML, *, accounts: AccountService) -> None:
     @app.route("/members/{member_id}/reset", methods=["POST"], name="member_reset_issue")
     async def reset_issue(request: Request, member_id: str) -> HTMLResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response("Reset failed", "Reload and try again.", status_code=403)
         actor = current_account(request)
         try:
@@ -142,7 +142,7 @@ def _register_account_link_routes(app: FastHTML, accounts: AccountService) -> No
     @app.route("/invite/{token}", methods=["POST"], name="member_accept_invite_submit")
     async def accept_invite_submit(request: Request, token: str) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response("Invitation failed", "Reload and try again.", status_code=403)
         password = form_text(form, "password")
         if password != form_text(form, "password_confirmation"):
@@ -170,7 +170,7 @@ def _register_account_link_routes(app: FastHTML, accounts: AccountService) -> No
     @app.route("/reset/{token}", methods=["POST"], name="member_accept_reset_submit")
     async def accept_reset_submit(request: Request, token: str) -> HTMLResponse | RedirectResponse:
         form = await request.form()
-        if not valid_csrf(request, form_text(form, "csrf_token")):
+        if verified_csrf_token(request, form) is None:
             return state_response("Reset failed", "Reload and try again.", status_code=403)
         password = form_text(form, "password")
         if password != form_text(form, "password_confirmation"):
