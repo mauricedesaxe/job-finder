@@ -157,7 +157,7 @@ def create_onboarding_test_search(
             "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
             ("onboarding_test_search", command.idempotency_key),
         )
-        existing = _load_request(connection, command.idempotency_key)
+        existing = load_onboarding_test_search(connection, command.idempotency_key)
         if existing is not None:
             if isinstance(existing, SplitOnboardingTestSearchRequest):
                 if existing.qualification_target_id != command.candidate_target_id:
@@ -183,7 +183,7 @@ def create_onboarding_test_search(
             _insert_split_request(connection, command, reservation_key, run_id, admission, limits)
         else:
             _insert_legacy_request(connection, command, reservation_key, run_id, admission, limits)
-        stored = _load_request(connection, command.idempotency_key)
+        stored = load_onboarding_test_search(connection, command.idempotency_key)
         if stored is None:
             raise RuntimeError("Created onboarding test search request is missing")
         return OnboardingTestSearchAccepted(replayed=False, request=stored)
@@ -347,7 +347,7 @@ def claim_next_onboarding_test_search(
         ).fetchone()
     if row is None:
         return None
-    stored = _load_request(connection, str(row[0]))
+    stored = load_onboarding_test_search(connection, str(row[0]))
     if stored is None:
         raise RuntimeError("Claimed onboarding test search request is missing")
     return stored
@@ -389,12 +389,6 @@ def fail_onboarding_test_search(
         error_code=error_code,
         error_reason=error_reason,
     )
-
-
-def load_onboarding_test_search(
-    connection: Connection, idempotency_key: str
-) -> OnboardingRequest | None:
-    return _load_request(connection, idempotency_key)
 
 
 def renew_onboarding_test_search_lease(
@@ -702,13 +696,15 @@ def _finish_onboarding_test_search(
         ).fetchone()
     if row is None:
         return None
-    stored = _load_request(connection, str(row[0]))
+    stored = load_onboarding_test_search(connection, str(row[0]))
     if stored is None:
         raise RuntimeError("Finished onboarding test search request is missing")
     return stored
 
 
-def _load_request(connection: Connection, idempotency_key: str) -> OnboardingRequest | None:
+def load_onboarding_test_search(
+    connection: Connection, idempotency_key: str
+) -> OnboardingRequest | None:
     row = connection.execute(
         """
         SELECT idempotency_key, run_id, state, configuration_revision_id,
