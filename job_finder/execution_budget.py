@@ -140,6 +140,27 @@ class BudgetSetupService:
     save: Callable[[int, Decimal, Decimal, int, str, datetime], BudgetSaveResult]
 
 
+@dataclass(frozen=True, slots=True)
+class _CombinedExecutionAuthority:
+    configuration_revision_id: SearchConfigurationRevisionId
+    configuration: SearchConfiguration
+    target: ReleaseTarget
+    release_generation: int | None
+    prompt_release: PromptRelease
+    relevance_release: RelevanceRelease
+
+
+@dataclass(frozen=True, slots=True)
+class _SplitExecutionAuthority:
+    acquisition_policy_revision_id: AcquisitionPolicyRevisionId
+    configuration: SearchQuerySource
+    acquisition_generation: int
+    qualification_target_id: QualificationTargetId
+    qualification_generation: int
+    prompt_release: PromptRelease
+    relevance_release: RelevanceRelease
+
+
 def estimate_execution(
     configuration: SearchQuerySource,
     prompt_release: PromptRelease,
@@ -376,11 +397,13 @@ def _admit_execution(
     ).fetchone()
     if policy_row is None:
         return ExecutionBlocked(reason="budget_not_configured")
-    active_legacy = None
+    active_combined = None
     active_split = None
     if artifact_path is None:
-        active_legacy = _load_active_execution(connection)
-        _, configuration, _, _, prompt_release, relevance_release = active_legacy
+        active_combined = _load_active_combined_execution(connection)
+        configuration = active_combined.configuration
+        prompt_release = active_combined.prompt_release
+        relevance_release = active_combined.relevance_release
     else:
         if candidate_required and candidate_target_id is None:
             return ExecutionBlocked(reason="qualification_candidate_required")
@@ -391,7 +414,9 @@ def _admit_execution(
         )
         if active_split is None:
             return ExecutionBlocked(reason="qualification_target_not_active")
-        _, configuration, _, _, _, prompt_release, relevance_release = active_split
+        configuration = active_split.configuration
+        prompt_release = active_split.prompt_release
+        relevance_release = active_split.relevance_release
     estimate = estimate_execution(
         configuration,
         prompt_release,
@@ -418,15 +443,6 @@ def _admit_execution(
     if consumed + reservation > monthly_limit:
         return ExecutionBlocked(reason="monthly_budget_exhausted")
     if active_split is not None:
-        (
-            acquisition_policy_revision_id,
-            _,
-            acquisition_generation,
-            qualification_target_id,
-            qualification_generation,
-            _,
-            _,
-        ) = active_split
         _ = connection.execute(
             """
             INSERT INTO execution_budget_reservations (
@@ -445,10 +461,10 @@ def _admit_execution(
                 period_start,
                 reservation,
                 policy_row[3],
-                acquisition_policy_revision_id,
-                qualification_target_id,
-                acquisition_generation,
-                qualification_generation,
+                active_split.acquisition_policy_revision_id,
+                active_split.qualification_target_id,
+                active_split.acquisition_generation,
+                active_split.qualification_generation,
                 estimate.search_queries,
                 estimate.logical_model_calls_per_job,
                 estimate.maximum_provider_attempts,
@@ -457,17 +473,16 @@ def _admit_execution(
         )
         return SplitExecutionAdmitted(
             max_jobs=cast(int, policy_row[3]),
-            acquisition_policy_revision_id=acquisition_policy_revision_id,
-            qualification_target_id=qualification_target_id,
-            acquisition_generation=acquisition_generation,
-            qualification_generation=qualification_generation,
+            acquisition_policy_revision_id=active_split.acquisition_policy_revision_id,
+            qualification_target_id=active_split.qualification_target_id,
+            acquisition_generation=active_split.acquisition_generation,
+            qualification_generation=active_split.qualification_generation,
             budget_policy_version=cast(int, policy_row[0]),
             run_allowance_usd=reservation,
             estimate=estimate,
         )
-    if active_legacy is None:
-        raise RuntimeError("Legacy execution authority was not loaded")
-    configuration_revision_id, _, target, release_generation, _, _ = active_legacy
+    if active_combined is None:
+        raise RuntimeError("Combined execution authority was not loaded")
     _ = connection.execute(
         """
         INSERT INTO execution_budget_reservations (
@@ -485,10 +500,10 @@ def _admit_execution(
             period_start,
             reservation,
             policy_row[3],
-            configuration_revision_id,
-            target.prompt_release_id,
-            target.relevance_release_id,
-            release_generation,
+            active_combined.configuration_revision_id,
+            active_combined.target.prompt_release_id,
+            active_combined.target.relevance_release_id,
+            active_combined.release_generation,
             estimate.search_queries,
             estimate.logical_model_calls_per_job,
             estimate.maximum_provider_attempts,
@@ -497,9 +512,9 @@ def _admit_execution(
     )
     return ExecutionAdmitted(
         max_jobs=cast(int, policy_row[3]),
-        configuration_revision_id=configuration_revision_id,
-        target=target,
-        release_generation=release_generation,
+        configuration_revision_id=active_combined.configuration_revision_id,
+        target=active_combined.target,
+        release_generation=active_combined.release_generation,
         budget_policy_version=cast(int, policy_row[0]),
         run_allowance_usd=reservation,
         estimate=estimate,
@@ -507,25 +522,18 @@ def _admit_execution(
 
 
 def _estimate_active_execution(connection: Connection, max_jobs: int) -> ExecutionEstimate:
-    _, configuration, _, _, prompt_release, relevance_release = _load_active_execution(connection)
+    authority = _load_active_combined_execution(connection)
     return estimate_execution(
-        configuration,
-        prompt_release,
-        relevance_release.policy,
+        authority.configuration,
+        authority.prompt_release,
+        authority.relevance_release.policy,
         max_jobs=max_jobs,
     )
 
 
-def _load_active_execution(
+def _load_active_combined_execution(
     connection: Connection,
-) -> tuple[
-    SearchConfigurationRevisionId,
-    SearchConfiguration,
-    ReleaseTarget,
-    int,
-    PromptRelease,
-    RelevanceRelease,
-]:
+) -> _CombinedExecutionAuthority:
     row = connection.execute(
         """
         SELECT configuration.revision_id,
@@ -547,30 +555,19 @@ def _load_active_execution(
         connection, configuration_revision_id
     ).configuration
     prompt_release, relevance_release = load_release_target(connection, target)
-    return (
-        configuration_revision_id,
-        configuration,
-        target,
-        cast(int, row[3]),
-        prompt_release,
-        relevance_release,
+    return _CombinedExecutionAuthority(
+        configuration_revision_id=configuration_revision_id,
+        configuration=configuration,
+        target=target,
+        release_generation=cast(int, row[3]),
+        prompt_release=prompt_release,
+        relevance_release=relevance_release,
     )
 
 
 def _load_active_split_execution(
     connection: Connection, artifact_path: Path
-) -> (
-    tuple[
-        AcquisitionPolicyRevisionId,
-        SearchQuerySource,
-        int,
-        QualificationTargetId,
-        int,
-        PromptRelease,
-        RelevanceRelease,
-    ]
-    | None
-):
+) -> _SplitExecutionAuthority | None:
     row = connection.execute(
         """
         SELECT acquisition.revision_id, acquisition.generation,
@@ -590,28 +587,20 @@ def _load_active_split_execution(
     policy = load_acquisition_policy_revision(connection, acquisition_id).policy
     compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
     relevance = compiled.target.relevance
-    return (
-        acquisition_id,
-        policy,
-        cast(int, row[1]),
-        target_id,
-        cast(int, row[3]),
-        compiled.prompt_release,
-        load_relevance_release(connection, relevance.relevance_release_id),
+    return _SplitExecutionAuthority(
+        acquisition_policy_revision_id=acquisition_id,
+        configuration=policy,
+        acquisition_generation=cast(int, row[1]),
+        qualification_target_id=target_id,
+        qualification_generation=cast(int, row[3]),
+        prompt_release=compiled.prompt_release,
+        relevance_release=load_relevance_release(connection, relevance.relevance_release_id),
     )
 
 
 def _load_candidate_split_execution(
     connection: Connection, target_id: QualificationTargetId, artifact_path: Path
-) -> tuple[
-    AcquisitionPolicyRevisionId,
-    SearchQuerySource,
-    int,
-    QualificationTargetId,
-    int,
-    PromptRelease,
-    RelevanceRelease,
-]:
+) -> _SplitExecutionAuthority:
     row = connection.execute(
         """
         SELECT revision_id, generation FROM active_acquisition_policy
@@ -623,14 +612,16 @@ def _load_candidate_split_execution(
     acquisition_id = AcquisitionPolicyRevisionId(str(row[0]))
     policy = load_acquisition_policy_revision(connection, acquisition_id).policy
     compiled = load_compiled_qualification_target(connection, target_id, artifact_path)
-    return (
-        acquisition_id,
-        policy,
-        cast(int, row[1]),
-        target_id,
-        0,
-        compiled.prompt_release,
-        load_relevance_release(connection, compiled.target.relevance.relevance_release_id),
+    return _SplitExecutionAuthority(
+        acquisition_policy_revision_id=acquisition_id,
+        configuration=policy,
+        acquisition_generation=cast(int, row[1]),
+        qualification_target_id=target_id,
+        qualification_generation=0,
+        prompt_release=compiled.prompt_release,
+        relevance_release=load_relevance_release(
+            connection, compiled.target.relevance.relevance_release_id
+        ),
     )
 
 
@@ -710,9 +701,7 @@ def _legacy_admission(
         (idempotency_key,),
     ).fetchone()
     if run is None:
-        configuration_revision_id, configuration, target, generation, prompt, relevance = (
-            _load_active_execution(connection)
-        )
+        authority = _load_active_combined_execution(connection)
         authority_kind = "pinned"
     else:
         configuration_revision_id = SearchConfigurationRevisionId(str(run[0]))
@@ -724,12 +713,19 @@ def _legacy_admission(
             relevance_release_id=RelevanceReleaseId(str(run[2])),
         )
         prompt, relevance = load_release_target(connection, target)
-        generation = None
+        authority = _CombinedExecutionAuthority(
+            configuration_revision_id=configuration_revision_id,
+            configuration=configuration,
+            target=target,
+            release_generation=None,
+            prompt_release=prompt,
+            relevance_release=relevance,
+        )
         authority_kind = "adopted"
     estimate = estimate_execution(
-        configuration,
-        prompt,
-        relevance.policy,
+        authority.configuration,
+        authority.prompt_release,
+        authority.relevance_release.policy,
         max_jobs=max_jobs,
     )
     changed = connection.execute(
@@ -743,10 +739,10 @@ def _legacy_admission(
         """,
         (
             authority_kind,
-            configuration_revision_id,
-            target.prompt_release_id,
-            target.relevance_release_id,
-            generation,
+            authority.configuration_revision_id,
+            authority.target.prompt_release_id,
+            authority.target.relevance_release_id,
+            authority.release_generation,
             estimate.search_queries,
             estimate.logical_model_calls_per_job,
             estimate.maximum_provider_attempts,
@@ -757,9 +753,9 @@ def _legacy_admission(
         raise RuntimeError("Legacy execution authority could not be adopted")
     return ExecutionAdmitted(
         max_jobs=max_jobs,
-        configuration_revision_id=configuration_revision_id,
-        target=target,
-        release_generation=generation,
+        configuration_revision_id=authority.configuration_revision_id,
+        target=authority.target,
+        release_generation=authority.release_generation,
         budget_policy_version=budget_policy_version,
         run_allowance_usd=run_allowance_usd,
         estimate=estimate,
