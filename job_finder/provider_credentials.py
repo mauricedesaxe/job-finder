@@ -17,9 +17,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from job_finder.database import Connection, ConnectionFactory
-from job_finder.discovery.jina import JinaReaderEnvelope, JinaSearchEnvelope
-from job_finder.evaluation.jev import JevSystemOneResponse
-from job_finder.evaluation.openrouter import OpenRouterCompletion
+from job_finder.discovery.jina import READER_URL, SEARCH_URL, JinaReaderEnvelope, JinaSearchEnvelope
+from job_finder.evaluation.jev import JEV_MODEL, JEV_SYSTEM_ONE_URL, JevSystemOneResponse
+from job_finder.evaluation.openrouter import (
+    OPENROUTER_CHAT_COMPLETIONS_URL,
+    OpenRouterCompletion,
+)
 from job_finder.review.owner_access import OnboardingStage, OwnerAccessState
 
 _logger = logging.getLogger(__name__)
@@ -422,10 +425,10 @@ def resolve_execution_provider_credentials(
 
 def production_provider_validators(
     *,
-    jina_search_url: str = "https://s.jina.ai/",
-    jina_reader_url: str = "https://r.jina.ai/",
-    openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions",
-    typesafe_url: str = "https://api.typesafe.ai/v1/systemone",
+    jina_search_url: str = SEARCH_URL,
+    jina_reader_url: str = READER_URL,
+    openrouter_url: str = OPENROUTER_CHAT_COMPLETIONS_URL,
+    typesafe_url: str = JEV_SYSTEM_ONE_URL,
 ) -> Mapping[ProviderKind, ProviderValidator]:
     def jina(secret: SecretStr) -> ProviderValidation:
         search, failure = _provider_json_request(
@@ -518,7 +521,7 @@ def production_provider_validators(
             provider="Typesafe",
             body={
                 "state": "Provider capability validation.",
-                "model": "jev-1.13.0",
+                "model": JEV_MODEL,
                 "questions": {
                     "validation": {
                         "type": "noul",
